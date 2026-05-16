@@ -1,0 +1,42 @@
+{
+  "name": "erlangshen",
+  "version": "0.1.0",
+  "description": "二郎神 - 全知全能的AI投资智能体",
+  "keywords": [
+    "investment",
+    "ai-agent",
+    "finance",
+    "trading",
+    "macro",
+    "portfolio"
+  ],
+  "author": "xiaoerdata",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xiaoerdata/xiaoer-erlangshen.git"
+  },
+  "homepage": "https://github.com/xiaoerdata/xiaoer-erlangshen",
+  "engines": {
+    "node": ">=16.0.0",
+    "python": ">=3.9"
+  },
+  "bin": {
+    "erlangshen": "./bin/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "preuninstall": "node scripts/preuninstall.js"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1",
+    "prompts": "^2.4.2",
+    "boxen": "^5.1.2"
+  }
+}

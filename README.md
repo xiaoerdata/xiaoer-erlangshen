@@ -1,6 +1,6 @@
-# 小二嘎 (小二嘎) CLI
+# 二郎神 (Erlangshen) - AI投资智能体
 
-基于 Claude Code 架构的投资分析智能体 CLI 工具。
+全知全能的AI投资智能体，支持全资产多策略分析。
 
 ## 功能特性
 
@@ -57,9 +57,24 @@ erlangshen/
 
 ## 安装
 
+### npm 安装 (推荐)
+
 ```bash
-# 克隆或下载项目
-cd ~/.openclaw-agent-06/workspace/erlangshen
+# 全局安装
+npm install -g erlangshen
+
+# 安装完成后会自动：
+# 1. 检查 Python 3.9+
+# 2. 安装 Python 依赖
+# 3. 创建配置目录 ~/.erlangshen/
+```
+
+### 手动安装
+
+```bash
+# 克隆项目
+git clone https://github.com/xiaoerdata/xiaoer-erlangshen.git
+cd xiaoer-erlangshen
 
 # 安装依赖
 pip install -r requirements.txt
@@ -68,10 +83,29 @@ pip install -r requirements.txt
 chmod +x bin/erlangshen
 
 # 链接到 PATH (可选)
-ln -s ~/.openclaw-agent-06/workspace/erlangshen/bin/erlangshen /usr/local/bin/erlangshen
+ln -s $(pwd)/bin/erlangshen /usr/local/bin/erlangshen
 ```
 
 ## 配置
+
+编辑 `~/.erlangshen/config.toml`:
+
+```toml
+# DeepSeek API Key (必需)
+deepseek_api_key = "your-api-key-here"
+
+# 数据库配置 (可选)
+[database]
+host = "localhost"
+port = 3306
+user = "root"
+password = ""
+
+# 飞书配置 (可选)
+[feishu]
+app_id = ""
+app_secret = ""
+```
 
 编辑 `~/.openclaw-agent-06/workspace/erlangshen/.claude/settings.json`:
 
