@@ -15,7 +15,7 @@ from src.core.cerebellum import Cerebellum
 from src.tools.market_tools import MarketTools
 from src.tools.macro_tools import MacroTools
 from src.tools.search_tools import SearchTools
-from src.agents.erlangshen import Erlangshen
+from src.agents.erlang import 二郎神 as Erlangshen
 
 
 @pytest.fixture

@@ -34,7 +34,25 @@ class BaseAgent(ABC):
         self.tools[name] = tool
 
     async def call_tool(self, name: str, **kwargs) -> Any:
-        """调用工具"""
+        """调用工具 - 支持 dotted 格式如 'market_tools.get_stock_price'"""
+        # 支持 dotted 格式：tool_instance.method_name
+        if "." in name:
+            parts = name.split(".", 1)
+            tool_key = parts[0]
+            method_name = parts[1]
+            
+            if tool_key not in self.tools:
+                return {"error": f"Tool '{tool_key}' not found"}
+            
+            tool = self.tools[tool_key]
+            method = getattr(tool, method_name, None)
+            if method is None:
+                return {"error": f"Method '{method_name}' not found on tool '{tool_key}'"}
+            if callable(method):
+                return await method(**kwargs)
+            return {"error": f"Method '{method_name}' on '{tool_key}' is not callable"}
+        
+        # 直接格式
         if name not in self.tools:
             return {"error": f"Tool '{name}' not found"}
 

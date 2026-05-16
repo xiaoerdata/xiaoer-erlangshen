@@ -24,7 +24,7 @@ from src.tools.market_tools import MarketTools
 from src.tools.macro_tools import MacroTools
 from src.tools.search_tools import SearchTools
 from src.tools.file_tools import FileTools
-from src.agents.erlangshen import 二郎神
+from src.agents.erlang import 二郎神
 
 # 初始化应用
 app = FastAPI(
