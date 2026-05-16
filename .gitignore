@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+
+# Node
+node_modules/
+npm-debug.log*
+
+# 配置和密钥
+.claude/settings.json
+.env
+.env.*
+*.local.toml
+.git-credentials
+.npmrc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 测试和缓存
+.pytest_cache/
+.coverage
+htmlcov/
+.cache/
