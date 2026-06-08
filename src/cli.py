@@ -8,6 +8,7 @@ import importlib
 import os
 import sys
 
+from src import __version__
 from src.auth.session import load_auth_session
 from src.config import get_config
 
@@ -73,6 +74,8 @@ class CLI:
 
     async def run_command(self, command: str, args: str) -> str:
         """执行命令"""
+        if command in {"help", "h"}:
+            return self.help_text()
         if command in self.COMMANDS:
             try:
                 command_class = self._load_command_class(command)
@@ -172,7 +175,7 @@ class CLI:
         user = session.get("user") or {}
         username = user.get("username") or user.get("email") or user.get("id")
         auth_text = username or ("已保存 token" if session.get("token") else "未登录")
-        print("二郎神 v0.1.2 - 服务端 CLI")
+        print(f"二郎神 v{__version__} - 服务端 CLI")
         print(f"服务端: {base_url}")
         print(f"会话: {auth_text}")
         print("输入自然语言会默认请求 /advice；输入 /help 查看命令，/exit 退出。\n")
@@ -187,7 +190,11 @@ class CLI:
 
     def print_help(self):
         """打印帮助信息"""
-        print("""
+        print(self.help_text())
+
+    def help_text(self) -> str:
+        """Return CLI help text."""
+        return """
 二郎神 - 服务端优先 CLI
 
 常用命令:
@@ -224,7 +231,7 @@ class CLI:
   erlangshen /map 全球流动性转向时风险资产怎么看
   erlangshen /advice 利率下行时A股红利资产怎么看
   erlangshen 利率下行时A股红利资产怎么看
-""")
+"""
 
 
 def main():

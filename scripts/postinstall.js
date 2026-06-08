@@ -13,6 +13,7 @@ const os = require('os');
 const installDir = path.resolve(__dirname, '..');
 const projectRoot = installDir;
 const defaultApiBaseUrl = 'https://xiaoerdata.site/api/erlangshen';
+const packageVersion = require(path.join(projectRoot, 'package.json')).version;
 
 console.log('📦 二郎神安装中...');
 console.log(`   安装目录: ${installDir}`);
@@ -168,7 +169,7 @@ print('ok')
 // 主函数
 async function main() {
   console.log('\n========================================');
-  console.log('   二郎神 v0.1.2 - AI投资智能体');
+  console.log(`   二郎神 v${packageVersion} - AI投资智能体`);
   console.log('   https://github.com/xiaoerdata/xiaoer-erlangshen');
   console.log('========================================\n');
   
