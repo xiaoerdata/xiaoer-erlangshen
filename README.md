@@ -1,205 +1,67 @@
-# 二郎神 (Erlangshen) - AI投资智能体
+# 二郎神 Erlangshen CLI
 
-全知全能的AI投资智能体，支持全资产多策略分析。
-
-## 功能特性
-
-- 🤖 **多Agent协作**: 宏观分析师、股票分析师、多资产分析师
-- 📊 **MCP工具**: 行情数据、宏观数据、飞书文档
-- ⚡ **斜杠命令**: `/analyze`, `/macro`, `/stock`, `/report` 等
-- 🧠 **LLM大脑**: 支持 DeepSeek、OpenAI 等多种模型
-- 📝 **知识沉淀**: 纪要、报告自动保存
-
-## 目录结构
-
-```
-erlangshen/
-├── bin/
-│   └── erlangshen          # CLI 入口脚本
-├── src/
-│   ├── cli.py               # CLI 主入口
-│   ├── config.py            # 配置管理
-│   ├── brain.py             # LLM 大脑
-│   ├── mcp/                 # MCP 工具
-│   │   ├── market.py        # 行情数据
-│   │   ├── macro.py         # 宏观数据
-│   │   ├── feishu.py        # 飞书文档
-│   │   └── registry.py      # MCP 注册表
-│   ├── agents/              # 专业智能体
-│   │   ├── base.py          # 基础Agent
-│   │   ├── macro.py         # 宏观Agent
-│   │   ├── equity.py        # 股票Agent
-│   │   └── multi_asset.py   # 多资产Agent
-│   ├── commands/             # 斜杠命令
-│   │   ├── analyze.py
-│   │   ├── macro.py
-│   │   ├── stock.py
-│   │   ├── report.py
-│   │   ├── search.py
-│   │   ├── portfolio.py
-│   │   ├── risk.py
-│   │   └── memo.py
-│   ├── skills/              # 技能
-│   │   ├── framework.py
-│   │   └── templates.py
-│   └── hooks/               # 事件钩子
-│       ├── session_start.py
-│       └── session_end.py
-├── .claude/
-│   └── settings.json        # 配置文件
-├── knowledge/               # 知识库
-│   ├── memos/               # 纪要
-│   ├── reports/             # 报告
-│   ├── insights/            # 洞察
-│   └── facts/               # 事实库
-└── requirements.txt
-```
+二郎神 CLI 是面向用户的命令行客户端，用来连接已经部署好的二郎神核心服务端。客户端负责登录、保存 token、查看服务状态、请求认知映射和生成投资建议；核心认知库、策略框架、API 服务和生产域名都由服务端环境管理。
 
 ## 安装
 
-### npm 安装 (推荐)
-
 ```bash
-# 全局安装
 npm install -g erlangshen
-
-# 安装完成后会自动：
-# 1. 检查 Python 3.9+
-# 2. 安装 Python 依赖
-# 3. 创建配置目录 ~/.erlangshen/
 ```
 
-### 手动安装
+安装脚本会检查 Python 3.9+，并安装客户端所需的轻量 Python 依赖。
 
-```bash
-# 克隆项目
-git clone https://github.com/xiaoerdata/xiaoer-erlangshen.git
-cd xiaoer-erlangshen
-
-# 安装依赖
-pip install -r requirements.txt
-
-# 添加执行权限
-chmod +x bin/erlangshen
-
-# 链接到 PATH (可选)
-ln -s $(pwd)/bin/erlangshen /usr/local/bin/erlangshen
-```
-
-## 配置
-
-编辑 `~/.erlangshen/config.toml`:
-
-```toml
-# DeepSeek API Key (必需)
-deepseek_api_key = "your-api-key-here"
-
-# 数据库配置 (可选)
-[database]
-host = "localhost"
-port = 3306
-user = "root"
-password = ""
-
-# 飞书配置 (可选)
-[feishu]
-app_id = ""
-app_secret = ""
-```
-
-编辑 `~/.openclaw-agent-06/workspace/erlangshen/.claude/settings.json`:
-
-```json
-{
-  "llm_provider": "deepseek",
-  "deepseek_api_key": "your-api-key",
-  "deepseek_model": "deepseek-chat",
-  "db_host": "localhost",
-  "db_port": 5432,
-  "db_name": "market",
-  "feishu_app_id": "your-feishu-app-id",
-  "feishu_app_secret": "your-feishu-app-secret"
-}
-```
-
-## 使用方式
-
-### 交互模式
+## 快速开始
 
 ```bash
 erlangshen
+erlangshen /auth server https://erlangshen.example.com
+erlangshen /login xwab user@example.com
+erlangshen /status
+erlangshen /map 全球流动性转向时风险资产怎么看
+erlangshen /advice 利率下行时A股红利资产怎么看
 ```
 
-### 命令模式
+进入交互模式后，直接输入自然语言问题会默认请求服务端 `/advice` 能力：
+
+```text
+erlangshen:guest> 利率下行时A股红利资产怎么看
+```
+
+## 常用命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `/login [xwab|xczt] [账号]` | 登录核心服务端 |
+| `/logout` | 清除本地登录状态 |
+| `/status` | 查看登录状态 |
+| `/service` | 查看服务端状态 |
+| `/health` | 服务端健康检查 |
+| `/map <问题>` | 认知场景映射 |
+| `/advice <问题>` | 生成受保护投资建议 |
+| `/auth server <url>` | 设置服务端地址 |
+| `/clear` | 清屏 |
+| `/exit` | 退出 |
+
+## 服务端地址
+
+生产域名不需要写死在项目里。按优先级可通过以下方式配置：
+
+1. `ERLANGSHEN_API_BASE_URL` 或 `ERLANGSHEN_SERVER_URL`
+2. `/auth server <url>`
+3. `~/.erlangshen/settings.json` 中的 `erlangshen_api_base_url`
+4. 默认开发地址 `http://127.0.0.1:8000`
+
+反向代理如果挂在 `/api/erlangshen`，也可以直接配置完整 base URL：
 
 ```bash
-erlangshen /analyze A股当前走势
-erlangshen /macro CPI走势
-erlangshen /stock 贵州茅台
-erlangshen /report 月度总结
+erlangshen /auth server https://example.com/api/erlangshen
 ```
 
-### 斜杠命令
+## 发布边界
 
-| 命令 | 说明 | 示例 |
-|------|------|------|
-| `/analyze` | 综合分析 | `/analyze A股走势` |
-| `/macro` | 宏观分析 | `/macro LPR利率` |
-| `/stock` | 股票分析 | `/stock 茅台` |
-| `/report` | 报告生成 | `/report 月度报告` |
-| `/search` | 搜索 | `/search 量化策略` |
-| `/portfolio` | 组合分析 | `/portfolio 风险` |
-| `/risk` | 风险分析 | `/risk 市场风险` |
-| `/memo` | 纪要管理 | `/memo 记录会议` |
+npm 包是瘦客户端，只包含 CLI、登录会话、HTTP 客户端、配置和服务端调用命令。它不会发布服务端 API、核心认知库、内部测试、部署脚本或策略实现。
 
-## MCP 工具
-
-### Market MCP (行情)
-- `get_stock_price`: 实时股价
-- `get_stock_history`: 历史行情
-- `get_index_quote`: 指数行情
-- `get_futures_price`: 期货价格
-
-### Macro MCP (宏观)
-- `get_macro_indicator`: 宏观指标
-- `get_interest_rates`: 利率数据
-- `get_currency_rates`: 汇率数据
-- `get_economic_calendar`: 经济日历
-
-### Feishu MCP (飞书)
-- `create_doc`: 创建文档
-- `append_doc`: 追加内容
-- `search_docs`: 搜索文档
-- `send_message`: 发送消息
-
-## Agents
-
-### MacroAgent (宏观分析师)
-专注宏观经济、政策解读、大类资产配置
-
-### EquityAgent (股票分析师)
-专注A股、港股、美股基本面和技术面分析
-
-### MultiAssetAgent (多资产分析师)
-专注跨资产配置、组合优化、风险预算
-
-## 开发
-
-```bash
-# 直接运行
-python -m src.cli
-
-# 或使用入口脚本
-./bin/erlangshen
-```
-
-## 依赖
-
-- Python 3.10+
-- openai >= 1.0.0
-- pydantic >= 2.0.0
-- psycopg2-binary >= 2.9.0 (可选，用于数据库)
-- lark-oapi >= 1.0.0 (可选，用于飞书)
+更多细节见 [README_CLI.md](./README_CLI.md)。
 
 ## License
 

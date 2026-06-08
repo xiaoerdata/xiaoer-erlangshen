@@ -1,6 +1,6 @@
 {
   "name": "erlangshen",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "二郎神 - 全知全能的AI投资智能体",
   "keywords": [
     "investment",
@@ -24,7 +24,26 @@
   "bin": {
     "erlangshen": "./bin/cli.js"
   },
+  "files": [
+    "bin/cli.js",
+    "scripts/postinstall.js",
+    "scripts/preuninstall.js",
+    "src/__init__.py",
+    "src/cli.py",
+    "src/auth/__init__.py",
+    "src/auth/session.py",
+    "src/client/__init__.py",
+    "src/client/server_client.py",
+    "src/commands/__init__.py",
+    "src/commands/auth.py",
+    "src/commands/server.py",
+    "src/config.py",
+    "src/paths.py",
+    "requirements-client.txt",
+    "README_CLI.md"
+  ],
   "scripts": {
+    "test": "python3 -m pytest -q",
     "postinstall": "node scripts/postinstall.js",
     "preuninstall": "node scripts/preuninstall.js"
   },

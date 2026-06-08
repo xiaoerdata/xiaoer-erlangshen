@@ -5,12 +5,12 @@
  * 自动安装 Python 依赖
  */
 
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const installDir = path.dirname(require.main.filename);
+const installDir = path.resolve(__dirname, '..');
 const projectRoot = installDir;
 
 console.log('📦 二郎神安装中...');
@@ -52,18 +52,19 @@ function checkPython() {
 function installDependencies(python) {
   console.log('\n📚 安装 Python 依赖...');
   
-  const requirementsPath = path.join(projectRoot, 'requirements.txt');
+  const clientRequirementsPath = path.join(projectRoot, 'requirements-client.txt');
+  const requirementsPath = fs.existsSync(clientRequirementsPath)
+    ? clientRequirementsPath
+    : path.join(projectRoot, 'requirements.txt');
   
   if (!fs.existsSync(requirementsPath)) {
-    console.log('   ⚠ requirements.txt not found, skipping');
+    console.log('   ⚠ requirements file not found, skipping');
     return;
   }
   
   return new Promise((resolve, reject) => {
-    const pip = os.platform() === 'win32' ? 'pip' : 'pip3';
-    
     // 使用 pip install -r requirements.txt
-    const proc = spawn(python, ['-m', pip, 'install', '-r', requirementsPath, '--quiet'], {
+    const proc = spawn(python, ['-m', 'pip', 'install', '-r', requirementsPath, '--quiet'], {
       stdio: 'inherit',
       cwd: projectRoot
     });
@@ -97,34 +98,27 @@ function createConfigDir() {
   }
   
   // 创建示例配置
-  const configPath = path.join(erlangshenDir, 'config.toml');
+  const configPath = path.join(erlangshenDir, 'settings.json');
   if (!fs.existsSync(configPath)) {
-    const configTemplate = `# 二郎神配置文件
-# https://github.com/xiaoerdata/xiaoer-erlangshen
-
-# DeepSeek API Key (必需)
-deepseek_api_key = ""
-
-# 数据库配置 (可选，用于连接远程行情数据库)
-[database]
-host = ""
-port = 3306
-user = ""
-password = ""
-
-# 飞书配置 (可选，用于消息推送)
-[feishu]
-app_id = ""
-app_secret = ""
-
-# 代理配置 (可选)
-[proxy]
-enabled = false
-http = ""
-https = ""
-`;
+    const configTemplate = {
+      llm_provider: 'deepseek',
+      deepseek_api_key: '',
+      deepseek_model: 'deepseek-chat',
+      erlangshen_api_base_url: 'http://127.0.0.1:8000',
+      erlangshen_auth_login_entry: 'xwab',
+      db_host: '',
+      db_port: 5432,
+      db_name: 'market',
+      db_user: '',
+      db_password: '',
+      feishu_app_id: '',
+      feishu_app_secret: '',
+      proxy_enabled: false,
+      http_proxy: '',
+      https_proxy: ''
+    };
     
-    fs.writeFileSync(configPath, configTemplate);
+    fs.writeFileSync(configPath, JSON.stringify(configTemplate, null, 2));
     console.log(`   ✓ 创建配置文件: ${configPath}`);
   }
 }
@@ -138,12 +132,15 @@ function verifyInstall(python) {
     const testCode = `
 import sys
 sys.path.insert(0, '${projectRoot.replace(/\\/g, '\\\\')}')
-from src.core.brain import Brain
-from src.core.investment_universe import get_universe
+from src.cli import CLI
+from src.client.server_client import ErlangshenServerClient
 print('ok')
 `;
     
-    const result = execSync(python, ['-c', testCode], { encoding: 'utf-8' }).trim();
+    const result = spawnSync(python, ['-c', testCode], {
+      cwd: projectRoot,
+      encoding: 'utf-8'
+    }).stdout.trim();
     
     if (result === 'ok') {
       console.log('   ✓ 二郎神验证通过');
@@ -173,10 +170,13 @@ async function main() {
     console.log('   ✓ 安装完成!');
     console.log('========================================');
     console.log('\n📖 使用方法:');
-    console.log('   erlangshen --cli          # 启动CLI');
-    console.log('   erlangshen --api           # 启动API服务');
-    console.log('\n⚠️  首次使用请配置 API Key:');
-    console.log('   vim ~/.erlangshen/config.toml');
+    console.log('   erlangshen');
+    console.log('   erlangshen /auth server <服务端URL>');
+    console.log('   erlangshen /login xwab <账号>');
+    console.log('   erlangshen /status');
+    console.log('   erlangshen /map <问题>');
+    console.log('   erlangshen /advice <问题>');
+    console.log('\n生产域名请通过 ERLANGSHEN_API_BASE_URL 或 /auth server <url> 配置。');
     console.log('');
     
   } catch (e) {

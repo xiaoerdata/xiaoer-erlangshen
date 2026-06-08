@@ -8,6 +8,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 
 // 获取 Python 路径
 function getPythonPath() {
@@ -23,36 +24,66 @@ function getPythonPath() {
 
 // 获取二郎神安装目录
 function getInstallDir() {
-  return path.dirname(require.main.filename);
+  return path.resolve(__dirname, '..');
 }
 
-// 获取二郎神 Python 脚本路径
-function getScriptPath() {
+function getPythonInvocation(args) {
   const installDir = getInstallDir();
-  return path.join(installDir, 'src', 'api', 'cli_enhanced.py');
+
+  if (args[0] === '--api') {
+    const apiPath = path.join(installDir, 'src', 'api', 'server.py');
+    if (!fs.existsSync(apiPath)) {
+      console.error('当前 npm 用户端不包含服务端 API 代码，请在二郎神服务端仓库/生产环境启动 API。');
+      process.exit(1);
+    }
+    return {
+      args: ['-m', 'src.api.server', ...args.slice(1)]
+    };
+  }
+
+  if (args[0] === '--enhanced') {
+    const enhancedPath = path.join(installDir, 'src', 'api', 'cli_enhanced.py');
+    if (!fs.existsSync(enhancedPath)) {
+      console.error('当前 npm 用户端不包含旧版增强 CLI，请直接运行 erlangshen 或 erlangshen /help。');
+      process.exit(1);
+    }
+    return {
+      args: [enhancedPath, ...args.slice(1)]
+    };
+  }
+
+  if (args[0] === '--cli' || args[0] === '--interactive') {
+    return {
+      args: ['-m', 'src.cli', ...args.slice(1)]
+    };
+  }
+
+  return {
+    args: ['-m', 'src.cli', ...args]
+  };
 }
 
 // 获取命令行参数
 const args = process.argv.slice(2);
 
-// 添加默认参数（CLI增强版）
-if (!args.some(arg => arg.startsWith('--'))) {
-  args.push('--enhanced');
-}
-
 // 合并环境变量，传递 DEEPSEEK_API_KEY
 const env = { ...process.env };
+const installDir = getInstallDir();
+env.PYTHONPATH = env.PYTHONPATH
+  ? `${installDir}${path.delimiter}${env.PYTHONPATH}`
+  : installDir;
 
-// 执行二郎神
 const python = getPythonPath();
-const scriptPath = getScriptPath();
+const invocation = getPythonInvocation(args);
 
-console.log(`🚀 启动二郎神...`);
+if (env.ERLANGSHEN_CLI_DEBUG === '1') {
+  console.log(`启动二郎神: ${python} ${invocation.args.join(' ')}`);
+}
 
-const proc = spawn(python, [scriptPath, ...args], {
+const proc = spawn(python, invocation.args, {
   env,
   stdio: 'inherit',
-  cwd: process.cwd()
+  cwd: installDir
 });
 
 proc.on('exit', (code) => {

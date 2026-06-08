@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 
+from src.paths import get_default_knowledge_dir, get_project_root
+
 
 class Config(BaseModel):
     """二郎神配置"""
@@ -27,6 +29,10 @@ class Config(BaseModel):
     mcp_enabled: bool = True
     mcp_timeout: int = 30
 
+    # ==================== 二郎神服务端配置 ====================
+    erlangshen_api_base_url: str = "http://127.0.0.1:8000"
+    erlangshen_auth_login_entry: str = "xwab"
+
     # ==================== 数据库配置 ====================
     db_host: str = "localhost"
     db_port: int = 5432
@@ -39,7 +45,7 @@ class Config(BaseModel):
     feishu_app_secret: Optional[str] = None
 
     # ==================== 知识库路径 ====================
-    knowledge_dir: str = "~/.openclaw-agent-06/workspace/erlangshen/knowledge"
+    knowledge_dir: str = Field(default_factory=lambda: str(get_default_knowledge_dir()))
 
     # ==================== 日志配置 ====================
     log_level: str = "INFO"
@@ -110,7 +116,15 @@ class Config(BaseModel):
 
 def get_config_path() -> Path:
     """获取配置路径"""
-    return Path("~/.openclaw-agent-06/workspace/erlangshen/.claude/settings.json").expanduser()
+    env_path = os.getenv("ERLANGSHEN_CONFIG")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    project_config = get_project_root() / ".claude" / "settings.json"
+    if project_config.exists():
+        return project_config
+
+    return Path("~/.erlangshen/settings.json").expanduser()
 
 
 def get_default_config() -> Config:
@@ -176,11 +190,34 @@ def load_config_from_env() -> Dict[str, Any]:
     """从环境变量加载配置"""
     updates = {}
 
+    # LLM provider/model routing
+    if os.getenv("LLM_PROVIDER"):
+        updates["llm_provider"] = os.getenv("LLM_PROVIDER")
+    if os.getenv("LLM_MODEL"):
+        updates["llm_model"] = os.getenv("LLM_MODEL")
+    if os.getenv("OPENAI_MODEL"):
+        updates["llm_model"] = os.getenv("OPENAI_MODEL")
+    if os.getenv("DEEPSEEK_MODEL"):
+        updates["deepseek_model"] = os.getenv("DEEPSEEK_MODEL")
+
     # API Keys
     if os.getenv("OPENAI_API_KEY"):
         updates["llm_api_key"] = os.getenv("OPENAI_API_KEY")
+    if os.getenv("LLM_API_KEY"):
+        updates["llm_api_key"] = os.getenv("LLM_API_KEY")
     if os.getenv("DEEPSEEK_API_KEY"):
         updates["deepseek_api_key"] = os.getenv("DEEPSEEK_API_KEY")
+
+    # OpenAI-compatible local model endpoints (Ollama, LM Studio, vLLM, etc.)
+    base_url = (
+        os.getenv("LLM_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+        or os.getenv("DEEPSEEK_BASE_URL")
+    )
+    if base_url:
+        updates["llm_base_url"] = base_url
+
     if os.getenv("SERPAPI_KEY"):
         updates["serpapi_key"] = os.getenv("SERPAPI_KEY")
     if os.getenv("ALPHA_VANTAGE_KEY"):
@@ -189,6 +226,13 @@ def load_config_from_env() -> Dict[str, Any]:
         updates["fred_api_key"] = os.getenv("FRED_API_KEY")
     if os.getenv("COINMARKETCAP_KEY"):
         updates["coinmarketcap_key"] = os.getenv("COINMARKETCAP_KEY")
+
+    if os.getenv("ERLANGSHEN_API_BASE_URL"):
+        updates["erlangshen_api_base_url"] = os.getenv("ERLANGSHEN_API_BASE_URL")
+    if os.getenv("ERLANGSHEN_SERVER_URL"):
+        updates["erlangshen_api_base_url"] = os.getenv("ERLANGSHEN_SERVER_URL")
+    if os.getenv("ERLANGSHEN_AUTH_LOGIN_ENTRY"):
+        updates["erlangshen_auth_login_entry"] = os.getenv("ERLANGSHEN_AUTH_LOGIN_ENTRY")
 
     # 飞书配置
     if os.getenv("FEISHU_APP_ID"):
