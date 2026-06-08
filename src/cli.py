@@ -6,11 +6,58 @@
 import asyncio
 import importlib
 import os
+import shutil
 import sys
 
 from src import __version__
 from src.auth.session import load_auth_session
 from src.config import get_config
+
+
+LOGO_WIDE = [
+    "███████╗██████╗ ██╗      █████╗ ███╗   ██╗ ██████╗ ███████╗██╗  ██╗███████╗███╗   ██╗",
+    "██╔════╝██╔══██╗██║     ██╔══██╗████╗  ██║██╔════╝ ██╔════╝██║  ██║██╔════╝████╗  ██║",
+    "█████╗  ██████╔╝██║     ███████║██╔██╗ ██║██║  ███╗███████╗███████║█████╗  ██╔██╗ ██║",
+    "██╔══╝  ██╔══██╗██║     ██╔══██║██║╚██╗██║██║   ██║╚════██║██╔══██║██╔══╝  ██║╚██╗██║",
+    "███████╗██║  ██║███████╗██║  ██║██║ ╚████║╚██████╔╝███████║██║  ██║███████╗██║ ╚████║",
+    "╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝",
+]
+LOGO_COMPACT = [
+    "╭────────────────────────────────────╮",
+    "│ 二郎神 ERLANGSHEN                  │",
+    "│ Service-first investing CLI        │",
+    "╰────────────────────────────────────╯",
+]
+
+
+def _supports_color() -> bool:
+    return sys.stdout.isatty() and not os.getenv("NO_COLOR")
+
+
+def _color(text: str, code: str) -> str:
+    if not _supports_color():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _terminal_width() -> int:
+    return shutil.get_terminal_size((100, 20)).columns
+
+
+def _logo() -> str:
+    lines = LOGO_WIDE if _terminal_width() >= 96 else LOGO_COMPACT
+    return "\n".join(_color(line, "36;1") for line in lines)
+
+
+def _panel(title: str, rows: list[tuple[str, str]]) -> str:
+    width = min(max(54, *(len(label) + len(value) + 8 for label, value in rows)), 92)
+    top = f"╭─ {title} " + "─" * max(0, width - len(title) - 5) + "╮"
+    bottom = "╰" + "─" * (len(top) - 2) + "╯"
+    body = []
+    for label, value in rows:
+        text = f"{label:<10} {value}"
+        body.append("│ " + text[: width - 3].ljust(width - 3) + "│")
+    return "\n".join([_color(top, "36"), *body, _color(bottom, "36")])
 
 
 class CLI:
@@ -175,10 +222,17 @@ class CLI:
         user = session.get("user") or {}
         username = user.get("username") or user.get("email") or user.get("id")
         auth_text = username or ("已保存 token" if session.get("token") else "未登录")
-        print(f"二郎神 v{__version__} - 服务端 CLI")
-        print(f"服务端: {base_url}")
-        print(f"会话: {auth_text}")
-        print("输入自然语言会默认请求 /advice；输入 /help 查看命令，/exit 退出。\n")
+        print(_logo())
+        print()
+        print(_panel("Session", [
+            ("version", f"v{__version__}"),
+            ("server", base_url),
+            ("account", auth_text),
+            ("mode", "service-first / protected by xwab/xczt"),
+        ]))
+        print()
+        print(_color("输入自然语言会默认请求 /advice；输入 /help 查看命令，/exit 退出。", "2"))
+        print()
 
     def prompt(self) -> str:
         session = load_auth_session()
@@ -194,7 +248,9 @@ class CLI:
 
     def help_text(self) -> str:
         """Return CLI help text."""
-        return """
+        return f"""
+{_logo()}
+
 二郎神 - 服务端优先 CLI
 
 常用命令:

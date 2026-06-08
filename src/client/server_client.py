@@ -2,6 +2,7 @@
 Async client for the Erlangshen API service.
 """
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -48,13 +49,16 @@ class ErlangshenServerClient:
 
     async def request(self, method: str, endpoint: str, **kwargs) -> Any:
         headers = {**self._headers(), **kwargs.pop("headers", {})}
-        async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-            response = await client.request(
-                method,
-                self.url(endpoint),
-                headers=headers,
-                **kwargs,
-            )
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+                response = await client.request(
+                    method,
+                    self.url(endpoint),
+                    headers=headers,
+                    **kwargs,
+                )
+        except httpx.RequestError as exc:
+            raise ErlangshenAPIError(0, f"网络请求失败: {exc}", None) from exc
 
         payload = self._parse_payload(response)
         if response.status_code >= 400:
@@ -69,15 +73,22 @@ class ErlangshenServerClient:
         return await self.request("GET", "health")
 
     async def login(self, login_entry: str, email_or_phone: str, password: str) -> Any:
-        return await self.request(
-            "POST",
-            "auth/login",
-            json={
-                "loginEntry": login_entry,
-                "emailOrPhone": email_or_phone,
-                "password": password,
-            },
-        )
+        try:
+            payload = await self.request(
+                "POST",
+                "auth/login",
+                json={
+                    "loginEntry": login_entry,
+                    "emailOrPhone": email_or_phone,
+                    "password": password,
+                },
+            )
+        except ErlangshenAPIError as exc:
+            normalized = _normalize_login_payload(exc.payload, login_entry)
+            if normalized:
+                return normalized
+            raise
+        return _normalize_login_payload(payload, login_entry) or payload
 
     async def logout(self) -> Any:
         return await self.request("POST", "auth/logout")
@@ -136,3 +147,62 @@ class ErlangshenServerClient:
         if isinstance(payload, str) and payload:
             return payload
         return f"HTTP {status_code}"
+
+
+def _normalize_login_payload(payload: Any, login_entry: str) -> Optional[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    token = _token_from(payload)
+    if token:
+        normalized = dict(payload)
+        normalized.setdefault("status", "success")
+        normalized.setdefault("loginEntry", login_entry)
+        normalized.setdefault("user", {})
+        return normalized
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    token = _token_from(data)
+    if not token:
+        return None
+
+    entry = str(data.get("entry") or login_entry)
+    user = _normalize_user(data.get("user") or {}, entry)
+    return {
+        "status": "success",
+        "loginEntry": entry,
+        "token": token,
+        "expires": data.get("expiresAt") or _expires_from_seconds(data.get("expiresInSeconds")),
+        "user": user,
+    }
+
+
+def _token_from(payload: dict[str, Any]) -> Optional[str]:
+    token = (
+        payload.get("token")
+        or payload.get("accessToken")
+        or payload.get("access_token")
+    )
+    return str(token).strip() if token else None
+
+
+def _normalize_user(user: dict[str, Any], login_entry: str) -> dict[str, Any]:
+    return {
+        "id": user.get("id") or user.get("user_id"),
+        "username": user.get("username") or user.get("user_name"),
+        "email": user.get("email"),
+        "role": user.get("role") or user.get("user_type"),
+        "loginEntry": user.get("loginEntry") or user.get("login_entry") or login_entry,
+        "raw": user,
+    }
+
+
+def _expires_from_seconds(value: Any) -> Optional[str]:
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return None
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()

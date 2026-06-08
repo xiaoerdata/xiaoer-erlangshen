@@ -72,11 +72,11 @@ class AuthCommand:
         try:
             result = await client.login(login_entry, email_or_phone, password)
         except ErlangshenAPIError as exc:
-            return f"登录失败: {exc}"
+            return _format_login_error(exc)
 
         token = result.get("token") if isinstance(result, dict) else None
         if not token:
-            return "登录失败: 服务端未返回 token"
+            return "登录失败: 服务端未返回 token，请检查登录代理是否返回标准二郎神响应"
 
         save_auth_session({
             "base_url": base_url,
@@ -187,3 +187,12 @@ class AuthCommand:
     /status
     /logout
 """
+
+
+def _format_login_error(exc: ErlangshenAPIError) -> str:
+    message = str(exc).strip()
+    if message.lower() == "success":
+        message = "登录接口返回了 success 但 HTTP 状态不是成功，请检查服务端登录代理"
+    if exc.status_code == 0:
+        return f"登录失败: {message}"
+    return f"登录失败 ({exc.status_code}): {message}"
