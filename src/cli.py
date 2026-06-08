@@ -172,7 +172,7 @@ class CLI:
         user = session.get("user") or {}
         username = user.get("username") or user.get("email") or user.get("id")
         auth_text = username or ("已保存 token" if session.get("token") else "未登录")
-        print("二郎神 v0.1.1 - 服务端 CLI")
+        print("二郎神 v0.1.2 - 服务端 CLI")
         print(f"服务端: {base_url}")
         print(f"会话: {auth_text}")
         print("输入自然语言会默认请求 /advice；输入 /help 查看命令，/exit 退出。\n")
@@ -218,7 +218,7 @@ class CLI:
   /invest [option]            投资分析
 
 示例:
-  erlangshen /auth server https://example.com
+  erlangshen /auth server https://xiaoerdata.site/api/erlangshen
   erlangshen /login xwab user@example.com
   erlangshen /status
   erlangshen /map 全球流动性转向时风险资产怎么看

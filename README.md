@@ -14,7 +14,7 @@ npm install -g erlangshen
 
 ```bash
 erlangshen
-erlangshen /auth server https://erlangshen.example.com
+erlangshen /health
 erlangshen /login xwab user@example.com
 erlangshen /status
 erlangshen /map 全球流动性转向时风险资产怎么看
@@ -44,17 +44,23 @@ erlangshen:guest> 利率下行时A股红利资产怎么看
 
 ## 服务端地址
 
-生产域名不需要写死在项目里。按优先级可通过以下方式配置：
+npm 客户端默认连接：
+
+```text
+https://xiaoerdata.site/api/erlangshen
+```
+
+按优先级可通过以下方式覆盖：
 
 1. `ERLANGSHEN_API_BASE_URL` 或 `ERLANGSHEN_SERVER_URL`
 2. `/auth server <url>`
 3. `~/.erlangshen/settings.json` 中的 `erlangshen_api_base_url`
-4. 默认开发地址 `http://127.0.0.1:8000`
+4. 内置默认地址 `https://xiaoerdata.site/api/erlangshen`
 
 反向代理如果挂在 `/api/erlangshen`，也可以直接配置完整 base URL：
 
 ```bash
-erlangshen /auth server https://example.com/api/erlangshen
+erlangshen /auth server https://xiaoerdata.site/api/erlangshen
 ```
 
 ## 发布边界

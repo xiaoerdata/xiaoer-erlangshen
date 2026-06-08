@@ -1,12 +1,12 @@
 # 二郎神 CLI 客户端说明
 
-二郎神客户端是面向用户的瘦 CLI。它不内置核心认知库、服务端 API、策略框架或生产域名，而是通过登录和 HTTP API 对接已经部署好的二郎神核心服务端。
+二郎神客户端是面向用户的瘦 CLI。它不内置核心认知库、服务端 API 或策略框架，而是通过登录和 HTTP API 对接已经部署好的二郎神核心服务端。
 
 ## 定位
 
 - 客户端负责：登录、保存本地 token、调用服务端健康检查、状态查询、认知映射和投资建议。
 - 服务端负责：鉴权、权限层级、认知保护、策略框架、数据融合和建议生成。
-- 生产域名不需要写进代码仓库；部署后通过 `ERLANGSHEN_API_BASE_URL`、`ERLANGSHEN_SERVER_URL`、`~/.erlangshen/settings.json` 或 `/auth server <url>` 配置。
+- npm 客户端默认连接 `https://xiaoerdata.site/api/erlangshen`；开发、灰度或私有部署可通过 `ERLANGSHEN_API_BASE_URL`、`ERLANGSHEN_SERVER_URL`、`~/.erlangshen/settings.json` 或 `/auth server <url>` 覆盖。
 
 ## 交互方式
 
@@ -42,7 +42,7 @@ erlangshen:guest> 利率下行时A股红利资产怎么看
 完整服务端命令仍保留在 `/auth <cmd>` 和 `/server <cmd>` 下，方便脚本和调试：
 
 ```bash
-erlangshen /auth server https://erlangshen.example.com
+erlangshen /health
 erlangshen /login xwab user@example.com
 erlangshen /status
 erlangshen /service
@@ -57,19 +57,21 @@ erlangshen /advice 利率下行时A股红利资产怎么看
 1. `ERLANGSHEN_API_BASE_URL` 或 `ERLANGSHEN_SERVER_URL`
 2. `/auth server <url>` 保存到 `~/.erlangshen/auth.json`
 3. `~/.erlangshen/settings.json` 中的 `erlangshen_api_base_url`
-4. 默认开发地址 `http://127.0.0.1:8000`
+4. 内置默认地址 `https://xiaoerdata.site/api/erlangshen`
 
-生产环境建议由部署脚本或运维配置注入域名，例如：
+生产 npm 包内置默认地址：
 
-```bash
-export ERLANGSHEN_API_BASE_URL=https://erlangshen.example.com
-erlangshen /health
+```text
+https://xiaoerdata.site/api/erlangshen
 ```
 
-如果反向代理挂在 `/api/erlangshen` 路径下，也可以直接配置完整 base URL：
+开发、灰度或私有部署可以覆盖为其他地址：
 
 ```bash
-erlangshen /auth server https://example.com/api/erlangshen
+export ERLANGSHEN_API_BASE_URL=http://127.0.0.1:8000
+erlangshen /health
+
+erlangshen /auth server https://xiaoerdata.site/api/erlangshen
 ```
 
 客户端会自动兼容服务端当前的 `/health`、`/api/auth/*`、`/api/status`、`/api/cognition/map` 和 `/api/advice` 路径。
@@ -101,7 +103,7 @@ python3 -m src.cli /server health
 node bin/cli.js --help
 ```
 
-如果本机核心服务端运行在 `http://127.0.0.1:8000`，`/server health` 应返回健康状态。生产部署时把服务端地址替换为生产域名即可。
+如果本机核心服务端运行在 `http://127.0.0.1:8000`，可先设置 `ERLANGSHEN_API_BASE_URL=http://127.0.0.1:8000` 再执行 `/server health`。
 
 ## 发布边界
 

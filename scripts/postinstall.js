@@ -12,6 +12,7 @@ const os = require('os');
 
 const installDir = path.resolve(__dirname, '..');
 const projectRoot = installDir;
+const defaultApiBaseUrl = 'https://xiaoerdata.site/api/erlangshen';
 
 console.log('📦 二郎神安装中...');
 console.log(`   安装目录: ${installDir}`);
@@ -104,7 +105,7 @@ function createConfigDir() {
       llm_provider: 'deepseek',
       deepseek_api_key: '',
       deepseek_model: 'deepseek-chat',
-      erlangshen_api_base_url: 'http://127.0.0.1:8000',
+      erlangshen_api_base_url: defaultApiBaseUrl,
       erlangshen_auth_login_entry: 'xwab',
       db_host: '',
       db_port: 5432,
@@ -120,6 +121,17 @@ function createConfigDir() {
     
     fs.writeFileSync(configPath, JSON.stringify(configTemplate, null, 2));
     console.log(`   ✓ 创建配置文件: ${configPath}`);
+  } else {
+    try {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      if (!config.erlangshen_api_base_url || config.erlangshen_api_base_url === 'http://127.0.0.1:8000') {
+        config.erlangshen_api_base_url = defaultApiBaseUrl;
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+        console.log(`   ✓ 更新默认服务端: ${defaultApiBaseUrl}`);
+      }
+    } catch (e) {
+      console.log('   ⚠ 配置文件不是有效 JSON，保留现状');
+    }
   }
 }
 
@@ -156,7 +168,7 @@ print('ok')
 // 主函数
 async function main() {
   console.log('\n========================================');
-  console.log('   二郎神 v0.1.0 - AI投资智能体');
+  console.log('   二郎神 v0.1.2 - AI投资智能体');
   console.log('   https://github.com/xiaoerdata/xiaoer-erlangshen');
   console.log('========================================\n');
   
@@ -171,12 +183,13 @@ async function main() {
     console.log('========================================');
     console.log('\n📖 使用方法:');
     console.log('   erlangshen');
+    console.log(`   erlangshen /health          # 默认服务端: ${defaultApiBaseUrl}`);
     console.log('   erlangshen /auth server <服务端URL>');
     console.log('   erlangshen /login xwab <账号>');
     console.log('   erlangshen /status');
     console.log('   erlangshen /map <问题>');
     console.log('   erlangshen /advice <问题>');
-    console.log('\n生产域名请通过 ERLANGSHEN_API_BASE_URL 或 /auth server <url> 配置。');
+    console.log('\n如需切换环境，可通过 ERLANGSHEN_API_BASE_URL 或 /auth server <url> 覆盖。');
     console.log('');
     
   } catch (e) {

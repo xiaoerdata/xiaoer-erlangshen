@@ -30,7 +30,7 @@ class Config(BaseModel):
     mcp_timeout: int = 30
 
     # ==================== 二郎神服务端配置 ====================
-    erlangshen_api_base_url: str = "http://127.0.0.1:8000"
+    erlangshen_api_base_url: str = "https://xiaoerdata.site/api/erlangshen"
     erlangshen_auth_login_entry: str = "xwab"
 
     # ==================== 数据库配置 ====================
