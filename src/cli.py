@@ -278,7 +278,7 @@ class CLI:
 
                 result = await self.dispatch(user_input)
 
-                print(f"\n{result}\n")
+                print(self._format_interactive_turn(user_input, result))
 
             except (KeyboardInterrupt, EOFError):
                 print("\n再见!")
@@ -336,6 +336,62 @@ class CLI:
 
     def _server_display_text(self, base_url: str | None) -> str:
         return "已配置" if (base_url or "").strip() else "未配置"
+
+    def _format_interactive_turn(self, user_input: str, result: str) -> str:
+        if not self._is_advice_turn(user_input):
+            return f"\n{result}\n"
+        question = self._turn_question_text(user_input)
+        return "\n".join([
+            "",
+            self._message_block("你", question, "36;1"),
+            "",
+            self._message_block("二郎神", result, "32;1"),
+            "",
+        ])
+
+    def _is_advice_turn(self, user_input: str) -> bool:
+        text = (user_input or "").strip()
+        if not text:
+            return False
+        if not text.startswith("/"):
+            return True
+        command = text[1:].split(maxsplit=1)[0].lower()
+        return command in {"advice", "建议", "投顾"}
+
+    def _turn_question_text(self, user_input: str) -> str:
+        text = (user_input or "").strip()
+        if not text.startswith("/"):
+            return text
+        parts = text.split(maxsplit=1)
+        return parts[1].strip() if len(parts) > 1 else text
+
+    def _message_block(self, title: str, body: str, color_code: str) -> str:
+        width = min(max(64, _terminal_width() - 4), 110)
+        top = _color(f"╭─ {title} " + "─" * max(0, width - len(title) - 5) + "╮", color_code)
+        bottom = _color("╰" + "─" * (width - 2) + "╯", color_code)
+        lines = []
+        for raw_line in (body or "").splitlines() or [""]:
+            if not raw_line:
+                lines.append("│ " + "".ljust(width - 3) + "│")
+                continue
+            for line in self._wrap_text(raw_line, width - 4):
+                lines.append("│ " + line.ljust(width - 3) + "│")
+        return "\n".join([top, *lines, bottom])
+
+    def _wrap_text(self, text: str, limit: int) -> list[str]:
+        text = str(text)
+        if len(text) <= limit:
+            return [text]
+        result = []
+        current = ""
+        for char in text:
+            if len(current) >= limit:
+                result.append(current)
+                current = ""
+            current += char
+        if current:
+            result.append(current)
+        return result
 
     def print_help(self):
         """打印帮助信息"""
@@ -675,6 +731,9 @@ class CLI:
             from src.client.server_client import ErlangshenAPIError, ErlangshenServerClient
             from src.llm import LLMClient, resolve_llm_settings
 
+            settings = resolve_llm_settings(config=get_config())
+            intent_plan = await self._infer_client_intent(query, payload, settings, LLMClient)
+            mcp_data = await self._collect_client_mcp_data(query, payload, intent_plan)
             self._show_progress("正在向服务端确认问题场景")
             session = load_auth_session()
             client = ErlangshenServerClient(
@@ -697,15 +756,15 @@ class CLI:
             return "服务端未返回可用场景映射，暂不生成投资建议。"
 
         try:
-            settings = resolve_llm_settings(config=get_config())
             self._show_progress(f"正在用本机 {settings.display_name} 生成分析")
             raw_text = await LLMClient(settings, timeout=float(config.request_timeout or 30)).complete(
                 self._client_advice_messages(
                     query=query,
                     matches=matches,
-                    mcp_data=payload.get("mcp_data"),
+                    mcp_data=mcp_data,
                     user_data=payload.get("user_data"),
                     current_cognition=payload.get("current_cognition"),
+                    intent_plan=intent_plan,
                 ),
                 temperature=0.35,
                 max_tokens=min(int(config.llm_max_tokens or 4096), 1600),
@@ -727,7 +786,7 @@ class CLI:
             provider=settings.display_name or settings.provider,
             model=settings.model,
             data_inputs={
-                "mcp_data": sorted((payload.get("mcp_data") or {}).keys()) if isinstance(payload.get("mcp_data"), dict) else [],
+                "mcp_data": sorted((mcp_data or {}).keys()) if isinstance(mcp_data, dict) else [],
                 "user_data": sorted((payload.get("user_data") or {}).keys()) if isinstance(payload.get("user_data"), dict) else [],
             },
         )
@@ -759,6 +818,7 @@ class CLI:
         mcp_data=None,
         user_data=None,
         current_cognition=None,
+        intent_plan=None,
     ) -> list[dict[str, str]]:
         system = (
             "你是二郎神客户端的大模型分析层。二郎神服务端只提供受保护的场景映射，"
@@ -770,6 +830,7 @@ class CLI:
         )
         user_payload = {
             "query": query,
+            "client_intent_plan": intent_plan or {},
             "server_protected_matches": matches[:3],
             "mcp_data": mcp_data or {},
             "user_data": user_data or {},
@@ -785,6 +846,157 @@ class CLI:
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, indent=2)},
         ]
+
+    async def _infer_client_intent(self, query: str, payload: dict, settings, llm_client_cls) -> dict:
+        explicit = payload.get("intent_plan") or payload.get("intent")
+        if isinstance(explicit, dict):
+            return explicit
+        self._show_progress("正在本机理解问题意图")
+        intent_payload = {
+            "query": query,
+            "user_data_keys": sorted((payload.get("user_data") or {}).keys()) if isinstance(payload.get("user_data"), dict) else [],
+            "provided_mcp_data_keys": sorted((payload.get("mcp_data") or {}).keys()) if isinstance(payload.get("mcp_data"), dict) else [],
+            "allowed_mcp_tools": [
+                {
+                    "name": "get_index_data",
+                    "use_when": "用户问 A股、指数、市场整体、沪深300、上证指数等",
+                    "args": {"index_name": "沪深300", "limit": 60},
+                },
+                {
+                    "name": "get_astock_realtime",
+                    "use_when": "用户问具体 A股代码或个股实时情况",
+                    "args": {"code": "600519", "limit": 1},
+                },
+                {
+                    "name": "search_astocks",
+                    "use_when": "用户给了股票简称但没有代码",
+                    "args": {"keyword": "股票简称", "limit": 5},
+                },
+                {
+                    "name": "get_global_asset_data",
+                    "use_when": "用户问美股、黄金、原油、汇率或全球资产",
+                    "args": {"asset_name": "黄金", "limit": 60},
+                },
+                {
+                    "name": "get_future_market_data",
+                    "use_when": "用户问商品、股指、国债期货",
+                    "args": {"contract_code": "AU", "limit": 60},
+                },
+            ],
+            "output_schema": {
+                "intent": "smalltalk|market_overview|single_asset|portfolio|data_lookup|macro|risk|general_investment",
+                "needs_server_mapping": True,
+                "needs_mcp": False,
+                "mcp_tools": [{"name": "get_index_data", "arguments": {"index_name": "沪深300", "limit": 60}}],
+                "rewritten_query": query,
+                "tone": "natural_analyst",
+            },
+        }
+        try:
+            raw_text = await llm_client_cls(settings, timeout=min(float(get_config().request_timeout or 30), 20.0)).complete(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是二郎神 CLI 的本机意图理解层。请只输出 JSON，不要解释。"
+                            "你要灵活理解用户真正想问什么，并决定是否需要调用 super-66 MCP 数据。"
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(intent_payload, ensure_ascii=False)},
+                ],
+                temperature=0.1,
+                max_tokens=500,
+            )
+            parsed = self._parse_json_object(raw_text)
+            return self._normalize_intent_plan(parsed, query)
+        except Exception as exc:
+            return {
+                "intent": "general_investment",
+                "needs_server_mapping": True,
+                "needs_mcp": False,
+                "mcp_tools": [],
+                "rewritten_query": query,
+                "intent_error": self._sanitize_api_key_error(exc, ""),
+            }
+
+    def _parse_json_object(self, raw_text: str) -> dict:
+        text = (raw_text or "").strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    data = json.loads(text[start:end + 1])
+                    return data if isinstance(data, dict) else {}
+                except json.JSONDecodeError:
+                    return {}
+        return {}
+
+    def _normalize_intent_plan(self, plan: dict, query: str) -> dict:
+        if not isinstance(plan, dict):
+            plan = {}
+        tools = []
+        for item in plan.get("mcp_tools") or []:
+            if not isinstance(item, dict):
+                continue
+            name = self._text_field(item.get("name"))
+            args = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+            if name in self._allowed_super66_tools():
+                tools.append({"name": name, "arguments": args})
+        return {
+            "intent": self._text_field(plan.get("intent")) or "general_investment",
+            "needs_server_mapping": bool(plan.get("needs_server_mapping", True)),
+            "needs_mcp": bool(plan.get("needs_mcp")) and bool(tools),
+            "mcp_tools": tools[:3],
+            "rewritten_query": self._text_field(plan.get("rewritten_query")) or query,
+            "tone": self._text_field(plan.get("tone")) or "natural_analyst",
+        }
+
+    def _allowed_super66_tools(self) -> set[str]:
+        return {
+            "search_astocks",
+            "get_astock_realtime",
+            "get_astock_history",
+            "get_index_data",
+            "get_global_asset_data",
+            "get_future_market_data",
+            "search_products",
+            "get_product_detail",
+            "get_product_history",
+        }
+
+    async def _collect_client_mcp_data(self, query: str, payload: dict, intent_plan: dict) -> dict:
+        provided = payload.get("mcp_data")
+        if isinstance(provided, dict) and provided:
+            return provided
+        tools = intent_plan.get("mcp_tools") if isinstance(intent_plan, dict) else []
+        if not intent_plan.get("needs_mcp") or not tools:
+            return {}
+        self._show_progress("正在读取 super-66 MCP 市场数据")
+        try:
+            from src.mcp.super66 import Super66MCP
+
+            mcp = Super66MCP()
+            collected = {}
+            for item in tools[:3]:
+                name = item.get("name")
+                arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+                if name not in self._allowed_super66_tools():
+                    continue
+                collected[name] = await mcp.call_tool(name, arguments, use_cache=True)
+            return collected
+        except Exception as exc:
+            return {
+                "super66_error": self._sanitize_api_key_error(exc, ""),
+                "note": "super-66 MCP 数据暂不可用，本次仅使用用户问题和服务端场景映射。",
+            }
 
     def _parse_client_llm_advice(self, raw_text: str) -> dict:
         text = (raw_text or "").strip()

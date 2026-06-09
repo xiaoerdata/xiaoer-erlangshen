@@ -244,7 +244,10 @@ async def test_client_side_advice_maps_server_then_calls_local_llm(monkeypatch, 
 
         async def complete(self, messages, temperature=0.7, max_tokens=4096):
             payload = messages[-1]["content"]
+            if "allowed_mcp_tools" in payload:
+                return '{"intent":"market_overview","needs_server_mapping":true,"needs_mcp":false,"mcp_tools":[],"rewritten_query":"A股怎么看"}'
             assert "server_protected_matches" in payload
+            assert "client_intent_plan" in payload
             return '{"view":"模型综合判断","suggestions":["降低单点暴露"],"risk_controls":["控制回撤"],"missing_data":["持仓"]}'
 
     monkeypatch.setattr("src.client.server_client.ErlangshenServerClient", FakeServerClient)
@@ -258,6 +261,63 @@ async def test_client_side_advice_maps_server_then_calls_local_llm(monkeypatch, 
     assert "大模型 API Key 只在本机直连供应商" in result
     assert "降低单点暴露" in result
     reset_config()
+
+
+@pytest.mark.asyncio
+async def test_client_side_advice_uses_local_intent_to_fetch_super66_mcp(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "local-secret")
+    reset_config()
+
+    class FakeServerClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def cognition_map(self, query):
+            return {"matches": [{"scene": "市场监测与事件响应", "confidence": 0.9}]}
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            assert tool_name == "get_index_data"
+            assert arguments["index_name"] == "沪深300"
+            return {"index_name": "沪深300", "change_pct": 1.23}
+
+    class FakeLLMClient:
+        def __init__(self, settings, timeout=60.0):
+            pass
+
+        async def complete(self, messages, temperature=0.7, max_tokens=4096):
+            payload = messages[-1]["content"]
+            if "allowed_mcp_tools" in payload:
+                return (
+                    '{"intent":"market_overview","needs_server_mapping":true,"needs_mcp":true,'
+                    '"mcp_tools":[{"name":"get_index_data","arguments":{"index_name":"沪深300","limit":60}}],'
+                    '"rewritten_query":"今天A股市场情况怎么样"}'
+                )
+            assert "沪深300" in payload
+            assert "change_pct" in payload
+            return '{"view":"结合实时数据看，A股今天偏强。","suggestions":["先看主线"],"risk_controls":["别追高"],"missing_data":[]}'
+
+    monkeypatch.setattr("src.client.server_client.ErlangshenServerClient", FakeServerClient)
+    monkeypatch.setattr("src.llm.LLMClient", FakeLLMClient)
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    result = await CLI().dispatch("今天市场情况怎么样")
+
+    assert "结合实时数据看" in result
+    assert "先看主线" in result
+    assert "服务端场景：市场监测与事件响应" in result
+    reset_config()
+
+
+def test_interactive_turn_visually_separates_question_and_answer():
+    output = CLI()._format_interactive_turn("今天市场情况怎么样", "先看主线。")
+
+    assert "╭─ 你 " in output
+    assert "今天市场情况怎么样" in output
+    assert "╭─ 二郎神 " in output
+    assert "先看主线。" in output
 
 
 @pytest.mark.asyncio
