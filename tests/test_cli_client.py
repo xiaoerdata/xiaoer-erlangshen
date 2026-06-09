@@ -96,6 +96,24 @@ async def test_interactive_mode_exits_cleanly_on_terminal_eio(monkeypatch, capsy
     assert "错误:" not in output
 
 
+@pytest.mark.asyncio
+async def test_interactive_mode_exits_cleanly_on_stringified_terminal_eio(monkeypatch, capsys):
+    class TerminalClosed(Exception):
+        def __str__(self):
+            return "(5, 'Input/output error')"
+
+    cli = CLI()
+    monkeypatch.setattr(cli, "_init_hooks", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _: (_ for _ in ()).throw(TerminalClosed()))
+
+    await cli.interactive_mode()
+
+    output = capsys.readouterr().out
+    assert "再见!" in output
+    assert "Input/output error" not in output
+    assert "错误:" not in output
+
+
 def test_default_client_server_url():
     reset_config()
 

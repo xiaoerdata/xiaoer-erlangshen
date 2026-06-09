@@ -268,12 +268,15 @@ class CLI:
                 print("\n再见!")
                 break
             except OSError as exc:
-                if self._is_terminal_closed_error(exc):
+                if self._should_exit_for_terminal(exc):
                     print("\n再见!")
                     break
                 print(f"\n错误: {exc}\n")
-            except Exception as e:
-                print(f"\n错误: {e}\n")
+            except Exception as exc:
+                if self._should_exit_for_terminal(exc):
+                    print("\n再见!")
+                    break
+                print(f"\n错误: {exc}\n")
 
         # Session end hook
         if self.hooks and "session_end" in self.hooks:
@@ -499,7 +502,11 @@ class CLI:
                 if not ch:
                     raise EOFError
         except OSError as exc:
-            if self._is_terminal_closed_error(exc):
+            if self._should_exit_for_terminal(exc):
+                raise EOFError from exc
+            raise
+        except Exception as exc:
+            if self._should_exit_for_terminal(exc):
                 raise EOFError from exc
             raise
         finally:
@@ -636,8 +643,21 @@ class CLI:
         sys.stdout.flush()
         self._slash_dropdown_lines = len(lines)
 
+    def _should_exit_for_terminal(self, exc: BaseException) -> bool:
+        if isinstance(exc, (EOFError, BrokenPipeError)):
+            return True
+        if isinstance(exc, OSError):
+            return self._is_terminal_closed_error(exc)
+        message = str(exc)
+        return "Input/output error" in message or "(5," in message
+
     def _is_terminal_closed_error(self, exc: OSError) -> bool:
-        return getattr(exc, "errno", None) == 5 or "Input/output error" in str(exc)
+        args = getattr(exc, "args", ())
+        return (
+            getattr(exc, "errno", None) == 5
+            or 5 in args
+            or "Input/output error" in str(exc)
+        )
 
     def _setup_completion(self) -> None:
         try:

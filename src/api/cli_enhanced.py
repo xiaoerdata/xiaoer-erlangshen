@@ -61,6 +61,20 @@ def c(color: str, text: str) -> str:
     return f"{color}{text}{C.RESET}"
 
 
+def is_terminal_closed_error(exc: BaseException) -> bool:
+    if isinstance(exc, (EOFError, BrokenPipeError)):
+        return True
+    if isinstance(exc, OSError):
+        args = getattr(exc, "args", ())
+        return (
+            getattr(exc, "errno", None) == 5
+            or 5 in args
+            or "Input/output error" in str(exc)
+        )
+    message = str(exc)
+    return "Input/output error" in message or "(5," in message
+
+
 def clear_line():
     """清除当前行"""
     sys.stdout.write('\r' + ' ' * 100 + '\r')
@@ -376,7 +390,16 @@ class EnhancedCLI:
         except:
             pass
         
-        return input(prompt)
+        try:
+            return input(prompt)
+        except OSError as exc:
+            if is_terminal_closed_error(exc):
+                raise EOFError from exc
+            raise
+        except Exception as exc:
+            if is_terminal_closed_error(exc):
+                raise EOFError from exc
+            raise
 
     async def _process_command(self, cmd: str) -> Optional[str]:
         """处理命令"""
@@ -515,11 +538,15 @@ class EnhancedCLI:
                     print(result)
 
             except KeyboardInterrupt:
-                print(c(C.YELLOW, "\n\n⚠ 使用 /quit 退出"))
-                continue
+                print(c(C.CYAN, "\n\n👋 已收到 Ctrl+C，正在退出。"))
+                self.running = False
+                break
             except EOFError:
                 break
             except Exception as e:
+                if is_terminal_closed_error(e):
+                    self.running = False
+                    break
                 logger.error(f"CLI error: {e}")
                 print(c(C.BRIGHT_RED, f"\n❌ 错误: {e}"))
 
