@@ -11,6 +11,18 @@ from src.model_presets import default_model_for
 from src.paths import get_default_knowledge_dir, get_project_root
 
 
+API_KEY_CONFIG_FIELDS = (
+    "llm_api_key",
+    "deepseek_api_key",
+    "anthropic_api_key",
+    "claude_api_key",
+    "mimo_api_key",
+    "xiaomi_api_key",
+    "kimi_api_key",
+    "moonshot_api_key",
+)
+
+
 class Config(BaseModel):
     """二郎神配置"""
 
@@ -349,6 +361,7 @@ def get_config() -> Config:
         # 先从环境变量加载
         env_updates = load_config_from_env()
         base_config = load_config()
+        env_updates = _remove_api_key_env_overrides_when_local_key_exists(base_config, env_updates)
 
         if env_updates:
             _config = merge_config(base_config, env_updates)
@@ -356,6 +369,25 @@ def get_config() -> Config:
             _config = base_config
 
     return _config
+
+
+def _remove_api_key_env_overrides_when_local_key_exists(
+    base_config: Config,
+    env_updates: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Keep API key usage consistent with keys saved by `/model key`.
+
+    Provider/model/base-url environment variables may still override config.
+    API keys saved in settings.json win over same-field environment variables so
+    the key that passed local validation is also the key used for `/advice`.
+    """
+    if not env_updates:
+        return env_updates
+    updates = env_updates.copy()
+    for field in API_KEY_CONFIG_FIELDS:
+        if getattr(base_config, field, None):
+            updates.pop(field, None)
+    return updates
 
 
 def update_config(**kwargs) -> Config:

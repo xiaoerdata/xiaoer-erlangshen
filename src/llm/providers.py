@@ -142,8 +142,8 @@ def resolve_llm_settings(
         resolved_api_key = _clean(api_key)
     else:
         resolved_api_key = (
-            _first_env(definition.api_key_envs)
-            or _provider_config_value(config, provider_name, "api_key")
+            _provider_config_value(config, provider_name, "api_key")
+            or _first_env(definition.api_key_envs)
             or _clean(getattr(config, "llm_api_key", None))
             or _first_env(("LLM_API_KEY",))
         )

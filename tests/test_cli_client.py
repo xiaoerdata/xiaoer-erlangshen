@@ -2,7 +2,8 @@ import pytest
 
 from src.cli import CLI
 from src.client.server_client import _normalize_login_payload
-from src.config import get_config, reset_config
+from src.config import get_config, reset_config, update_config
+from src.llm.providers import resolve_llm_settings
 
 
 @pytest.mark.asyncio
@@ -141,6 +142,23 @@ async def test_model_key_does_not_save_when_validation_fails(monkeypatch, tmp_pa
     assert "401 Unauthorized" in result
     assert get_config().mimo_api_key is None
     assert not (tmp_path / "settings.json").exists()
+    reset_config()
+
+
+def test_saved_local_api_key_overrides_stale_environment_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+    reset_config()
+    update_config(llm_provider="mimo", mimo_model="mimo-v2.5", mimo_api_key="validated-local-key")
+
+    reset_config()
+    monkeypatch.setenv("MIMO_API_KEY", "stale-env-key")
+
+    config = get_config()
+    settings = resolve_llm_settings(config=config)
+
+    assert config.mimo_api_key == "validated-local-key"
+    assert settings.api_key == "validated-local-key"
     reset_config()
 
 
