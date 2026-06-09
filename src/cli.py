@@ -296,7 +296,7 @@ class CLI:
         user = session.get("user") or {}
         username = user.get("username") or user.get("email") or user.get("id")
         auth_text = username or ("已保存 token" if session.get("token") else "未登录")
-        provider, model, llm_ready, _ = self._llm_status(config)
+        provider, model, llm_ready, key_hint = self._llm_status(config)
         print(_logo())
         print()
         print(_panel("Session", [
@@ -310,6 +310,9 @@ class CLI:
         next_steps = self._next_steps(session, llm_ready)
         if next_steps:
             print(_panel("Next Steps", next_steps))
+            print()
+        if not llm_ready:
+            print(_color(f"注意: 当前大模型 API Key 未配置，请设置 {key_hint}=...，或输入 /model select 切换供应商。", "33;1"))
             print()
         print(_color("输入 / 会弹出命令选择器；输入自然语言会默认请求 /advice；输入 /exit 退出。", "2"))
         print()
@@ -397,6 +400,8 @@ class CLI:
             f"- 当前 model: {model}",
             f"- API key: {status}",
             "",
+            "OpenAI 提示: GPT-5.5/GPT-5.3 当前主要是 ChatGPT/Codex 侧选择；API 预设仍使用官方 API 模型列表中的 gpt-5.2。",
+            "",
             "可选供应商和型号:",
         ]
         for provider_preset in MODEL_PRESETS:
@@ -411,6 +416,8 @@ class CLI:
         ])
         if not ready:
             lines.extend([
+                "",
+                f"注意: 当前 {preset.display_name} API Key 未设置，投资建议不会调用该供应商。",
                 "",
                 "生产环境建议用环境变量配置，不要写进仓库:",
                 f"  export LLM_PROVIDER={preset.id}",
@@ -456,12 +463,21 @@ class CLI:
         update_kwargs = {"llm_provider": provider.id}
         update_kwargs.update(self._provider_model_update(provider.id, model_id))
         update_config(**update_kwargs)
+        _, _, ready, key_hint = self._llm_status(get_config())
 
-        return "\n".join([
+        lines = [
             "【大模型配置已更新】",
             f"- provider: {provider.id} ({provider.display_name})",
             f"- model: {model_id}",
             f"- 配置文件: {get_config_path()}",
+        ]
+        if not ready:
+            lines.extend([
+                f"- API Key: 未配置，请设置 {key_hint}=...",
+                "",
+                f"注意: 未配置 {provider.display_name} API Key 前，服务端不会生成大模型投资建议。",
+            ])
+        lines.extend([
             "",
             "API Key 不会由选择器写入仓库；生产环境建议用环境变量配置:",
             f"  export LLM_PROVIDER={provider.id}",
@@ -470,6 +486,7 @@ class CLI:
             "",
             "配置后重启 PM2/API 服务，再执行 /service 查看服务端是否已加载该模型配置。",
         ])
+        return "\n".join(lines)
 
     def _provider_model_update(self, provider: str, model: str) -> dict[str, str]:
         provider = normalize_provider(provider)
@@ -484,6 +501,12 @@ class CLI:
         if provider == "kimi":
             return {"kimi_model": model}
         return {"llm_model": model}
+
+    def _select_style_current(self) -> str:
+        return "bg:#00a3a3 #000000 bold"
+
+    def _ansi_selected_style(self) -> str:
+        return "30;46"
 
     async def _select_list(self, title: str, items: list[tuple[str, str, str]]) -> str | None:
         try:
@@ -552,7 +575,7 @@ class CLI:
                 "border": "#888888",
                 "hint": "#888888",
                 "item": "#d0d0d0",
-                "current": "reverse #ffffff",
+                "current": self._select_style_current(),
             }),
         )
         return await app.run_async()
@@ -608,7 +631,7 @@ class CLI:
             marker = "›" if index == selected else " "
             line = "│ " + f"{marker} {label:<24} {description}"[: width - 3].ljust(width - 3) + "│"
             if index == selected:
-                line = _color(line, "36;7")
+                line = _color(line, self._ansi_selected_style())
             lines.append(line)
         lines.append(_color("╰" + "─" * (width - 2) + "╯", "36"))
         sys.stdout.write("\n".join(lines) + "\n")
@@ -818,7 +841,7 @@ class CLI:
             style=Style.from_dict({
                 "prompt": "ansicyan bold",
                 "menu": "#d0d0d0",
-                "menu.current": "reverse #ffffff",
+                "menu.current": cli._select_style_current(),
                 "menu.border": "#888888",
                 "menu.muted": "#888888",
             }),
@@ -1081,7 +1104,7 @@ class CLI:
             text = f"{marker} {shortcut:<24} {description}"
             line = "│ " + text[: width - 3].ljust(width - 3) + "│"
             if start + idx == selected:
-                line = _color(line, "36;7")
+                line = _color(line, self._ansi_selected_style())
             lines.append(line)
         hidden_before = start
         hidden_after = max(0, len(matches) - start - len(visible))

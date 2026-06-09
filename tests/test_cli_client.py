@@ -56,10 +56,12 @@ async def test_model_help_guides_api_key_configuration(monkeypatch, tmp_path):
     assert "【大模型配置】" in result
     assert "当前 provider: kimi" in result
     assert "API key: 未配置" in result
+    assert "API Key 未设置" in result
     assert "export KIMI_API_KEY=..." in result
     assert "/model select" in result
     assert "kimi-k2.6" in result
     assert "mimo-v2.5-pro" in result
+    assert "GPT-5.5/GPT-5.3" in result
     reset_config()
 
 
@@ -84,6 +86,13 @@ def test_provider_model_update_uses_provider_specific_fields():
     }
     assert cli._provider_model_update("mimo", "mimo-v2.5-pro") == {"mimo_model": "mimo-v2.5-pro"}
     assert cli._provider_model_update("moonshot", "kimi-k2.6") == {"kimi_model": "kimi-k2.6"}
+
+
+def test_selection_styles_do_not_use_white_reverse():
+    cli = CLI()
+
+    assert "bg:#00a3a3 #000000 bold" in cli._select_style_current()
+    assert cli._ansi_selected_style() == "30;46"
 
 
 @pytest.mark.asyncio
