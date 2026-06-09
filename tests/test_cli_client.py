@@ -252,11 +252,51 @@ async def test_client_side_advice_maps_server_then_calls_local_llm(monkeypatch, 
 
     result = await CLI().dispatch("/advice A股怎么看")
 
-    assert "客户端大模型投资建议" in result
-    assert "服务端命中场景: 市场监测与事件响应" in result
-    assert "本机大模型: DeepSeek / deepseek-v4-flash" in result
-    assert "Key 仅在本机用于直连供应商" in result
+    assert "我先按“A股怎么看”来理解" in result
+    assert "服务端场景：市场监测与事件响应" in result
+    assert "本机模型：DeepSeek / deepseek-v4-flash" in result
+    assert "大模型 API Key 只在本机直连供应商" in result
     assert "降低单点暴露" in result
+    reset_config()
+
+
+@pytest.mark.asyncio
+async def test_client_side_advice_formats_string_sections_as_items():
+    cli = CLI()
+    result = cli._format_client_advice(
+        query="A股怎么看",
+        matches=[{"scene": "市场监测与事件响应", "confidence": 0.72}],
+        synthesis={
+            "view": "短期还需要观察。",
+            "suggestions": "可执行建议：1. 先看成交量。 2. 再看主线持续性。",
+            "risk_controls": "风险控制：1. 不追高。 2. 控制仓位。",
+            "missing_data": "需补充数据：1. 持仓。 2. 周期。",
+        },
+        raw_text="",
+        provider="Xiaomi MiMo",
+        model="mimo-v2.5",
+        data_inputs={},
+    )
+
+    assert "- 先看成交量。" in result
+    assert "- 再看主线持续性。" in result
+    assert "- 不追高。" in result
+    assert "- 控制仓位。" in result
+    assert "- 持仓。" in result
+    assert "- 周期。" in result
+    assert "- 可" not in result
+
+
+@pytest.mark.asyncio
+async def test_small_talk_returns_natural_response_without_analysis(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    reset_config()
+
+    result = await CLI().dispatch("在吗")
+
+    assert result.startswith("在，我在。")
+    assert "投资问题" in result
+    assert "服务端场景" not in result
     reset_config()
 
 

@@ -10,6 +10,7 @@ import getpass
 import importlib
 import json
 import os
+import re
 import shutil
 
 from src import __version__
@@ -651,6 +652,8 @@ class CLI:
         if isinstance(parsed, str):
             return parsed
         query, payload = parsed
+        if self._is_small_talk_query(query):
+            return self._small_talk_response(query)
         config = get_config()
         provider, model, ready, key_hint = self._llm_status(config)
         if not ready:
@@ -672,6 +675,7 @@ class CLI:
             from src.client.server_client import ErlangshenAPIError, ErlangshenServerClient
             from src.llm import LLMClient, resolve_llm_settings
 
+            self._show_progress("正在向服务端确认问题场景")
             session = load_auth_session()
             client = ErlangshenServerClient(
                 base_url=session.get("base_url") or config.erlangshen_api_base_url,
@@ -694,6 +698,7 @@ class CLI:
 
         try:
             settings = resolve_llm_settings(config=get_config())
+            self._show_progress(f"正在用本机 {settings.display_name} 生成分析")
             raw_text = await LLMClient(settings, timeout=float(config.request_timeout or 30)).complete(
                 self._client_advice_messages(
                     query=query,
@@ -758,7 +763,10 @@ class CLI:
         system = (
             "你是二郎神客户端的大模型分析层。二郎神服务端只提供受保护的场景映射，"
             "不会接收用户的大模型 API Key。你必须基于服务端返回的公开映射、用户数据和 MCP 数据生成投资分析，"
-            "不能声称看到了完整服务端认知库或内部案例全文。输出 JSON 对象，字段为 view, suggestions, risk_controls, missing_data。"
+            "不能声称看到了完整服务端认知库或内部案例全文。"
+            "你的语气要像一位克制、可靠、会和用户自然沟通的投资分析师，不要机械套模板。"
+            "输出 JSON 对象，字段为 view, suggestions, risk_controls, missing_data；"
+            "suggestions、risk_controls、missing_data 必须是字符串数组，不要返回单个字符串。"
         )
         user_payload = {
             "query": query,
@@ -767,8 +775,9 @@ class CLI:
             "user_data": user_data or {},
             "current_cognition": current_cognition or {},
             "requirements": [
-                "先给综合判断，再给可执行建议和风控",
+                "先用自然语言给综合判断，再给少量可执行建议和风控",
                 "如数据不足必须降低确定性并列出需要补充的数据",
+                "如果用户只是打招呼或问题过于泛泛，要自然追问，不要强行生成投资结论",
                 "不要暴露或编造服务端内部认知库内容",
             ],
         }
@@ -809,37 +818,83 @@ class CLI:
         data_inputs: dict,
     ) -> str:
         top = matches[0] if matches else {}
-        suggestions = synthesis.get("suggestions") or []
-        risks = synthesis.get("risk_controls") or []
-        missing = synthesis.get("missing_data") or []
+        suggestions = self._coerce_text_items(synthesis.get("suggestions"))
+        risks = self._coerce_text_items(synthesis.get("risk_controls"))
+        missing = self._coerce_text_items(synthesis.get("missing_data"))
+        view = self._text_field(synthesis.get("view")) or raw_text
+        scene = self._text_field(top.get("scene")) or "未命中明确场景"
+        confidence = top.get("confidence")
         lines = [
-            "【客户端大模型投资建议】",
-            f"- 问题: {query}",
-            f"- 服务端命中场景: {top.get('scene')}",
-            f"- 置信度: {top.get('confidence')}",
-            f"- 本机大模型: {provider} / {model}",
-            "- Key 边界: 大模型 API Key 仅在本机用于直连供应商，未发送给二郎神服务端",
-            f"- MCP数据键: {', '.join(data_inputs.get('mcp_data') or []) or '未提供'}",
-            f"- 用户数据键: {', '.join(data_inputs.get('user_data') or []) or '未提供'}",
+            f"我先按“{query}”来理解。",
             "",
-            f"综合判断: {synthesis.get('view') or raw_text}",
-            "",
-            "建议:",
+            view,
         ]
-        for item in suggestions:
-            lines.append(f"- {item}")
-        if not suggestions:
-            lines.append("- 大模型未返回结构化建议，请参考综合判断。")
-        lines.extend(["", "风控:"])
+        if suggestions:
+            lines.extend(["", "可以先这样做："])
+            for item in suggestions[:5]:
+                lines.append(f"- {item}")
+        else:
+            lines.extend(["", "如果你愿意，我建议你把问题再收窄一点：资产、周期、仓位和风险承受力这四项里，至少补两项。"])
+        lines.extend(["", "需要注意："])
         for item in risks:
             lines.append(f"- {item}")
         if not risks:
             lines.append("- 注意仓位、期限、流动性与最大回撤约束。")
         if missing:
-            lines.extend(["", "需补充数据:"])
-            for item in missing:
+            lines.extend(["", "我还需要你补充："])
+            for item in missing[:5]:
                 lines.append(f"- {item}")
+        meta = f"服务端场景：{scene}"
+        if confidence is not None:
+            meta += f"，置信度 {confidence}"
+        lines.extend([
+            "",
+            "—",
+            f"{meta}；本机模型：{provider} / {model}。大模型 API Key 只在本机直连供应商，未发送给二郎神服务端。",
+        ])
         return "\n".join(lines)
+
+    def _coerce_text_items(self, value) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            result = []
+            for item in value:
+                text = self._text_field(item)
+                if text:
+                    result.append(text)
+            return result
+        text = self._text_field(value)
+        if not text:
+            return []
+        text = re.sub(r"^(可执行建议|建议|风险控制|风控|需补充数据|缺失数据)[:：]\s*", "", text)
+        parts = re.split(r"(?:\n+|(?:^|\s)(?:\d+|[一二三四五六七八九十]+)[\.、]\s+|(?:^|\s)[\-*]\s+)", text)
+        result = [part.strip(" \t\r\n-：:") for part in parts if part and part.strip(" \t\r\n-：:")]
+        return result or [text]
+
+    def _text_field(self, value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return " ".join(value.strip().split())
+        return " ".join(str(value).strip().split())
+
+    def _is_small_talk_query(self, query: str) -> bool:
+        text = re.sub(r"\s+", "", (query or "").lower())
+        return text in {"在吗", "在不在", "你好", "您好", "hi", "hello", "hey", "哈喽", "嗨"}
+
+    def _small_talk_response(self, query: str) -> str:
+        return "\n".join([
+            "在，我在。",
+            "",
+            "你可以直接把投资问题丢给我，比如一个市场判断、某个持仓、或者一段你看到的新闻。我会先让服务端做场景映射，再用你本机配置的大模型给出分析。",
+            "",
+            "如果还没想好，也可以先问：今天市场里哪个方向最值得跟踪？",
+        ])
+
+    def _show_progress(self, message: str) -> None:
+        if sys.stdout.isatty():
+            print(_color(f"· {message}...", "2"), flush=True)
 
     async def _select_list(self, title: str, items: list[tuple[str, str, str]]) -> str | None:
         try:
