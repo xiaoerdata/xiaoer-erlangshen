@@ -36,7 +36,7 @@ erlangshen:guest> 利率下行时A股红利资产怎么看
 | `/map <问题>` | 请求服务端进行认知场景映射 |
 | `/advice <问题>` | 服务端映射场景，本机大模型生成受保护投资建议 |
 | `/model select` | 选择大模型供应商和型号 |
-| `/model key` | 在本机输入并保存当前供应商 API Key |
+| `/model key` | 本机直连测试通过后保存当前供应商 API Key |
 | `/auth server <url>` | 设置服务端地址 |
 | `/clear` | 清屏 |
 | `/exit` | 退出 |

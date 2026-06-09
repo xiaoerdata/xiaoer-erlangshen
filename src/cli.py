@@ -40,7 +40,7 @@ COMMAND_PALETTE = [
     ("whoami", "/whoami", "查看当前账号状态"),
     ("model", "/model", "检查当前大模型 provider/model/key 配置"),
     ("model-select", "/model select", "用光标选择大模型供应商和型号"),
-    ("model-key", "/model key", "在本机输入并保存当前供应商 API Key"),
+    ("model-key", "/model key", "在本机测试并保存当前供应商 API Key"),
     ("commands", "/commands", "查看所有斜杠命令"),
     ("service", "/service", "查看核心服务端状态、鉴权、模型和认知保护"),
     ("health", "/health", "检查服务端健康状态"),
@@ -350,7 +350,7 @@ class CLI:
   /status                     查看登录状态
   /model                      检查大模型 provider/model/API key 配置
   /model select               光标选择大模型供应商和型号
-  /model key                  在本机输入并保存当前供应商 API Key
+  /model key                  在本机测试并保存当前供应商 API Key
   /commands                   打开命令面板
   /service                    查看服务端状态
   /health                     服务端健康检查
@@ -424,7 +424,7 @@ class CLI:
                 lines.append(f"  - {model_preset.id}{selected}: {model_preset.description}")
         lines.extend([
             "",
-            "交互配置: 输入 /model select 选择供应商和型号；输入 /model key 在本机保存 API Key。",
+            "交互配置: 输入 /model select 选择供应商和型号；输入 /model key 测试通过后在本机保存 API Key。",
         ])
         if not ready:
             lines.extend([
