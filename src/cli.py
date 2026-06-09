@@ -588,15 +588,7 @@ class CLI:
         if hidden_before or hidden_after:
             lines.append("│ " + f"... 上方 {hidden_before} 条，下方 {hidden_after} 条".ljust(width - 3) + "│")
         lines.append(_color("╰" + "─" * (width - 2) + "╯", "36"))
-        self._render_prompt("/" + query)
-        sys.stdout.write("\033[s\n")
-        for line in lines:
-            sys.stdout.write("\r\033[2K" + line + "\n")
-        for _ in range(max(0, self._slash_dropdown_lines - len(lines))):
-            sys.stdout.write("\r\033[2K\n")
-        sys.stdout.write("\033[u")
-        sys.stdout.flush()
-        self._slash_dropdown_lines = len(lines)
+        self._render_dropdown_below("/" + query, lines)
 
     def _input_from_shortcut(self, shortcut: str) -> tuple[str, bool]:
         parts = shortcut.split()
@@ -619,14 +611,30 @@ class CLI:
         sys.stdout.flush()
 
     def _clear_slash_dropdown(self) -> None:
-        if not self._slash_dropdown_lines:
+        lines = self._slash_dropdown_lines
+        if not lines:
             return
-        sys.stdout.write("\033[s\n")
-        for _ in range(self._slash_dropdown_lines):
+        sys.stdout.write("\n")
+        for _ in range(lines):
             sys.stdout.write("\r\033[2K\n")
-        sys.stdout.write("\033[u\r\033[2K")
+        sys.stdout.write(f"\033[{lines + 1}A\r\033[2K")
         sys.stdout.flush()
         self._slash_dropdown_lines = 0
+
+    def _render_dropdown_below(self, prompt_buffer: str, lines: list[str]) -> None:
+        previous_lines = self._slash_dropdown_lines
+        draw_lines = max(previous_lines, len(lines))
+        self._render_prompt(prompt_buffer)
+        sys.stdout.write("\n")
+        for idx in range(draw_lines):
+            sys.stdout.write("\r\033[2K")
+            if idx < len(lines):
+                sys.stdout.write(lines[idx])
+            sys.stdout.write("\n")
+        sys.stdout.write(f"\033[{draw_lines + 1}A")
+        self._render_prompt(prompt_buffer)
+        sys.stdout.flush()
+        self._slash_dropdown_lines = len(lines)
 
     def _is_terminal_closed_error(self, exc: OSError) -> bool:
         return getattr(exc, "errno", None) == 5 or "Input/output error" in str(exc)
