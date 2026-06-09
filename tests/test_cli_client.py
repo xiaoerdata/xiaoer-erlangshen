@@ -90,6 +90,60 @@ async def test_model_key_explains_local_only_storage_in_non_tty(monkeypatch, tmp
     reset_config()
 
 
+@pytest.mark.asyncio
+async def test_model_key_validates_before_saving(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("LLM_PROVIDER", "mimo")
+    monkeypatch.setenv("MIMO_MODEL", "mimo-v2.5")
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+    monkeypatch.delenv("XIAOMI_API_KEY", raising=False)
+    reset_config()
+
+    calls = []
+
+    async def fake_validate(self, provider, model, api_key):
+        calls.append((provider, model, api_key))
+        return True, "连接测试成功"
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "candidate-key")
+    monkeypatch.setattr(CLI, "_validate_local_api_key", fake_validate)
+
+    result = await CLI().dispatch("/model key")
+
+    assert "API Key 已保存到本机" in result
+    assert "连接测试: 连接测试成功" in result
+    assert calls == [("mimo", "mimo-v2.5", "candidate-key")]
+    assert get_config().mimo_api_key == "candidate-key"
+    reset_config()
+
+
+@pytest.mark.asyncio
+async def test_model_key_does_not_save_when_validation_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("LLM_PROVIDER", "mimo")
+    monkeypatch.setenv("MIMO_MODEL", "mimo-v2.5")
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+    monkeypatch.delenv("XIAOMI_API_KEY", raising=False)
+    reset_config()
+
+    async def fake_validate(self, provider, model, api_key):
+        assert api_key == "bad-key"
+        return False, "401 Unauthorized"
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "bad-key")
+    monkeypatch.setattr(CLI, "_validate_local_api_key", fake_validate)
+
+    result = await CLI().dispatch("/model key")
+
+    assert "API Key 未保存" in result
+    assert "401 Unauthorized" in result
+    assert get_config().mimo_api_key is None
+    assert not (tmp_path / "settings.json").exists()
+    reset_config()
+
+
 def test_provider_model_update_uses_provider_specific_fields():
     cli = CLI()
 

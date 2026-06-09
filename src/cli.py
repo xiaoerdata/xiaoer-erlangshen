@@ -183,7 +183,7 @@ class CLI:
             if args.strip().lower() in {"select", "choose", "set", "配置", "选择"}:
                 return await self.model_select_interactive()
             if args.strip().lower() in {"key", "apikey", "api-key", "密钥", "配置key"}:
-                return self.model_key_interactive()
+                return await self.model_key_interactive()
             return self.model_help_text()
         if command in {"advice", "建议", "投顾"}:
             if not args.strip():
@@ -478,7 +478,7 @@ class CLI:
         update_kwargs = {"llm_provider": provider.id}
         update_kwargs.update(self._provider_model_update(provider.id, model_id))
         update_config(**update_kwargs)
-        saved_key = self._maybe_prompt_api_key(provider.id)
+        saved_key, key_error = await self._maybe_prompt_api_key(provider.id, model_id)
         _, _, ready, key_hint = self._llm_status(get_config())
 
         lines = [
@@ -489,7 +489,14 @@ class CLI:
             "- Key 处理: 只保存在本机配置/环境变量，不会发送给二郎神服务端",
         ]
         if saved_key:
-            lines.append("- API Key: 已保存到本机配置")
+            lines.append("- API Key: 连接测试成功，已保存到本机配置")
+        elif key_error:
+            lines.extend([
+                "- API Key: 连接测试失败，未保存",
+                f"- 测试失败: {key_error}",
+                "",
+                "注意: 这个 Key 没有写入本机配置，也没有发送给二郎神服务端。",
+            ])
         elif not ready:
             lines.extend([
                 f"- API Key: 未配置，请设置 {key_hint}=...",
@@ -507,7 +514,7 @@ class CLI:
         ])
         return "\n".join(lines)
 
-    def model_key_interactive(self) -> str:
+    async def model_key_interactive(self) -> str:
         config = get_config()
         provider, model, ready, key_hint = self._llm_status(config)
         preset = get_provider_preset(provider)
@@ -529,29 +536,78 @@ class CLI:
         api_key = getpass.getpass(f"{preset.display_name} API Key（只保存本机，不发送服务端；留空取消）: ").strip()
         if not api_key:
             return "已取消 API Key 输入。"
+        print("正在本机直连模型供应商测试 API Key...")
+        valid, message = await self._validate_local_api_key(preset.id, model, api_key)
+        if not valid:
+            return "\n".join([
+                "【API Key 未保存】",
+                f"- provider: {preset.id} ({preset.display_name})",
+                f"- model: {model}",
+                f"- 测试失败: {message}",
+                "- 安全边界: Key 没有写入本机配置，也没有发送给二郎神服务端",
+                "- 下一步: 请检查 Key、模型型号、供应商额度、网络代理后重新输入 /model key",
+            ])
         update_config(**self._provider_key_update(preset.id, api_key))
         return "\n".join([
             "【API Key 已保存到本机】",
             f"- provider: {preset.id} ({preset.display_name})",
             f"- model: {model}",
             f"- 配置文件: {get_config_path()}",
+            f"- 连接测试: {message}",
             "- 安全边界: Key 不会发送给二郎神服务端；/advice 只把问题发给服务端做场景映射",
             "- 下一步: 直接输入投资问题，客户端会直连大模型生成分析",
         ])
 
-    def _maybe_prompt_api_key(self, provider: str) -> bool:
+    async def _maybe_prompt_api_key(self, provider: str, model: str) -> tuple[bool, str]:
         _, _, ready, _ = self._llm_status(get_config())
         if ready or not sys.stdin.isatty():
-            return False
+            return False, ""
         preset = get_provider_preset(provider)
         answer = input(f"是否现在输入 {preset.display_name} API Key？只保存本机，不发送服务端 [y/N]: ").strip().lower()
         if answer not in {"y", "yes", "是", "好"}:
-            return False
+            return False, ""
         api_key = getpass.getpass(f"{preset.display_name} API Key: ").strip()
         if not api_key:
-            return False
+            return False, ""
+        print("正在本机直连模型供应商测试 API Key...")
+        valid, message = await self._validate_local_api_key(provider, model, api_key)
+        if not valid:
+            return False, message
         update_config(**self._provider_key_update(provider, api_key))
-        return True
+        return True, ""
+
+    async def _validate_local_api_key(self, provider: str, model: str, api_key: str) -> tuple[bool, str]:
+        try:
+            from src.llm import LLMClient, resolve_llm_settings
+
+            config = get_config()
+            settings = resolve_llm_settings(
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                config=config,
+            )
+            timeout = max(5.0, min(float(config.request_timeout or 30), 20.0))
+            await LLMClient(settings, timeout=timeout).complete(
+                [
+                    {"role": "system", "content": "You are validating local API connectivity. Reply briefly."},
+                    {"role": "user", "content": "请只回复 OK，用于验证 API Key 可用。"},
+                ],
+                temperature=0,
+                max_tokens=16,
+            )
+            return True, "连接测试成功"
+        except Exception as exc:
+            return False, self._sanitize_api_key_error(exc, api_key)
+
+    def _sanitize_api_key_error(self, exc: Exception, api_key: str) -> str:
+        message = str(exc) or exc.__class__.__name__
+        if api_key:
+            message = message.replace(api_key, "[hidden]")
+        message = " ".join(message.split())
+        if len(message) > 500:
+            message = message[:497] + "..."
+        return message or exc.__class__.__name__
 
     def _provider_model_update(self, provider: str, model: str) -> dict[str, str]:
         provider = normalize_provider(provider)
