@@ -142,6 +142,8 @@ class CLI:
         self.hooks = None
         self._slash_dropdown_lines = 0
         self._input_history: list[str] = []
+        self._prompt_session = None
+        self._slash_selected = 0
 
     async def dispatch(self, user_input: str) -> str:
         """把交互输入或一次性参数分发到对应命令。"""
@@ -243,7 +245,7 @@ class CLI:
 
         while True:
             try:
-                user_input = self._read_prompt().strip()
+                user_input = (await self._read_prompt()).strip()
 
                 if not user_input:
                     continue
@@ -456,11 +458,174 @@ class CLI:
         matches = difflib.get_close_matches(command, sorted(candidates), n=1, cutoff=0.55)
         return matches[0] if matches else None
 
-    def _read_prompt(self) -> str:
+    async def _read_prompt(self) -> str:
         """Read one prompt, opening a slash-command picker when / starts the line."""
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             return input(self.prompt()).strip()
 
+        try:
+            return await self._read_prompt_toolkit()
+        except ImportError:
+            return self._read_prompt_manual()
+
+    async def _read_prompt_toolkit(self) -> str:
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.application.current import get_app_or_none
+        from prompt_toolkit.filters import Condition
+        from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import ConditionalContainer, Dimension, HSplit, Layout, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.styles import Style
+        from prompt_toolkit.widgets import TextArea
+
+        cli = self
+        history_index: int | None = None
+        draft = ""
+        text_area = TextArea(
+            height=1,
+            multiline=False,
+            prompt=HTML("<prompt>❯ </prompt>"),
+        )
+
+        def slash_active() -> bool:
+            return text_area.text.startswith("/")
+
+        def slash_matches():
+            text = text_area.text
+            return cli._filter_palette(text[1:].lower()) if text.startswith("/") else []
+
+        def clamp_selected(matches):
+            if not matches:
+                cli._slash_selected = 0
+                return 0
+            cli._slash_selected = max(0, min(cli._slash_selected, len(matches) - 1))
+            return cli._slash_selected
+
+        def slash_menu_fragments():
+            text = text_area.text
+            if not text.startswith("/"):
+                return []
+            matches = slash_matches()
+            selected = clamp_selected(matches)
+            width = min(max(72, _terminal_width()), 150)
+            max_visible = 8
+            start = max(0, selected - max_visible + 1)
+            visible = matches[start:start + max_visible]
+            fragments = [("class:menu.border", "─" * width + "\n")]
+            if not visible:
+                fragments.append(("class:menu.muted", "没有匹配命令\n"))
+            for idx, (_, shortcut, description) in enumerate(visible):
+                actual = start + idx
+                style = "class:menu.current" if actual == selected else "class:menu"
+                line = f"{shortcut:<30} {description}"
+                fragments.append((style, line[:width] + "\n"))
+            fragments.append(("class:menu.border", "─" * width))
+            return fragments
+
+        def invalidate(_=None):
+            app = get_app_or_none()
+            if app:
+                app.invalidate()
+
+        text_area.buffer.on_text_changed += invalidate
+        bindings = KeyBindings()
+
+        @bindings.add("down", filter=Condition(slash_active))
+        def _(event):
+            matches = slash_matches()
+            if matches:
+                cli._slash_selected = (clamp_selected(matches) + 1) % len(matches)
+                event.app.invalidate()
+
+        @bindings.add("up", filter=Condition(slash_active))
+        def _(event):
+            matches = slash_matches()
+            if matches:
+                cli._slash_selected = (clamp_selected(matches) - 1) % len(matches)
+                event.app.invalidate()
+
+        @bindings.add("up", filter=Condition(lambda: not slash_active()))
+        def _(event):
+            nonlocal history_index, draft
+            if not cli._input_history:
+                return
+            if history_index is None:
+                draft = text_area.text
+                history_index = len(cli._input_history) - 1
+            else:
+                history_index = max(0, history_index - 1)
+            text_area.text = cli._input_history[history_index]
+            text_area.buffer.cursor_position = len(text_area.text)
+
+        @bindings.add("down", filter=Condition(lambda: not slash_active()))
+        def _(event):
+            nonlocal history_index
+            if history_index is None:
+                return
+            if history_index < len(cli._input_history) - 1:
+                history_index += 1
+                text_area.text = cli._input_history[history_index]
+            else:
+                history_index = None
+                text_area.text = draft
+            text_area.buffer.cursor_position = len(text_area.text)
+
+        @bindings.add("enter")
+        def _(event):
+            if slash_active():
+                matches = slash_matches()
+                if matches:
+                    _, shortcut, _ = matches[clamp_selected(matches)]
+                    command, needs_more = cli._input_from_shortcut(shortcut)
+                    text_area.text = command
+                    text_area.buffer.cursor_position = len(command)
+                    if needs_more:
+                        event.app.invalidate()
+                        return
+                    event.app.exit(result=command)
+                    return
+            event.app.exit(result=text_area.text)
+
+        @bindings.add("c-c")
+        def _(event):
+            event.app.exit(exception=KeyboardInterrupt)
+
+        @bindings.add("c-d")
+        def _(event):
+            event.app.exit(exception=EOFError)
+
+        menu = ConditionalContainer(
+            Window(
+                FormattedTextControl(slash_menu_fragments),
+                height=Dimension(max=10),
+                dont_extend_height=True,
+            ),
+            filter=Condition(slash_active),
+        )
+        root = HSplit([text_area, menu])
+        app = Application(
+            layout=Layout(root, focused_element=text_area),
+            key_bindings=bindings,
+            full_screen=False,
+            erase_when_done=True,
+            style=Style.from_dict({
+                "prompt": "ansicyan bold",
+                "menu": "#d0d0d0",
+                "menu.current": "reverse #ffffff",
+                "menu.border": "#888888",
+                "menu.muted": "#888888",
+            }),
+        )
+
+        command = await app.run_async()
+        command = command.strip()
+        if command and (not self._input_history or self._input_history[-1] != command):
+            self._input_history.append(command)
+        return command
+
+    def _read_prompt_manual(self) -> str:
+        """Fallback prompt for environments without prompt_toolkit."""
         try:
             import termios
             import tty
