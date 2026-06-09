@@ -141,6 +141,7 @@ class CLI:
         self.mcp = None
         self.hooks = None
         self._slash_dropdown_lines = 0
+        self._input_history: list[str] = []
 
     async def dispatch(self, user_input: str) -> str:
         """把交互输入或一次性参数分发到对应命令。"""
@@ -469,9 +470,12 @@ class CLI:
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         buffer = ""
+        cursor = 0
+        history_index: int | None = None
+        draft = ""
         try:
             tty.setcbreak(fd)
-            self._render_prompt(buffer)
+            self._render_prompt(buffer, cursor)
             while True:
                 ch = sys.stdin.read(1)
                 if ch == "\x03":
@@ -480,25 +484,84 @@ class CLI:
                     raise EOFError
                 if ch in {"\r", "\n"}:
                     print()
-                    return buffer.strip()
+                    command = buffer.strip()
+                    if command and (not self._input_history or self._input_history[-1] != command):
+                        self._input_history.append(command)
+                    return command
+                if ch == "\x1b":
+                    action = self._read_escape_sequence()
+                    if action == "up":
+                        if self._input_history:
+                            if history_index is None:
+                                draft = buffer
+                                history_index = len(self._input_history) - 1
+                            else:
+                                history_index = max(0, history_index - 1)
+                            buffer = self._input_history[history_index]
+                            cursor = len(buffer)
+                            self._render_prompt(buffer, cursor)
+                        continue
+                    if action == "down":
+                        if history_index is not None:
+                            if history_index < len(self._input_history) - 1:
+                                history_index += 1
+                                buffer = self._input_history[history_index]
+                            else:
+                                history_index = None
+                                buffer = draft
+                            cursor = len(buffer)
+                            self._render_prompt(buffer, cursor)
+                        continue
+                    if action == "left":
+                        cursor = max(0, cursor - 1)
+                        self._render_prompt(buffer, cursor)
+                        continue
+                    if action == "right":
+                        cursor = min(len(buffer), cursor + 1)
+                        self._render_prompt(buffer, cursor)
+                        continue
+                    if action == "home":
+                        cursor = 0
+                        self._render_prompt(buffer, cursor)
+                        continue
+                    if action == "end":
+                        cursor = len(buffer)
+                        self._render_prompt(buffer, cursor)
+                        continue
+                    if action == "delete":
+                        if cursor < len(buffer):
+                            buffer = buffer[:cursor] + buffer[cursor + 1:]
+                            history_index = None
+                            self._render_prompt(buffer, cursor)
+                        continue
+                    continue
                 if ch in {"\x7f", "\b"}:
-                    buffer = buffer[:-1]
-                    self._render_prompt(buffer)
+                    if cursor > 0:
+                        buffer = buffer[:cursor - 1] + buffer[cursor:]
+                        cursor -= 1
+                        history_index = None
+                        self._render_prompt(buffer, cursor)
                     continue
                 if ch == "/" and not buffer:
                     selected = self._slash_command_picker()
                     self._clear_slash_dropdown()
                     if selected:
                         buffer, needs_more = self._input_from_shortcut(selected[1])
+                        cursor = len(buffer)
+                        history_index = None
                         if not needs_more:
-                            self._render_prompt(buffer)
+                            self._render_prompt(buffer, cursor)
                             print()
+                            if buffer and (not self._input_history or self._input_history[-1] != buffer):
+                                self._input_history.append(buffer)
                             return buffer.strip()
-                    self._render_prompt(buffer)
+                    self._render_prompt(buffer, cursor)
                     continue
                 if ch.isprintable():
-                    buffer += ch
-                    self._render_prompt(buffer)
+                    buffer = buffer[:cursor] + ch + buffer[cursor:]
+                    cursor += 1
+                    history_index = None
+                    self._render_prompt(buffer, cursor)
                 if not ch:
                     raise EOFError
         except OSError as exc:
@@ -515,9 +578,63 @@ class CLI:
             except OSError:
                 pass
 
-    def _render_prompt(self, buffer: str) -> None:
+    def _render_prompt(self, buffer: str, cursor: int | None = None) -> None:
+        if cursor is None:
+            cursor = len(buffer)
+        cursor = max(0, min(cursor, len(buffer)))
         sys.stdout.write("\r\033[2K" + self.prompt() + buffer)
+        tail = len(buffer) - cursor
+        if tail > 0:
+            sys.stdout.write(f"\033[{tail}D")
         sys.stdout.flush()
+
+    def _read_escape_sequence(self, timeout: float = 0.05) -> str:
+        import select
+
+        if not select.select([sys.stdin], [], [], timeout)[0]:
+            return "escape"
+        second = sys.stdin.read(1)
+        if second == "O":
+            if not select.select([sys.stdin], [], [], timeout)[0]:
+                return "escape"
+            return {
+                "A": "up",
+                "B": "down",
+                "C": "right",
+                "D": "left",
+                "H": "home",
+                "F": "end",
+            }.get(sys.stdin.read(1), "escape")
+        if second != "[":
+            return "escape"
+        if not select.select([sys.stdin], [], [], timeout)[0]:
+            return "escape"
+        third = sys.stdin.read(1)
+        simple = {
+            "A": "up",
+            "B": "down",
+            "C": "right",
+            "D": "left",
+            "H": "home",
+            "F": "end",
+        }
+        if third in simple:
+            return simple[third]
+        if third.isdigit():
+            sequence = third
+            while select.select([sys.stdin], [], [], timeout)[0]:
+                part = sys.stdin.read(1)
+                sequence += part
+                if part == "~":
+                    break
+            return {
+                "1~": "home",
+                "3~": "delete",
+                "4~": "end",
+                "7~": "home",
+                "8~": "end",
+            }.get(sequence, "escape")
+        return "escape"
 
     def _slash_command_picker(self) -> tuple[str, str, str] | None:
         """Interactive slash-command picker used inside cbreak mode."""
@@ -534,20 +651,22 @@ class CLI:
             if not ch:
                 raise EOFError
             if ch == "\x1b":
-                import select
-                if not select.select([sys.stdin], [], [], 0.05)[0]:
+                action = self._read_escape_sequence()
+                if action == "escape":
                     return None
-                next_char = sys.stdin.read(1)
-                if next_char == "[":
-                    if not select.select([sys.stdin], [], [], 0.05)[0]:
-                        return None
-                    direction = sys.stdin.read(1)
-                    if direction == "A" and matches:
-                        selected = (selected - 1) % len(matches)
-                    elif direction == "B" and matches:
-                        selected = (selected + 1) % len(matches)
+                if action == "up" and matches:
+                    selected = (selected - 1) % len(matches)
                     continue
-                return None
+                if action == "down" and matches:
+                    selected = (selected + 1) % len(matches)
+                    continue
+                if action == "home" and matches:
+                    selected = 0
+                    continue
+                if action == "end" and matches:
+                    selected = len(matches) - 1
+                    continue
+                continue
             if ch in {"q", "Q"}:
                 return None
             if ch in {"\r", "\n"}:
@@ -589,7 +708,10 @@ class CLI:
         for idx, (_, shortcut, description) in enumerate(visible):
             marker = "›" if start + idx == selected else " "
             text = f"{marker} {shortcut:<24} {description}"
-            lines.append("│ " + text[: width - 3].ljust(width - 3) + "│")
+            line = "│ " + text[: width - 3].ljust(width - 3) + "│"
+            if start + idx == selected:
+                line = _color(line, "36;7")
+            lines.append(line)
         hidden_before = start
         hidden_after = max(0, len(matches) - start - len(visible))
         if hidden_before or hidden_after:
@@ -686,12 +808,19 @@ def main():
             cli.print_help()
             return
 
-        result = asyncio.run(cli.dispatch(raw))
+        try:
+            result = asyncio.run(cli.dispatch(raw))
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\n再见!")
+            return
 
         print(result)
     else:
         # 交互模式
-        asyncio.run(cli.interactive_mode())
+        try:
+            asyncio.run(cli.interactive_mode())
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\n再见!")
 
 
 if __name__ == "__main__":
