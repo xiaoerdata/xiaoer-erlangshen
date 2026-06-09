@@ -57,7 +57,33 @@ async def test_model_help_guides_api_key_configuration(monkeypatch, tmp_path):
     assert "当前 provider: kimi" in result
     assert "API key: 未配置" in result
     assert "export KIMI_API_KEY=..." in result
+    assert "/model select" in result
+    assert "kimi-k2.6" in result
+    assert "mimo-v2.5-pro" in result
     reset_config()
+
+
+@pytest.mark.asyncio
+async def test_model_select_requires_interactive_terminal(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    reset_config()
+
+    result = await CLI().dispatch("/model select")
+
+    assert "不能打开光标选择器" in result
+    assert "OPENAI_MODEL=gpt-5.2" in result
+    reset_config()
+
+
+def test_provider_model_update_uses_provider_specific_fields():
+    cli = CLI()
+
+    assert cli._provider_model_update("openai", "gpt-5.2") == {"llm_model": "gpt-5.2"}
+    assert cli._provider_model_update("anthropic", "claude-sonnet-4-6") == {
+        "claude_model": "claude-sonnet-4-6"
+    }
+    assert cli._provider_model_update("mimo", "mimo-v2.5-pro") == {"mimo_model": "mimo-v2.5-pro"}
+    assert cli._provider_model_update("moonshot", "kimi-k2.6") == {"kimi_model": "kimi-k2.6"}
 
 
 @pytest.mark.asyncio

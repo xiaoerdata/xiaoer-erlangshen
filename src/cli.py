@@ -12,7 +12,8 @@ import shutil
 
 from src import __version__
 from src.auth.session import load_auth_session
-from src.config import get_config
+from src.config import get_config, get_config_path, update_config
+from src.model_presets import MODEL_PRESETS, get_provider_preset, normalize_provider
 
 
 LOGO_WIDE = [
@@ -36,6 +37,7 @@ COMMAND_PALETTE = [
     ("status", "/status", "查看本地登录状态，并校验服务端账号"),
     ("whoami", "/whoami", "查看当前账号状态"),
     ("model", "/model", "检查当前大模型 provider/model/key 配置"),
+    ("model-select", "/model select", "用光标选择大模型供应商和型号"),
     ("commands", "/commands", "查看所有斜杠命令"),
     ("service", "/service", "查看核心服务端状态、鉴权、模型和认知保护"),
     ("health", "/health", "检查服务端健康状态"),
@@ -176,6 +178,8 @@ class CLI:
         if command in {"commands", "cmd", "?"}:
             return self.command_palette_text()
         if command in {"model", "models", "config"}:
+            if args.strip().lower() in {"select", "choose", "set", "配置", "选择"}:
+                return await self.model_select_interactive()
             return self.model_help_text()
         if command in self.COMMANDS:
             try:
@@ -334,6 +338,7 @@ class CLI:
   /logout                     清除本地登录状态
   /status                     查看登录状态
   /model                      检查大模型 provider/model/API key 配置
+  /model select               光标选择大模型供应商和型号
   /commands                   打开命令面板
   /service                    查看服务端状态
   /health                     服务端健康检查
@@ -362,6 +367,7 @@ class CLI:
   erlangshen /auth server https://xiaoerdata.site/api/erlangshen
   erlangshen /login xwab user@example.com
   erlangshen /model
+  erlangshen /model select
   erlangshen /commands
   erlangshen /status
   erlangshen /map 全球流动性转向时风险资产怎么看
@@ -383,31 +389,231 @@ class CLI:
     def model_help_text(self) -> str:
         config = get_config()
         provider, model, ready, key_hint = self._llm_status(config)
+        preset = get_provider_preset(provider)
         status = "已配置" if ready else "未配置"
         lines = [
             "【大模型配置】",
             f"- 当前 provider: {provider}",
             f"- 当前 model: {model}",
             f"- API key: {status}",
+            "",
+            "可选供应商和型号:",
         ]
+        for provider_preset in MODEL_PRESETS:
+            default_marker = " (当前)" if provider_preset.id == normalize_provider(provider) else ""
+            lines.append(f"- {provider_preset.id}: {provider_preset.display_name}{default_marker}")
+            for model_preset in provider_preset.models:
+                selected = " *" if provider_preset.id == normalize_provider(provider) and model_preset.id == model else ""
+                lines.append(f"  - {model_preset.id}{selected}: {model_preset.description}")
+        lines.extend([
+            "",
+            "交互配置: 输入 /model select，使用 ↑↓ 选择供应商和型号，Enter 确认。",
+        ])
         if not ready:
             lines.extend([
                 "",
                 "生产环境建议用环境变量配置，不要写进仓库:",
-                f"  export LLM_PROVIDER={provider}",
+                f"  export LLM_PROVIDER={preset.id}",
                 f"  export {key_hint}=...",
             ])
-            _, model_hint = PROVIDER_KEY_HINTS.get(provider, PROVIDER_KEY_HINTS["openai"])
-            if model_hint:
-                lines.append(f"  export {model_hint}={model}")
+            lines.append(f"  export {preset.model_env}={model}")
             lines.extend([
                 "",
-                "常用 provider: openai, claude, deepseek, mimo, kimi",
                 "配置后重启 PM2/API 服务，再执行 /service 查看服务端状态。",
             ])
         else:
             lines.append("- 下一步: 执行 /service 查看服务端是否已加载该模型配置")
         return "\n".join(lines)
+
+    async def model_select_interactive(self) -> str:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return "\n".join([
+                "【大模型选择】",
+                "当前不是交互终端，不能打开光标选择器。",
+                "",
+                "请在 erlangshen 交互模式里输入 /model select；或者用环境变量配置:",
+                "  export LLM_PROVIDER=openai",
+                "  export OPENAI_MODEL=gpt-5.2",
+            ])
+
+        provider_items = [
+            (preset.id, preset.display_name, f"{preset.key_env} / 默认 {preset.default_model}")
+            for preset in MODEL_PRESETS
+        ]
+        provider_id = await self._select_list("选择大模型供应商", provider_items)
+        if not provider_id:
+            return "已取消模型选择。"
+
+        provider = get_provider_preset(provider_id)
+        model_items = [
+            (model.id, model.label, model.description)
+            for model in provider.models
+        ]
+        model_id = await self._select_list(f"选择 {provider.display_name} 模型", model_items)
+        if not model_id:
+            return "已取消模型选择。"
+
+        update_kwargs = {"llm_provider": provider.id}
+        update_kwargs.update(self._provider_model_update(provider.id, model_id))
+        update_config(**update_kwargs)
+
+        return "\n".join([
+            "【大模型配置已更新】",
+            f"- provider: {provider.id} ({provider.display_name})",
+            f"- model: {model_id}",
+            f"- 配置文件: {get_config_path()}",
+            "",
+            "API Key 不会由选择器写入仓库；生产环境建议用环境变量配置:",
+            f"  export LLM_PROVIDER={provider.id}",
+            f"  export {provider.key_env}=...",
+            f"  export {provider.model_env}={model_id}",
+            "",
+            "配置后重启 PM2/API 服务，再执行 /service 查看服务端是否已加载该模型配置。",
+        ])
+
+    def _provider_model_update(self, provider: str, model: str) -> dict[str, str]:
+        provider = normalize_provider(provider)
+        if provider == "openai":
+            return {"llm_model": model}
+        if provider == "deepseek":
+            return {"deepseek_model": model}
+        if provider == "claude":
+            return {"claude_model": model}
+        if provider == "mimo":
+            return {"mimo_model": model}
+        if provider == "kimi":
+            return {"kimi_model": model}
+        return {"llm_model": model}
+
+    async def _select_list(self, title: str, items: list[tuple[str, str, str]]) -> str | None:
+        try:
+            return await self._select_list_prompt_toolkit(title, items)
+        except ImportError:
+            return self._select_list_manual(title, items)
+
+    async def _select_list_prompt_toolkit(self, title: str, items: list[tuple[str, str, str]]) -> str | None:
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import HSplit, Layout, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.styles import Style
+
+        selected = 0
+        width = min(max(76, _terminal_width()), 140)
+
+        def fragments():
+            result = [
+                ("class:title", f"{title}\n"),
+                ("class:border", "─" * width + "\n"),
+                ("class:hint", "↑↓ 选择  Enter 确认  Esc/Ctrl+C 取消\n"),
+            ]
+            for index, (_, label, description) in enumerate(items):
+                style = "class:current" if index == selected else "class:item"
+                marker = "❯" if index == selected else " "
+                line = f"{marker} {label:<24} {description}"
+                result.append((style, line[:width] + "\n"))
+            result.append(("class:border", "─" * width))
+            return result
+
+        bindings = KeyBindings()
+
+        @bindings.add("down")
+        def _(event):
+            nonlocal selected
+            selected = (selected + 1) % len(items)
+            event.app.invalidate()
+
+        @bindings.add("up")
+        def _(event):
+            nonlocal selected
+            selected = (selected - 1) % len(items)
+            event.app.invalidate()
+
+        @bindings.add("enter")
+        def _(event):
+            event.app.exit(result=items[selected][0])
+
+        @bindings.add("escape")
+        @bindings.add("c-c")
+        def _(event):
+            event.app.exit(result=None)
+
+        root = HSplit([
+            Window(height=1),
+            Window(FormattedTextControl(fragments), dont_extend_height=True),
+        ])
+        app = Application(
+            layout=Layout(root),
+            key_bindings=bindings,
+            full_screen=False,
+            erase_when_done=True,
+            style=Style.from_dict({
+                "title": "ansicyan bold",
+                "border": "#888888",
+                "hint": "#888888",
+                "item": "#d0d0d0",
+                "current": "reverse #ffffff",
+            }),
+        )
+        return await app.run_async()
+
+    def _select_list_manual(self, title: str, items: list[tuple[str, str, str]]) -> str | None:
+        try:
+            import termios
+            import tty
+        except ImportError:
+            return None
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        selected = 0
+        try:
+            tty.setcbreak(fd)
+            while True:
+                self._render_model_picker(title, items, selected)
+                ch = sys.stdin.read(1)
+                if ch in {"\x03", "q", "Q"}:
+                    return None
+                if ch in {"\r", "\n"}:
+                    return items[selected][0]
+                if ch == "\x04":
+                    raise EOFError
+                if ch == "\x1b":
+                    action = self._read_escape_sequence()
+                    if action == "escape":
+                        return None
+                    if action == "up":
+                        selected = (selected - 1) % len(items)
+                    elif action == "down":
+                        selected = (selected + 1) % len(items)
+                    continue
+                if ch in {"k", "K"}:
+                    selected = (selected - 1) % len(items)
+                elif ch in {"j", "J"}:
+                    selected = (selected + 1) % len(items)
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except OSError:
+                pass
+
+    def _render_model_picker(self, title: str, items: list[tuple[str, str, str]], selected: int) -> None:
+        width = min(max(76, _terminal_width() - 4), 120)
+        lines = [
+            _color("╭─ " + title + " " + "─" * max(0, width - len(title) - 5) + "╮", "36"),
+            "│ " + "↑↓/jk 选择  Enter 确认  q/Esc 取消".ljust(width - 3) + "│",
+            "├" + "─" * (width - 2) + "┤",
+        ]
+        for index, (_, label, description) in enumerate(items):
+            marker = "›" if index == selected else " "
+            line = "│ " + f"{marker} {label:<24} {description}"[: width - 3].ljust(width - 3) + "│"
+            if index == selected:
+                line = _color(line, "36;7")
+            lines.append(line)
+        lines.append(_color("╰" + "─" * (width - 2) + "╯", "36"))
+        sys.stdout.write("\n".join(lines) + "\n")
+        sys.stdout.write(f"\033[{len(lines)}A")
+        sys.stdout.flush()
 
     def _next_steps(self, session: dict, llm_ready: bool) -> list[tuple[str, str]]:
         steps = []

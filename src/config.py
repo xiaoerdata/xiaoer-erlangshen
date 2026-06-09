@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 
+from src.model_presets import default_model_for
 from src.paths import get_default_knowledge_dir, get_project_root
 
 
@@ -15,15 +16,43 @@ class Config(BaseModel):
 
     # ==================== LLM 配置 ====================
     llm_provider: str = "openai"
-    llm_model: str = "gpt-4"
+    llm_model: str = default_model_for("openai")
     llm_api_key: Optional[str] = None
     llm_base_url: Optional[str] = None
+    llm_protocol: Optional[str] = None
     llm_temperature: float = 0.7
     llm_max_tokens: int = 4096
 
     # ==================== DeepSeek 专用配置 ====================
     deepseek_api_key: Optional[str] = None
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = default_model_for("deepseek")
+    deepseek_base_url: Optional[str] = None
+
+    # ==================== Claude / Anthropic 配置 ====================
+    claude_api_key: Optional[str] = None
+    claude_model: str = default_model_for("claude")
+    claude_base_url: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+    anthropic_model: Optional[str] = None
+    anthropic_base_url: Optional[str] = None
+
+    # ==================== 小米 MiMo 配置 ====================
+    mimo_api_key: Optional[str] = None
+    mimo_model: str = default_model_for("mimo")
+    mimo_base_url: Optional[str] = None
+    mimo_protocol: Optional[str] = None
+    xiaomi_api_key: Optional[str] = None
+    xiaomi_model: Optional[str] = None
+    xiaomi_base_url: Optional[str] = None
+    xiaomi_protocol: Optional[str] = None
+
+    # ==================== Kimi / Moonshot 配置 ====================
+    kimi_api_key: Optional[str] = None
+    kimi_model: str = default_model_for("kimi")
+    kimi_base_url: str = "https://api.moonshot.ai/v1"
+    moonshot_api_key: Optional[str] = None
+    moonshot_model: Optional[str] = None
+    moonshot_base_url: Optional[str] = None
 
     # ==================== MCP 配置 ====================
     mcp_enabled: bool = True
@@ -195,10 +224,28 @@ def load_config_from_env() -> Dict[str, Any]:
         updates["llm_provider"] = os.getenv("LLM_PROVIDER")
     if os.getenv("LLM_MODEL"):
         updates["llm_model"] = os.getenv("LLM_MODEL")
+    if os.getenv("LLM_PROTOCOL"):
+        updates["llm_protocol"] = os.getenv("LLM_PROTOCOL")
     if os.getenv("OPENAI_MODEL"):
         updates["llm_model"] = os.getenv("OPENAI_MODEL")
     if os.getenv("DEEPSEEK_MODEL"):
         updates["deepseek_model"] = os.getenv("DEEPSEEK_MODEL")
+    if os.getenv("ANTHROPIC_MODEL"):
+        updates["anthropic_model"] = os.getenv("ANTHROPIC_MODEL")
+    if os.getenv("CLAUDE_MODEL"):
+        updates["claude_model"] = os.getenv("CLAUDE_MODEL")
+    if os.getenv("MIMO_MODEL"):
+        updates["mimo_model"] = os.getenv("MIMO_MODEL")
+    if os.getenv("MIMO_PROTOCOL"):
+        updates["mimo_protocol"] = os.getenv("MIMO_PROTOCOL")
+    if os.getenv("XIAOMI_MODEL"):
+        updates["xiaomi_model"] = os.getenv("XIAOMI_MODEL")
+    if os.getenv("XIAOMI_PROTOCOL"):
+        updates["xiaomi_protocol"] = os.getenv("XIAOMI_PROTOCOL")
+    if os.getenv("KIMI_MODEL"):
+        updates["kimi_model"] = os.getenv("KIMI_MODEL")
+    if os.getenv("MOONSHOT_MODEL"):
+        updates["moonshot_model"] = os.getenv("MOONSHOT_MODEL")
 
     # API Keys
     if os.getenv("OPENAI_API_KEY"):
@@ -207,6 +254,18 @@ def load_config_from_env() -> Dict[str, Any]:
         updates["llm_api_key"] = os.getenv("LLM_API_KEY")
     if os.getenv("DEEPSEEK_API_KEY"):
         updates["deepseek_api_key"] = os.getenv("DEEPSEEK_API_KEY")
+    if os.getenv("ANTHROPIC_API_KEY"):
+        updates["anthropic_api_key"] = os.getenv("ANTHROPIC_API_KEY")
+    if os.getenv("CLAUDE_API_KEY"):
+        updates["claude_api_key"] = os.getenv("CLAUDE_API_KEY")
+    if os.getenv("MIMO_API_KEY"):
+        updates["mimo_api_key"] = os.getenv("MIMO_API_KEY")
+    if os.getenv("XIAOMI_API_KEY"):
+        updates["xiaomi_api_key"] = os.getenv("XIAOMI_API_KEY")
+    if os.getenv("KIMI_API_KEY"):
+        updates["kimi_api_key"] = os.getenv("KIMI_API_KEY")
+    if os.getenv("MOONSHOT_API_KEY"):
+        updates["moonshot_api_key"] = os.getenv("MOONSHOT_API_KEY")
 
     # OpenAI-compatible local model endpoints (Ollama, LM Studio, vLLM, etc.)
     base_url = (
@@ -217,6 +276,28 @@ def load_config_from_env() -> Dict[str, Any]:
     )
     if base_url:
         updates["llm_base_url"] = base_url
+    if os.getenv("DEEPSEEK_BASE_URL"):
+        updates["deepseek_base_url"] = os.getenv("DEEPSEEK_BASE_URL")
+    if os.getenv("ANTHROPIC_BASE_URL"):
+        updates["anthropic_base_url"] = os.getenv("ANTHROPIC_BASE_URL")
+    if os.getenv("CLAUDE_BASE_URL"):
+        updates["claude_base_url"] = os.getenv("CLAUDE_BASE_URL")
+    if os.getenv("MIMO_BASE_URL"):
+        updates["mimo_base_url"] = os.getenv("MIMO_BASE_URL")
+    if os.getenv("MIMO_API_BASE_URL"):
+        updates["mimo_base_url"] = os.getenv("MIMO_API_BASE_URL")
+    if os.getenv("XIAOMI_BASE_URL"):
+        updates["xiaomi_base_url"] = os.getenv("XIAOMI_BASE_URL")
+    if os.getenv("XIAOMI_API_BASE_URL"):
+        updates["xiaomi_base_url"] = os.getenv("XIAOMI_API_BASE_URL")
+    if os.getenv("KIMI_BASE_URL"):
+        updates["kimi_base_url"] = os.getenv("KIMI_BASE_URL")
+    if os.getenv("KIMI_API_BASE_URL"):
+        updates["kimi_base_url"] = os.getenv("KIMI_API_BASE_URL")
+    if os.getenv("MOONSHOT_BASE_URL"):
+        updates["moonshot_base_url"] = os.getenv("MOONSHOT_BASE_URL")
+    if os.getenv("MOONSHOT_API_BASE"):
+        updates["moonshot_base_url"] = os.getenv("MOONSHOT_API_BASE")
 
     if os.getenv("SERPAPI_KEY"):
         updates["serpapi_key"] = os.getenv("SERPAPI_KEY")
