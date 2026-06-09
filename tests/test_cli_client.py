@@ -44,6 +44,14 @@ def test_slash_picker_helpers_cover_all_commands():
     assert cli._input_from_shortcut("/status") == ("/status", False)
 
 
+def test_header_server_display_does_not_expose_url():
+    cli = CLI()
+
+    assert cli._server_display_text("https://xiaoerdata.site/api/erlangshen") == "已配置"
+    assert "xiaoerdata" not in cli._server_display_text("https://xiaoerdata.site/api/erlangshen")
+    assert cli._server_display_text("") == "未配置"
+
+
 @pytest.mark.asyncio
 async def test_model_help_guides_api_key_configuration(monkeypatch, tmp_path):
     monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))

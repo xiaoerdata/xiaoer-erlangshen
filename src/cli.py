@@ -309,7 +309,7 @@ class CLI:
         print()
         print(_panel("Session", [
             ("version", f"v{__version__}"),
-            ("server", base_url),
+            ("server", self._server_display_text(base_url)),
             ("account", auth_text),
             ("model", f"{provider} / {model} ({'key ready' if llm_ready else 'missing key'})"),
             ("mode", "service-first / protected by xwab/xczt"),
@@ -332,6 +332,9 @@ class CLI:
         if len(name) > 24:
             name = name[:21] + "..."
         return f"erlangshen:{name}> "
+
+    def _server_display_text(self, base_url: str | None) -> str:
+        return "已配置" if (base_url or "").strip() else "未配置"
 
     def print_help(self):
         """打印帮助信息"""
