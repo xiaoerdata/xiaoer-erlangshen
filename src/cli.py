@@ -1035,6 +1035,9 @@ class CLI:
         if isinstance(provided, dict) and provided:
             return provided
         tools = intent_plan.get("mcp_tools") if isinstance(intent_plan, dict) else []
+        if self._is_vague_market_query(query) and not tools:
+            tools = self._default_market_overview_tools()
+            intent_plan = {**intent_plan, "needs_mcp": True, "mcp_tools": tools}
         if not intent_plan.get("needs_mcp") or not tools:
             return {}
         self._show_progress("正在读取 super-66 MCP 市场数据")
@@ -1048,16 +1051,45 @@ class CLI:
                 arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
                 if name not in self._allowed_super66_tools():
                     continue
+                key = self._mcp_result_key(name, arguments, len(collected))
                 if name == "web_search":
-                    collected[name] = await self._run_local_chrome_search(arguments.get("query") or query, arguments)
+                    collected[key] = await self._run_local_chrome_search(arguments.get("query") or query, arguments)
                 else:
-                    collected[name] = await mcp.call_tool(name, arguments, use_cache=True)
+                    collected[key] = await mcp.call_tool(name, arguments, use_cache=True)
             return collected
         except Exception as exc:
             return {
                 "super66_error": self._sanitize_api_key_error(exc, ""),
                 "note": "super-66 MCP 数据暂不可用，本次仅使用用户问题和服务端场景映射。",
             }
+
+    def _is_vague_market_query(self, query: str) -> bool:
+        text = re.sub(r"\s+", "", (query or "").lower())
+        if not text:
+            return False
+        market_words = ("行情", "市场", "盘面", "大盘", "今天", "今日", "现在", "走势")
+        vague_forms = ("怎么样", "如何", "咋样", "怎么看", "什么情况", "情况")
+        return any(word in text for word in market_words) and any(form in text for form in vague_forms)
+
+    def _default_market_overview_tools(self) -> list[dict]:
+        return [
+            {"name": "get_index_data", "arguments": {"index_name": "沪深300", "limit": 60}},
+            {"name": "get_index_data", "arguments": {"index_name": "上证指数", "limit": 60}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", "limit": 60}},
+        ]
+
+    def _mcp_result_key(self, name: str, arguments: dict, index: int) -> str:
+        label = (
+            arguments.get("index_name")
+            or arguments.get("asset_name")
+            or arguments.get("code")
+            or arguments.get("keyword")
+            or arguments.get("contract_code")
+            or arguments.get("query")
+            or str(index + 1)
+        )
+        label = re.sub(r"\s+", "", str(label))[:24]
+        return f"{name}:{label}"
 
     async def _run_local_chrome_search(self, query: str, arguments: dict) -> dict:
         try:

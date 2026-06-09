@@ -355,8 +355,34 @@ async def test_collect_client_data_supports_local_chrome_search(monkeypatch):
         },
     )
 
-    assert data["web_search"]["provider"] == "local_chrome"
-    assert data["web_search"]["results"][0]["title"] == "新闻"
+    assert data["web_search:最新政策影响"]["provider"] == "local_chrome"
+    assert data["web_search:最新政策影响"]["results"][0]["title"] == "新闻"
+
+
+@pytest.mark.asyncio
+async def test_vague_market_query_fetches_default_market_data(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments))
+            return {"tool": tool_name, **(arguments or {})}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    data = await CLI()._collect_client_mcp_data(
+        "今天行情怎么样",
+        {},
+        {"needs_mcp": False, "mcp_tools": []},
+    )
+
+    assert [item[0] for item in calls] == ["get_index_data", "get_index_data", "get_global_asset_data"]
+    assert calls[0][1]["index_name"] == "沪深300"
+    assert calls[1][1]["index_name"] == "上证指数"
+    assert calls[2][1]["asset_name"] == "黄金"
+    assert "get_index_data:沪深300" in data
+    assert "get_index_data:上证指数" in data
+    assert "get_global_asset_data:黄金" in data
 
 
 @pytest.mark.asyncio
