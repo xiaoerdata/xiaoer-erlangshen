@@ -269,6 +269,11 @@ def _default_base_url(definition: LLMProviderDefinition, protocol: str) -> Optio
 
 def _api_key_headers(settings: LLMProviderSettings) -> dict[str, str]:
     if settings.provider == "mimo":
+        if settings.protocol == OPENAI_COMPATIBLE:
+            return {
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            }
         return {
             "api-key": settings.api_key or "",
             "Content-Type": "application/json",
