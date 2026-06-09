@@ -1907,6 +1907,10 @@ def main():
             cli.print_help()
             return
 
+        if raw in {"--version", "-v"}:
+            print(__version__)
+            return
+
         try:
             result = asyncio.run(cli.dispatch(raw))
         except (KeyboardInterrupt, asyncio.CancelledError):

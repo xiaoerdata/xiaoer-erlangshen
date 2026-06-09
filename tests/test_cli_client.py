@@ -1,6 +1,6 @@
 import pytest
 
-from src.cli import CLI
+from src.cli import CLI, main
 from src.client.server_client import _normalize_login_payload
 from src.config import get_config, reset_config, update_config
 from src.llm.providers import resolve_llm_settings
@@ -50,6 +50,14 @@ def test_header_server_display_does_not_expose_url():
     assert cli._server_display_text("https://xiaoerdata.site/api/erlangshen") == "已配置"
     assert "xiaoerdata" not in cli._server_display_text("https://xiaoerdata.site/api/erlangshen")
     assert cli._server_display_text("") == "未配置"
+
+
+def test_main_prints_version(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["erlangshen", "--version"])
+
+    main()
+
+    assert capsys.readouterr().out.strip() == "0.1.26"
 
 
 @pytest.mark.asyncio
