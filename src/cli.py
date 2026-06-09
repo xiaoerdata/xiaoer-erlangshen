@@ -6,7 +6,9 @@
 import sys
 import asyncio
 import difflib
+import getpass
 import importlib
+import json
 import os
 import shutil
 
@@ -38,12 +40,13 @@ COMMAND_PALETTE = [
     ("whoami", "/whoami", "查看当前账号状态"),
     ("model", "/model", "检查当前大模型 provider/model/key 配置"),
     ("model-select", "/model select", "用光标选择大模型供应商和型号"),
+    ("model-key", "/model key", "在本机输入并保存当前供应商 API Key"),
     ("commands", "/commands", "查看所有斜杠命令"),
     ("service", "/service", "查看核心服务端状态、鉴权、模型和认知保护"),
     ("health", "/health", "检查服务端健康状态"),
     ("me", "/me", "查看服务端绑定账号"),
     ("map", "/map <问题>", "映射服务端受保护认知场景"),
-    ("advice", "/advice <问题>", "生成服务端投资建议"),
+    ("advice", "/advice <问题>", "服务端映射场景，本机大模型生成投资建议"),
     ("auth", "/auth <cmd>", "登录、账号状态和服务端地址管理"),
     ("server", "/server <cmd>", "直接调用核心服务端 API"),
     ("analyze", "/analyze <query>", "本地综合分析"),
@@ -134,7 +137,6 @@ class CLI:
         "service": ("server", "status"),
         "health": ("server", "health"),
         "map": ("server", "map"),
-        "advice": ("server", "advice"),
     }
     LOCAL_COMMANDS = {"commands", "cmd", "?", "model", "models", "config"}
 
@@ -161,7 +163,7 @@ class CLI:
             args = parts[1].strip() if len(parts) > 1 else ""
             command, args = self._resolve_alias(command, args)
             return await self.run_command(command, args)
-        return await self.run_command("server", f"advice {user_input}")
+        return await self.client_side_advice(user_input)
 
     def _resolve_alias(self, command: str, args: str) -> tuple[str, str]:
         alias = self.ALIASES.get(command)
@@ -180,7 +182,13 @@ class CLI:
         if command in {"model", "models", "config"}:
             if args.strip().lower() in {"select", "choose", "set", "配置", "选择"}:
                 return await self.model_select_interactive()
+            if args.strip().lower() in {"key", "apikey", "api-key", "密钥", "配置key"}:
+                return self.model_key_interactive()
             return self.model_help_text()
+        if command in {"advice", "建议", "投顾"}:
+            if not args.strip():
+                return "请提供需要分析的投资问题。示例：/advice 利率下行时A股红利资产怎么看"
+            return await self.client_side_advice(args.strip())
         if command in self.COMMANDS:
             try:
                 command_class = self._load_command_class(command)
@@ -312,9 +320,9 @@ class CLI:
             print(_panel("Next Steps", next_steps))
             print()
         if not llm_ready:
-            print(_color(f"注意: 当前大模型 API Key 未配置，请设置 {key_hint}=...，或输入 /model select 切换供应商。", "33;1"))
+            print(_color(f"注意: 当前大模型 API Key 未配置，请输入 /model key 在本机保存，或设置 {key_hint}=...。", "33;1"))
             print()
-        print(_color("输入 / 会弹出命令选择器；输入自然语言会默认请求 /advice；输入 /exit 退出。", "2"))
+        print(_color("输入 / 会弹出命令选择器；自然语言会先请求服务端场景映射，再由本机大模型生成建议；输入 /exit 退出。", "2"))
         print()
 
     def prompt(self) -> str:
@@ -342,11 +350,12 @@ class CLI:
   /status                     查看登录状态
   /model                      检查大模型 provider/model/API key 配置
   /model select               光标选择大模型供应商和型号
+  /model key                  在本机输入并保存当前供应商 API Key
   /commands                   打开命令面板
   /service                    查看服务端状态
   /health                     服务端健康检查
   /map <问题>                 映射服务端认知场景
-  /advice <问题>              生成受保护投资建议
+  /advice <问题>              服务端映射场景，本机大模型生成建议
   <自然语言问题>              等同于 /advice <问题>
   /clear                      清屏
   /exit                       退出
@@ -371,6 +380,7 @@ class CLI:
   erlangshen /login xwab user@example.com
   erlangshen /model
   erlangshen /model select
+  erlangshen /model key
   erlangshen /commands
   erlangshen /status
   erlangshen /map 全球流动性转向时风险资产怎么看
@@ -399,6 +409,8 @@ class CLI:
             f"- 当前 provider: {provider}",
             f"- 当前 model: {model}",
             f"- API key: {status}",
+            "- Key 位置: 只保存在本机配置/环境变量；不会发送给二郎神服务端",
+            "- 调用方式: 服务端只返回受保护场景映射；最终投资建议由客户端直连大模型生成",
             "",
             "OpenAI 提示: GPT-5.5/GPT-5.3 当前主要是 ChatGPT/Codex 侧选择；API 预设仍使用官方 API 模型列表中的 gpt-5.2。",
             "",
@@ -412,24 +424,27 @@ class CLI:
                 lines.append(f"  - {model_preset.id}{selected}: {model_preset.description}")
         lines.extend([
             "",
-            "交互配置: 输入 /model select，使用 ↑↓ 选择供应商和型号，Enter 确认。",
+            "交互配置: 输入 /model select 选择供应商和型号；输入 /model key 在本机保存 API Key。",
         ])
         if not ready:
             lines.extend([
                 "",
-                f"注意: 当前 {preset.display_name} API Key 未设置，投资建议不会调用该供应商。",
+                f"注意: 当前 {preset.display_name} API Key 未设置，客户端无法直连该供应商生成投资建议。",
                 "",
-                "生产环境建议用环境变量配置，不要写进仓库:",
+                "可直接输入:",
+                "  erlangshen /model key",
+                "",
+                "也可以用环境变量配置，不要写进仓库:",
                 f"  export LLM_PROVIDER={preset.id}",
                 f"  export {key_hint}=...",
             ])
             lines.append(f"  export {preset.model_env}={model}")
             lines.extend([
                 "",
-                "配置后重启 PM2/API 服务，再执行 /service 查看服务端状态。",
+                "配置后直接重新运行 erlangshen；无需把 Key 配到二郎神服务端。",
             ])
         else:
-            lines.append("- 下一步: 执行 /service 查看服务端是否已加载该模型配置")
+            lines.append("- 下一步: 直接输入投资问题，客户端会用本机 Key 调用大模型")
         return "\n".join(lines)
 
     async def model_select_interactive(self) -> str:
@@ -463,6 +478,7 @@ class CLI:
         update_kwargs = {"llm_provider": provider.id}
         update_kwargs.update(self._provider_model_update(provider.id, model_id))
         update_config(**update_kwargs)
+        saved_key = self._maybe_prompt_api_key(provider.id)
         _, _, ready, key_hint = self._llm_status(get_config())
 
         lines = [
@@ -470,23 +486,72 @@ class CLI:
             f"- provider: {provider.id} ({provider.display_name})",
             f"- model: {model_id}",
             f"- 配置文件: {get_config_path()}",
+            "- Key 处理: 只保存在本机配置/环境变量，不会发送给二郎神服务端",
         ]
-        if not ready:
+        if saved_key:
+            lines.append("- API Key: 已保存到本机配置")
+        elif not ready:
             lines.extend([
                 f"- API Key: 未配置，请设置 {key_hint}=...",
                 "",
-                f"注意: 未配置 {provider.display_name} API Key 前，服务端不会生成大模型投资建议。",
+                f"注意: 未配置 {provider.display_name} API Key 前，客户端无法直连该供应商生成投资建议。",
             ])
         lines.extend([
             "",
-            "API Key 不会由选择器写入仓库；生产环境建议用环境变量配置:",
+            "也可以用环境变量配置:",
             f"  export LLM_PROVIDER={provider.id}",
             f"  export {provider.key_env}=...",
             f"  export {provider.model_env}={model_id}",
             "",
-            "配置后重启 PM2/API 服务，再执行 /service 查看服务端是否已加载该模型配置。",
+            "之后可直接输入投资问题；服务端只做场景映射，最终建议由本机大模型生成。",
         ])
         return "\n".join(lines)
+
+    def model_key_interactive(self) -> str:
+        config = get_config()
+        provider, model, ready, key_hint = self._llm_status(config)
+        preset = get_provider_preset(provider)
+        if not sys.stdin.isatty():
+            return "\n".join([
+                "【本机 API Key 配置】",
+                "当前不是交互终端，不能安全读取 API Key。",
+                "",
+                "请在交互终端执行:",
+                "  erlangshen /model key",
+                "",
+                "或使用环境变量:",
+                f"  export LLM_PROVIDER={preset.id}",
+                f"  export {key_hint}=...",
+                f"  export {preset.model_env}={model}",
+                "",
+                "说明: 该 Key 只用于客户端直连大模型，不会发送给二郎神服务端。",
+            ])
+        api_key = getpass.getpass(f"{preset.display_name} API Key（只保存本机，不发送服务端；留空取消）: ").strip()
+        if not api_key:
+            return "已取消 API Key 输入。"
+        update_config(**self._provider_key_update(preset.id, api_key))
+        return "\n".join([
+            "【API Key 已保存到本机】",
+            f"- provider: {preset.id} ({preset.display_name})",
+            f"- model: {model}",
+            f"- 配置文件: {get_config_path()}",
+            "- 安全边界: Key 不会发送给二郎神服务端；/advice 只把问题发给服务端做场景映射",
+            "- 下一步: 直接输入投资问题，客户端会直连大模型生成分析",
+        ])
+
+    def _maybe_prompt_api_key(self, provider: str) -> bool:
+        _, _, ready, _ = self._llm_status(get_config())
+        if ready or not sys.stdin.isatty():
+            return False
+        preset = get_provider_preset(provider)
+        answer = input(f"是否现在输入 {preset.display_name} API Key？只保存本机，不发送服务端 [y/N]: ").strip().lower()
+        if answer not in {"y", "yes", "是", "好"}:
+            return False
+        api_key = getpass.getpass(f"{preset.display_name} API Key: ").strip()
+        if not api_key:
+            return False
+        update_config(**self._provider_key_update(provider, api_key))
+        return True
 
     def _provider_model_update(self, provider: str, model: str) -> dict[str, str]:
         provider = normalize_provider(provider)
@@ -502,11 +567,220 @@ class CLI:
             return {"kimi_model": model}
         return {"llm_model": model}
 
+    def _provider_key_update(self, provider: str, api_key: str) -> dict[str, str]:
+        provider = normalize_provider(provider)
+        if provider == "openai":
+            return {"llm_api_key": api_key}
+        if provider == "deepseek":
+            return {"deepseek_api_key": api_key}
+        if provider == "claude":
+            return {"claude_api_key": api_key}
+        if provider == "mimo":
+            return {"mimo_api_key": api_key}
+        if provider == "kimi":
+            return {"kimi_api_key": api_key}
+        return {"llm_api_key": api_key}
+
     def _select_style_current(self) -> str:
         return "bg:#00a3a3 #000000 bold"
 
     def _ansi_selected_style(self) -> str:
         return "30;46"
+
+    async def client_side_advice(self, raw_query: str) -> str:
+        parsed = self._parse_client_advice_input(raw_query)
+        if isinstance(parsed, str):
+            return parsed
+        query, payload = parsed
+        config = get_config()
+        provider, model, ready, key_hint = self._llm_status(config)
+        if not ready:
+            return "\n".join([
+                "【需要本机大模型 API Key】",
+                f"- 当前 provider: {provider}",
+                f"- 当前 model: {model}",
+                f"- 缺少: {key_hint}",
+                "",
+                "二郎神不会要求你把大模型 API Key 发给服务端。",
+                "请先在本机配置 Key，之后客户端会直连模型供应商生成投资建议:",
+                "  erlangshen /model key",
+                "",
+                "服务端只接收你的问题用于受保护场景映射，不接收、不存储、不转发你的大模型 API Key。",
+            ])
+
+        try:
+            from src.auth.session import load_auth_session
+            from src.client.server_client import ErlangshenAPIError, ErlangshenServerClient
+            from src.llm import LLMClient, resolve_llm_settings
+
+            session = load_auth_session()
+            client = ErlangshenServerClient(
+                base_url=session.get("base_url") or config.erlangshen_api_base_url,
+                token=session.get("token"),
+            )
+            mapping = await client.cognition_map(query)
+        except ErlangshenAPIError as exc:
+            return "\n".join([
+                f"服务端场景映射失败 ({exc.status_code}): {exc}",
+                "",
+                "注意: 大模型 API Key 没有发送给服务端；这里只是账号/认知映射请求失败。",
+                "可先执行 /login xwab <账号> 或 /service 检查服务端状态。",
+            ])
+        except Exception as exc:
+            return f"本机建议生成准备失败: {exc}"
+
+        matches = mapping.get("matches") or []
+        if not matches:
+            return "服务端未返回可用场景映射，暂不生成投资建议。"
+
+        try:
+            settings = resolve_llm_settings(config=get_config())
+            raw_text = await LLMClient(settings, timeout=float(config.request_timeout or 30)).complete(
+                self._client_advice_messages(
+                    query=query,
+                    matches=matches,
+                    mcp_data=payload.get("mcp_data"),
+                    user_data=payload.get("user_data"),
+                    current_cognition=payload.get("current_cognition"),
+                ),
+                temperature=0.35,
+                max_tokens=min(int(config.llm_max_tokens or 4096), 1600),
+            )
+        except Exception as exc:
+            return "\n".join([
+                f"本机大模型调用失败: {exc}",
+                "",
+                "请检查 /model、/model key、网络代理或模型供应商额度。",
+                "二郎神服务端没有收到你的大模型 API Key。",
+            ])
+
+        synthesis = self._parse_client_llm_advice(raw_text)
+        return self._format_client_advice(
+            query=query,
+            matches=matches,
+            synthesis=synthesis,
+            raw_text=raw_text,
+            provider=settings.display_name or settings.provider,
+            model=settings.model,
+            data_inputs={
+                "mcp_data": sorted((payload.get("mcp_data") or {}).keys()) if isinstance(payload.get("mcp_data"), dict) else [],
+                "user_data": sorted((payload.get("user_data") or {}).keys()) if isinstance(payload.get("user_data"), dict) else [],
+            },
+        )
+
+    def _parse_client_advice_input(self, content: str):
+        content = (content or "").strip()
+        if not content:
+            return "请提供需要分析的投资问题。"
+        if "::" not in content:
+            return content, {}
+        query, raw_payload = [part.strip() for part in content.split("::", 1)]
+        if not query:
+            return "请在 JSON 数据包前提供投资问题"
+        if not raw_payload:
+            return query, {}
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            return f"建议数据包不是合法 JSON: {exc}"
+        if not isinstance(payload, dict):
+            return "建议数据包必须是 JSON 对象"
+        return query, payload
+
+    def _client_advice_messages(
+        self,
+        *,
+        query: str,
+        matches: list[dict],
+        mcp_data=None,
+        user_data=None,
+        current_cognition=None,
+    ) -> list[dict[str, str]]:
+        system = (
+            "你是二郎神客户端的大模型分析层。二郎神服务端只提供受保护的场景映射，"
+            "不会接收用户的大模型 API Key。你必须基于服务端返回的公开映射、用户数据和 MCP 数据生成投资分析，"
+            "不能声称看到了完整服务端认知库或内部案例全文。输出 JSON 对象，字段为 view, suggestions, risk_controls, missing_data。"
+        )
+        user_payload = {
+            "query": query,
+            "server_protected_matches": matches[:3],
+            "mcp_data": mcp_data or {},
+            "user_data": user_data or {},
+            "current_cognition": current_cognition or {},
+            "requirements": [
+                "先给综合判断，再给可执行建议和风控",
+                "如数据不足必须降低确定性并列出需要补充的数据",
+                "不要暴露或编造服务端内部认知库内容",
+            ],
+        }
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, indent=2)},
+        ]
+
+    def _parse_client_llm_advice(self, raw_text: str) -> dict:
+        text = (raw_text or "").strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {"view": text}
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    data = json.loads(text[start:end + 1])
+                    return data if isinstance(data, dict) else {"view": text}
+                except json.JSONDecodeError:
+                    pass
+        return {"view": text, "suggestions": [], "risk_controls": [], "missing_data": []}
+
+    def _format_client_advice(
+        self,
+        *,
+        query: str,
+        matches: list[dict],
+        synthesis: dict,
+        raw_text: str,
+        provider: str,
+        model: str,
+        data_inputs: dict,
+    ) -> str:
+        top = matches[0] if matches else {}
+        suggestions = synthesis.get("suggestions") or []
+        risks = synthesis.get("risk_controls") or []
+        missing = synthesis.get("missing_data") or []
+        lines = [
+            "【客户端大模型投资建议】",
+            f"- 问题: {query}",
+            f"- 服务端命中场景: {top.get('scene')}",
+            f"- 置信度: {top.get('confidence')}",
+            f"- 本机大模型: {provider} / {model}",
+            "- Key 边界: 大模型 API Key 仅在本机用于直连供应商，未发送给二郎神服务端",
+            f"- MCP数据键: {', '.join(data_inputs.get('mcp_data') or []) or '未提供'}",
+            f"- 用户数据键: {', '.join(data_inputs.get('user_data') or []) or '未提供'}",
+            "",
+            f"综合判断: {synthesis.get('view') or raw_text}",
+            "",
+            "建议:",
+        ]
+        for item in suggestions:
+            lines.append(f"- {item}")
+        if not suggestions:
+            lines.append("- 大模型未返回结构化建议，请参考综合判断。")
+        lines.extend(["", "风控:"])
+        for item in risks:
+            lines.append(f"- {item}")
+        if not risks:
+            lines.append("- 注意仓位、期限、流动性与最大回撤约束。")
+        if missing:
+            lines.extend(["", "需补充数据:"])
+            for item in missing:
+                lines.append(f"- {item}")
+        return "\n".join(lines)
 
     async def _select_list(self, title: str, items: list[tuple[str, str, str]]) -> str | None:
         try:

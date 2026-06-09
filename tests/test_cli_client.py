@@ -77,6 +77,19 @@ async def test_model_select_requires_interactive_terminal(monkeypatch, tmp_path)
     reset_config()
 
 
+@pytest.mark.asyncio
+async def test_model_key_explains_local_only_storage_in_non_tty(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    reset_config()
+
+    result = await CLI().dispatch("/model key")
+
+    assert "不能安全读取 API Key" in result
+    assert "只用于客户端直连大模型" in result
+    assert "不会发送给二郎神服务端" in result
+    reset_config()
+
+
 def test_provider_model_update_uses_provider_specific_fields():
     cli = CLI()
 
@@ -88,11 +101,83 @@ def test_provider_model_update_uses_provider_specific_fields():
     assert cli._provider_model_update("moonshot", "kimi-k2.6") == {"kimi_model": "kimi-k2.6"}
 
 
+def test_provider_key_update_uses_provider_specific_fields():
+    cli = CLI()
+
+    assert cli._provider_key_update("openai", "key") == {"llm_api_key": "key"}
+    assert cli._provider_key_update("anthropic", "key") == {"claude_api_key": "key"}
+    assert cli._provider_key_update("mimo", "key") == {"mimo_api_key": "key"}
+    assert cli._provider_key_update("moonshot", "key") == {"kimi_api_key": "key"}
+
+
 def test_selection_styles_do_not_use_white_reverse():
     cli = CLI()
 
     assert "bg:#00a3a3 #000000 bold" in cli._select_style_current()
     assert cli._ansi_selected_style() == "30;46"
+
+
+@pytest.mark.asyncio
+async def test_client_side_advice_requires_local_api_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("LLM_PROVIDER", "kimi")
+    monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+    reset_config()
+
+    result = await CLI().dispatch("/advice A股怎么看")
+
+    assert "需要本机大模型 API Key" in result
+    assert "erlangshen /model key" in result
+    assert "不接收、不存储、不转发" in result
+    reset_config()
+
+
+@pytest.mark.asyncio
+async def test_client_side_advice_maps_server_then_calls_local_llm(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "local-secret")
+    reset_config()
+
+    class FakeServerClient:
+        def __init__(self, **kwargs):
+            assert "local-secret" not in str(kwargs)
+
+        async def cognition_map(self, query):
+            assert query == "A股怎么看"
+            return {
+                "matches": [
+                    {
+                        "scene": "市场监测与事件响应",
+                        "confidence": 0.72,
+                        "orientation": "risk_asset",
+                        "protection": "public_match_only",
+                    }
+                ]
+            }
+
+    class FakeLLMClient:
+        def __init__(self, settings, timeout=60.0):
+            assert settings.api_key == "local-secret"
+            assert settings.provider == "deepseek"
+
+        async def complete(self, messages, temperature=0.7, max_tokens=4096):
+            payload = messages[-1]["content"]
+            assert "server_protected_matches" in payload
+            return '{"view":"模型综合判断","suggestions":["降低单点暴露"],"risk_controls":["控制回撤"],"missing_data":["持仓"]}'
+
+    monkeypatch.setattr("src.client.server_client.ErlangshenServerClient", FakeServerClient)
+    monkeypatch.setattr("src.llm.LLMClient", FakeLLMClient)
+
+    result = await CLI().dispatch("/advice A股怎么看")
+
+    assert "客户端大模型投资建议" in result
+    assert "服务端命中场景: 市场监测与事件响应" in result
+    assert "本机大模型: DeepSeek / deepseek-v4-flash" in result
+    assert "Key 仅在本机用于直连供应商" in result
+    assert "降低单点暴露" in result
+    reset_config()
 
 
 @pytest.mark.asyncio

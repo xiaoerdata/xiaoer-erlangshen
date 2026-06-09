@@ -73,6 +73,7 @@ class ServerCommand:
         auth = data.get("auth") or {}
         cognition = data.get("cognition") or {}
         llm = data.get("llm") or {}
+        policy = data.get("user_llm_key_policy") or {}
         user = auth.get("user") or {}
         access = auth.get("access") or {}
         return "\n".join([
@@ -81,7 +82,8 @@ class ServerCommand:
             f"- 鉴权: {'开启' if auth.get('enabled') else '关闭'} ({auth.get('mode')})",
             f"- 当前用户: {user.get('username') or user.get('email') or user.get('id') or '未绑定'}",
             f"- 权限层级: {access.get('label')} ({access.get('tier')})",
-            f"- 大模型: {llm.get('display_name') or llm.get('provider') or '未返回'} / {llm.get('model') or '未返回'} ({'已配置Key' if llm.get('api_key_configured') else '未配置Key'})",
+            f"- 服务端大模型: {llm.get('display_name') or llm.get('provider') or '未返回'} / {llm.get('model') or '未返回'} ({'已配置Key' if llm.get('api_key_configured') else '未配置Key'})",
+            f"- 用户大模型Key: {'服务端不接收' if policy.get('accepted_by_server') is False else '仅保存在客户端'}；/advice 默认由客户端直连模型供应商生成",
             f"- 认知保护: {'开启' if cognition.get('protected') else '关闭'}",
             f"- 问题匹配: {'开启' if cognition.get('matching_enabled') else '关闭'}",
             f"- 建议生成: {'开启' if cognition.get('advice_enabled') else '关闭'}",
@@ -118,6 +120,7 @@ class ServerCommand:
         llm = advice.get("llm") or {}
         lines = [
             "【服务端投资建议】",
+            "- 提示: 推荐直接使用 /advice；CLI 会在本机调用用户大模型 Key，不会把 Key 发给服务端。",
             f"- 命中场景: {matched.get('scene')}",
             f"- 置信度: {matched.get('confidence')}",
             f"- 大模型: {llm.get('display_name') or llm.get('provider') or '未返回'} / {llm.get('model') or '未返回'}",

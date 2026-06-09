@@ -1,6 +1,6 @@
 # 二郎神 Erlangshen CLI
 
-二郎神 CLI 是面向用户的命令行客户端，用来连接已经部署好的二郎神核心服务端。客户端负责登录、保存 token、查看服务状态、请求认知映射和生成投资建议；核心认知库、策略框架、API 服务和生产域名都由服务端环境管理。
+二郎神 CLI 是面向用户的命令行客户端，用来连接已经部署好的二郎神核心服务端。客户端负责登录、保存 token、查看服务状态、请求认知映射，并用本机大模型 API Key 直连模型供应商生成投资建议；核心认知库、策略框架、API 服务和生产域名都由服务端环境管理。
 
 ## 安装
 
@@ -17,11 +17,13 @@ erlangshen
 erlangshen /health
 erlangshen /login xwab user@example.com
 erlangshen /status
+erlangshen /model select
+erlangshen /model key
 erlangshen /map 全球流动性转向时风险资产怎么看
 erlangshen /advice 利率下行时A股红利资产怎么看
 ```
 
-进入交互模式后，直接输入自然语言问题会默认请求服务端 `/advice` 能力：
+进入交互模式后，直接输入自然语言问题会先请求服务端做受保护场景映射，再由客户端使用本机 API Key 调用大模型生成建议：
 
 ```text
 erlangshen:guest> 利率下行时A股红利资产怎么看
@@ -37,7 +39,9 @@ erlangshen:guest> 利率下行时A股红利资产怎么看
 | `/service` | 查看服务端状态 |
 | `/health` | 服务端健康检查 |
 | `/map <问题>` | 认知场景映射 |
-| `/advice <问题>` | 生成受保护投资建议 |
+| `/advice <问题>` | 服务端映射场景，本机大模型生成建议 |
+| `/model select` | 选择大模型供应商和型号 |
+| `/model key` | 在本机输入并保存当前供应商 API Key |
 | `/auth server <url>` | 设置服务端地址 |
 | `/clear` | 清屏 |
 | `/exit` | 退出 |
@@ -62,6 +66,17 @@ https://xiaoerdata.site/api/erlangshen
 ```bash
 erlangshen /auth server https://xiaoerdata.site/api/erlangshen
 ```
+
+## 大模型 Key
+
+大模型 API Key 不会发送给二郎神服务端。请在本机配置：
+
+```bash
+erlangshen /model select
+erlangshen /model key
+```
+
+也可以使用环境变量，例如 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY`、`KIMI_API_KEY`。`/advice` 只把问题发送给服务端做场景映射，最终文本分析由客户端直连模型供应商生成。
 
 ## 发布边界
 

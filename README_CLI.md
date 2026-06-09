@@ -4,8 +4,8 @@
 
 ## 定位
 
-- 客户端负责：登录、保存本地 token、调用服务端健康检查、状态查询、认知映射和投资建议。
-- 服务端负责：鉴权、权限层级、认知保护、策略框架、数据融合和建议生成。
+- 客户端负责：登录、保存本地 token、调用服务端健康检查、状态查询、认知映射，并用本机大模型 API Key 直连模型供应商生成投资建议。
+- 服务端负责：鉴权、权限层级、认知保护和受保护场景映射；不接收、不存储、不转发用户的大模型 API Key。
 - npm 客户端默认连接 `https://xiaoerdata.site/api/erlangshen`；开发、灰度或私有部署可通过 `ERLANGSHEN_API_BASE_URL`、`ERLANGSHEN_SERVER_URL`、`~/.erlangshen/settings.json` 或 `/auth server <url>` 覆盖。
 
 ## 交互方式
@@ -18,7 +18,7 @@ CLI 采用服务端优先的交互方式，并借鉴 Claude Code 一类工具的
 erlangshen
 ```
 
-启动后会显示当前服务端地址和登录状态。普通自然语言输入会默认走服务端建议接口，等同于 `/advice <问题>`。
+启动后会显示当前服务端地址、登录状态和本机大模型配置。普通自然语言输入等同于 `/advice <问题>`：CLI 会先请求服务端做受保护场景映射，再用本机 API Key 直连大模型供应商生成建议。
 
 ```text
 erlangshen:guest> 利率下行时A股红利资产怎么看
@@ -34,7 +34,9 @@ erlangshen:guest> 利率下行时A股红利资产怎么看
 | `/service` | 查看服务端状态 |
 | `/health` | 服务端健康检查 |
 | `/map <问题>` | 请求服务端进行认知场景映射 |
-| `/advice <问题>` | 请求服务端生成受保护投资建议 |
+| `/advice <问题>` | 服务端映射场景，本机大模型生成受保护投资建议 |
+| `/model select` | 选择大模型供应商和型号 |
+| `/model key` | 在本机输入并保存当前供应商 API Key |
 | `/auth server <url>` | 设置服务端地址 |
 | `/clear` | 清屏 |
 | `/exit` | 退出 |
@@ -46,9 +48,22 @@ erlangshen /health
 erlangshen /login xwab user@example.com
 erlangshen /status
 erlangshen /service
+erlangshen /model select
+erlangshen /model key
 erlangshen /map 全球流动性转向时风险资产怎么看
 erlangshen /advice 利率下行时A股红利资产怎么看
 ```
+
+## 大模型 API Key 安全边界
+
+用户的大模型 API Key 只在客户端使用：
+
+1. `/model select` 选择供应商和模型。
+2. `/model key` 在本机输入 API Key，默认保存到 `~/.erlangshen/settings.json`，或使用环境变量如 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY`。
+3. `/advice` 只把投资问题发送给二郎神服务端做场景映射；不会把大模型 API Key 发给服务端。
+4. 最终建议由客户端直连 OpenAI、Claude、DeepSeek、小米 MiMo 或 Kimi 生成。
+
+不要把 `~/.erlangshen/settings.json`、`~/.erlangshen/auth.json` 或任何 API Key 提交到仓库。
 
 ## 服务端地址配置
 
@@ -74,7 +89,7 @@ erlangshen /health
 erlangshen /auth server https://xiaoerdata.site/api/erlangshen
 ```
 
-客户端会自动兼容服务端当前的 `/health`、`/api/auth/*`、`/api/status`、`/api/cognition/map` 和 `/api/advice` 路径。
+客户端会自动兼容服务端当前的 `/health`、`/api/auth/*`、`/api/status` 和 `/api/cognition/map` 路径。`/server advice` 保留为调试入口；推荐用户直接使用 `/advice`，由客户端本机模型生成最终分析。
 
 ## 登录状态与安全
 
@@ -116,7 +131,8 @@ npm 发布包只包含客户端必要文件：
 - `src/commands/auth.py`
 - `src/commands/server.py`
 - `src/config.py`
+- `src/llm/*`
 - `src/paths.py`
 - `requirements-client.txt`
 
-不会发布服务端 API、核心认知库、内部测试、部署脚本或策略实现。用户端不能枚举完整认知库，只能通过 `/map` 和 `/advice` 获取受保护结果。
+不会发布服务端 API、核心认知库、内部测试、部署脚本或策略实现。用户端不能枚举完整认知库，只能通过 `/map` 和 `/advice` 获取受保护结果；用户大模型 API Key 始终留在客户端。
