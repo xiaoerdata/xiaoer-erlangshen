@@ -115,10 +115,12 @@ class ServerCommand:
         matched = advice.get("matched") or {}
         synthesis = advice.get("synthesis") or {}
         data_inputs = advice.get("data_inputs") or {}
+        llm = advice.get("llm") or {}
         lines = [
             "【服务端投资建议】",
             f"- 命中场景: {matched.get('scene')}",
             f"- 置信度: {matched.get('confidence')}",
+            f"- 大模型: {llm.get('display_name') or llm.get('provider') or '未返回'} / {llm.get('model') or '未返回'}",
             f"- 综合判断: {synthesis.get('view')}",
             f"- MCP数据键: {', '.join(data_inputs.get('mcp_data') or []) or '未提供'}",
             f"- 用户数据键: {', '.join(data_inputs.get('user_data') or []) or '未提供'}",
