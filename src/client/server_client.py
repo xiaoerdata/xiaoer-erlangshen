@@ -127,6 +127,28 @@ class ErlangshenServerClient:
             },
         )
 
+    async def chart_artifact(
+        self,
+        chart_type: str,
+        title: str,
+        data: dict[str, Any],
+        width: int = 960,
+        height: int = 540,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Any:
+        return await self.request(
+            "POST",
+            "artifacts/chart",
+            json={
+                "chart_type": chart_type,
+                "title": title,
+                "data": data,
+                "width": width,
+                "height": height,
+                "metadata": metadata or {},
+            },
+        )
+
     async def cognition_days(self, limit: int = 20) -> Any:
         return await self.request("GET", "cognition/days", params={"limit": limit})
 

@@ -321,6 +321,45 @@ def test_interactive_turn_visually_separates_question_and_answer():
 
 
 @pytest.mark.asyncio
+async def test_workspace_command_manages_project_sandbox(monkeypatch, tmp_path):
+    workspace_file = tmp_path / "workspaces.json"
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    monkeypatch.setenv("ERLANGSHEN_WORKSPACE_FILE", str(workspace_file))
+    monkeypatch.setenv("ERLANGSHEN_WORKSPACE", str(project_dir))
+
+    status = await CLI().dispatch("/workspace")
+    assert "未授权" in status
+    assert str(project_dir) in status
+
+    allowed = await CLI().dispatch("/workspace allow")
+    assert "已授权" in allowed
+
+    revoked = await CLI().dispatch("/workspace revoke")
+    assert "未授权" in revoked
+
+
+@pytest.mark.asyncio
+async def test_collect_client_data_supports_local_chrome_search(monkeypatch):
+    async def fake_search(query, count=5):
+        return {"query": query, "provider": "local_chrome", "results": [{"title": "新闻", "url": "https://example.com"}]}
+
+    monkeypatch.setattr("src.client.chrome_search.chrome_web_search", fake_search)
+
+    data = await CLI()._collect_client_mcp_data(
+        "最新政策影响",
+        {},
+        {
+            "needs_mcp": True,
+            "mcp_tools": [{"name": "web_search", "arguments": {"query": "最新政策影响", "count": 3}}],
+        },
+    )
+
+    assert data["web_search"]["provider"] == "local_chrome"
+    assert data["web_search"]["results"][0]["title"] == "新闻"
+
+
+@pytest.mark.asyncio
 async def test_client_side_advice_formats_string_sections_as_items():
     cli = CLI()
     result = cli._format_client_advice(

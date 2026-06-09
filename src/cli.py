@@ -17,6 +17,7 @@ from src import __version__
 from src.auth.session import load_auth_session
 from src.config import get_config, get_config_path, update_config
 from src.model_presets import MODEL_PRESETS, get_provider_preset, normalize_provider
+from src.workspace import approve_workspace, resolve_workspace_path, workspace_status
 
 
 LOGO_WIDE = [
@@ -50,6 +51,7 @@ COMMAND_PALETTE = [
     ("advice", "/advice <问题>", "服务端映射场景，本机大模型生成投资建议"),
     ("auth", "/auth <cmd>", "登录、账号状态和服务端地址管理"),
     ("server", "/server <cmd>", "直接调用核心服务端 API"),
+    ("workspace", "/workspace", "查看或授权当前项目文件夹沙箱"),
     ("analyze", "/analyze <query>", "本地综合分析"),
     ("macro", "/macro <query>", "本地宏观分析"),
     ("stock", "/stock <query>", "本地股票分析"),
@@ -190,6 +192,8 @@ class CLI:
             if not args.strip():
                 return "请提供需要分析的投资问题。示例：/advice 利率下行时A股红利资产怎么看"
             return await self.client_side_advice(args.strip())
+        if command in {"workspace", "工作区", "项目"}:
+            return self.workspace_text(args)
         if command in self.COMMANDS:
             try:
                 command_class = self._load_command_class(command)
@@ -251,6 +255,7 @@ class CLI:
         """交互模式"""
         self._setup_completion()
         self.print_header()
+        self._confirm_workspace_sandbox()
 
         # Session start hook
         if self._init_hooks():
@@ -393,6 +398,30 @@ class CLI:
             result.append(current)
         return result
 
+    def _confirm_workspace_sandbox(self) -> None:
+        if not sys.stdin.isatty() or os.getenv("ERLANGSHEN_SKIP_WORKSPACE_PROMPT"):
+            return
+        workspace = resolve_workspace_path()
+        status = workspace_status(workspace)
+        if status.get("allowed"):
+            print(_color(f"项目文件夹: 已授权 {workspace}", "2"))
+            print()
+            return
+        try:
+            answer = input(
+                f"是否允许二郎神在当前项目文件夹读写分析产物？\n"
+                f"  {workspace}\n"
+                "用于保存图表、报告和工作记忆；不会越过该目录访问其他路径 [y/N]: "
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError, OSError):
+            answer = ""
+        if answer in {"y", "yes", "是", "好", "允许"}:
+            approve_workspace(workspace)
+            print(_color("项目文件夹已授权，本次会在该沙箱内工作。", "32"))
+        else:
+            print(_color("项目文件夹未授权，本次仅进行对话与远程接口调用，不写入本地分析产物。", "33"))
+        print()
+
     def print_help(self):
         """打印帮助信息"""
         print(self.help_text())
@@ -423,6 +452,7 @@ class CLI:
 完整命令:
   /auth <cmd>                 登录、账号、服务端地址
   /server <cmd>               调用核心服务端 API
+  /workspace                  查看或授权当前项目文件夹沙箱
 
 本地开发命令:
   /analyze <query>            综合分析
@@ -457,6 +487,28 @@ class CLI:
             _panel("Slash Commands", rows),
             "",
             "提示: 在交互模式下输入 / 会弹出可选择命令列表；输入字母可过滤，↑↓ 选择，Enter 确认。",
+        ])
+
+    def workspace_text(self, args: str = "") -> str:
+        action = (args or "").strip().lower()
+        if action in {"allow", "approve", "授权", "允许"}:
+            status = approve_workspace()
+        elif action in {"revoke", "deny", "撤销", "拒绝"}:
+            from src.workspace import revoke_workspace
+
+            status = revoke_workspace()
+        else:
+            status = workspace_status()
+        return "\n".join([
+            "【项目文件夹沙箱】",
+            f"- 路径: {status['path']}",
+            f"- 权限: {'已授权' if status.get('allowed') else '未授权'}",
+            f"- 模式: {status.get('mode')}",
+            "- 说明: 只有授权后，二郎神才会在该目录内保存图表、报告或分析产物。",
+            "",
+            "命令:",
+            "  /workspace allow",
+            "  /workspace revoke",
         ])
 
     def model_help_text(self) -> str:
@@ -882,6 +934,11 @@ class CLI:
                     "use_when": "用户问商品、股指、国债期货",
                     "args": {"contract_code": "AU", "limit": 60},
                 },
+                {
+                    "name": "web_search",
+                    "use_when": "super-66 MCP 不覆盖的新闻、公告、公开网页或最新事件",
+                    "args": {"query": query, "count": 5},
+                },
             ],
             "output_schema": {
                 "intent": "smalltalk|market_overview|single_asset|portfolio|data_lookup|macro|risk|general_investment",
@@ -970,6 +1027,7 @@ class CLI:
             "search_products",
             "get_product_detail",
             "get_product_history",
+            "web_search",
         }
 
     async def _collect_client_mcp_data(self, query: str, payload: dict, intent_plan: dict) -> dict:
@@ -990,12 +1048,27 @@ class CLI:
                 arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
                 if name not in self._allowed_super66_tools():
                     continue
-                collected[name] = await mcp.call_tool(name, arguments, use_cache=True)
+                if name == "web_search":
+                    collected[name] = await self._run_local_chrome_search(arguments.get("query") or query, arguments)
+                else:
+                    collected[name] = await mcp.call_tool(name, arguments, use_cache=True)
             return collected
         except Exception as exc:
             return {
                 "super66_error": self._sanitize_api_key_error(exc, ""),
                 "note": "super-66 MCP 数据暂不可用，本次仅使用用户问题和服务端场景映射。",
+            }
+
+    async def _run_local_chrome_search(self, query: str, arguments: dict) -> dict:
+        try:
+            from src.client.chrome_search import chrome_web_search
+
+            return await chrome_web_search(query, count=int(arguments.get("count") or 5))
+        except Exception as exc:
+            return {
+                "error": "local_chrome_search_unavailable",
+                "detail": self._sanitize_api_key_error(exc, ""),
+                "install": "python3 -m pip install playwright && python3 -m playwright install chrome",
             }
 
     def _parse_client_llm_advice(self, raw_text: str) -> dict:

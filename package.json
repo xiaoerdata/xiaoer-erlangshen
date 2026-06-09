@@ -1,6 +1,6 @@
 {
   "name": "erlangshen",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "description": "二郎神 - 全知全能的AI投资智能体",
   "keywords": [
     "investment",
@@ -33,6 +33,7 @@
     "src/auth/__init__.py",
     "src/auth/session.py",
     "src/client/__init__.py",
+    "src/client/chrome_search.py",
     "src/client/server_client.py",
     "src/commands/__init__.py",
     "src/commands/auth.py",
@@ -44,6 +45,7 @@
     "src/mcp/super66.py",
     "src/model_presets.py",
     "src/paths.py",
+    "src/workspace.py",
     "requirements-client.txt",
     "README_CLI.md"
   ],
