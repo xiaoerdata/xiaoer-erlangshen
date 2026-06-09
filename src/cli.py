@@ -140,6 +140,7 @@ class CLI:
         self.brain = None
         self.mcp = None
         self.hooks = None
+        self._slash_dropdown_lines = 0
 
     async def dispatch(self, user_input: str) -> str:
         """把交互输入或一次性参数分发到对应命令。"""
@@ -266,6 +267,11 @@ class CLI:
             except (KeyboardInterrupt, EOFError):
                 print("\n再见!")
                 break
+            except OSError as exc:
+                if self._is_terminal_closed_error(exc):
+                    print("\n再见!")
+                    break
+                print(f"\n错误: {exc}\n")
             except Exception as e:
                 print(f"\n错误: {e}\n")
 
@@ -478,8 +484,7 @@ class CLI:
                     continue
                 if ch == "/" and not buffer:
                     selected = self._slash_command_picker()
-                    self._clear_screen()
-                    self.print_header()
+                    self._clear_slash_dropdown()
                     if selected:
                         buffer, needs_more = self._input_from_shortcut(selected[1])
                         if not needs_more:
@@ -491,8 +496,17 @@ class CLI:
                 if ch.isprintable():
                     buffer += ch
                     self._render_prompt(buffer)
+                if not ch:
+                    raise EOFError
+        except OSError as exc:
+            if self._is_terminal_closed_error(exc):
+                raise EOFError from exc
+            raise
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except OSError:
+                pass
 
     def _render_prompt(self, buffer: str) -> None:
         sys.stdout.write("\r\033[2K" + self.prompt() + buffer)
@@ -510,6 +524,8 @@ class CLI:
             ch = sys.stdin.read(1)
             if ch == "\x03":
                 raise KeyboardInterrupt
+            if not ch:
+                raise EOFError
             if ch == "\x1b":
                 import select
                 if not select.select([sys.stdin], [], [], 0.05)[0]:
@@ -555,23 +571,32 @@ class CLI:
         max_visible = min(14, max(6, term_lines - 8))
         start = max(0, selected - max_visible + 1)
         visible = matches[start:start + max_visible]
-        self._clear_screen()
-        print(_color("╭─ Slash Commands " + "─" * max(0, width - 20) + "╮", "36"))
-        print("│ " + f"filter: /{query}".ljust(width - 3) + "│")
-        print("│ " + "↑↓ 选择  Enter 确认  输入字母过滤  Backspace 删除  Esc/q 取消".ljust(width - 3) + "│")
-        print("├" + "─" * (width - 2) + "┤")
+        lines = [
+            _color("╭─ Slash Commands " + "─" * max(0, width - 20) + "╮", "36"),
+            "│ " + f"filter: /{query}".ljust(width - 3) + "│",
+            "│ " + "↑↓ 选择  Enter 确认  输入字母过滤  Backspace 删除  Esc/q 取消".ljust(width - 3) + "│",
+            "├" + "─" * (width - 2) + "┤",
+        ]
         if not visible:
-            print("│ " + "没有匹配命令".ljust(width - 3) + "│")
+            lines.append("│ " + "没有匹配命令".ljust(width - 3) + "│")
         for idx, (_, shortcut, description) in enumerate(visible):
             marker = "›" if start + idx == selected else " "
             text = f"{marker} {shortcut:<24} {description}"
-            print("│ " + text[: width - 3].ljust(width - 3) + "│")
+            lines.append("│ " + text[: width - 3].ljust(width - 3) + "│")
         hidden_before = start
         hidden_after = max(0, len(matches) - start - len(visible))
         if hidden_before or hidden_after:
-            print("│ " + f"... 上方 {hidden_before} 条，下方 {hidden_after} 条".ljust(width - 3) + "│")
-        print(_color("╰" + "─" * (width - 2) + "╯", "36"))
+            lines.append("│ " + f"... 上方 {hidden_before} 条，下方 {hidden_after} 条".ljust(width - 3) + "│")
+        lines.append(_color("╰" + "─" * (width - 2) + "╯", "36"))
+        self._render_prompt("/" + query)
+        sys.stdout.write("\033[s\n")
+        for line in lines:
+            sys.stdout.write("\r\033[2K" + line + "\n")
+        for _ in range(max(0, self._slash_dropdown_lines - len(lines))):
+            sys.stdout.write("\r\033[2K\n")
+        sys.stdout.write("\033[u")
         sys.stdout.flush()
+        self._slash_dropdown_lines = len(lines)
 
     def _input_from_shortcut(self, shortcut: str) -> tuple[str, bool]:
         parts = shortcut.split()
@@ -592,6 +617,19 @@ class CLI:
     def _clear_screen(self) -> None:
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
+
+    def _clear_slash_dropdown(self) -> None:
+        if not self._slash_dropdown_lines:
+            return
+        sys.stdout.write("\033[s\n")
+        for _ in range(self._slash_dropdown_lines):
+            sys.stdout.write("\r\033[2K\n")
+        sys.stdout.write("\033[u\r\033[2K")
+        sys.stdout.flush()
+        self._slash_dropdown_lines = 0
+
+    def _is_terminal_closed_error(self, exc: OSError) -> bool:
+        return getattr(exc, "errno", None) == 5 or "Input/output error" in str(exc)
 
     def _setup_completion(self) -> None:
         try:
