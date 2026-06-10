@@ -46,7 +46,7 @@ def _is_noise_search_result(title: str, url: str) -> bool:
         return True
     if host.endswith("google.com") and any(part in path for part in ("/policies", "/sorry")):
         return True
-    if host.endswith("bing.com") and path in {"/search", "/images/search", "/videos/search"}:
+    if host.endswith("bing.com") and not path.startswith("/ck/a"):
         return True
     noise_titles = (
         "why did this happen",
@@ -82,11 +82,14 @@ async def chrome_web_search(query: str, count: int = 5) -> dict[str, Any]:
                 ),
             )
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            selector = "li.b_algo a" if engine == "bing" else "a"
+            selector = "li.b_algo h2 a, .b_algo h2 a" if engine == "bing" else "a"
             items = await page.locator(selector).evaluate_all(
                 """
                 (links) => links
-                  .map((a) => ({title: (a.innerText || '').trim(), url: a.href || ''}))
+                  .map((a) => ({
+                    title: (a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim(),
+                    url: a.href || ''
+                  }))
                   .filter((item) => item.title && item.url.startsWith('http'))
                   .slice(0, 20)
                 """
@@ -95,7 +98,10 @@ async def chrome_web_search(query: str, count: int = 5) -> dict[str, Any]:
                 items = await page.locator("a").evaluate_all(
                     """
                     (links) => links
-                      .map((a) => ({title: (a.innerText || '').trim(), url: a.href || ''}))
+                      .map((a) => ({
+                        title: (a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim(),
+                        url: a.href || ''
+                      }))
                       .filter((item) => item.title && item.url.startsWith('http'))
                       .slice(0, 30)
                     """
@@ -114,6 +120,9 @@ async def chrome_web_search(query: str, count: int = 5) -> dict[str, Any]:
     for item in items:
         link = item.get("url", "")
         title = " ".join(str(item.get("title", "")).split())
+        if not title:
+            parsed = urlparse(str(link))
+            title = parsed.netloc.replace("www.", "") if parsed.netloc else ""
         if not title or link in seen or _is_noise_search_result(title, link):
             continue
         seen.add(link)

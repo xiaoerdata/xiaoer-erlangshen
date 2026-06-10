@@ -1367,7 +1367,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.29"
+    assert capsys.readouterr().out.strip() == "0.1.30"
 
 
 @pytest.mark.asyncio
@@ -3687,6 +3687,8 @@ def test_chrome_search_defaults_to_bing_and_filters_block_pages(monkeypatch):
     assert "mkt=zh-CN" in url
     assert _is_noise_search_result("Why did this happen?", "https://www.google.com/sorry/index")
     assert _is_noise_search_result("Terms of Service", "https://policies.google.com/terms")
+    assert _is_noise_search_result("网页", "https://www.bing.com/?scope=web&FORM=HDRSC1")
+    assert _is_noise_search_result("学术", "https://www.bing.com/academic/search?q=market")
     assert not _is_noise_search_result("央行释放流动性信号", "https://finance.example.com/news")
 
 
