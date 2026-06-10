@@ -132,6 +132,10 @@ class Super66MCP:
     def _normalize_tool_arguments(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         args = dict(arguments or {})
         normalized_name = tool_name.removeprefix("dc66_")
+        common_aliases = {
+            "start_date": "startDate",
+            "end_date": "endDate",
+        }
         aliases = {
             "get_index_data": {"index_name": "indexName", "index_code": "indexName"},
             "get_global_asset_data": {"asset_name": "assetName", "asset_code": "assetCode", "source_table": "sourceTable"},
@@ -140,6 +144,9 @@ class Super66MCP:
             "get_product_detail": {"product_id": "productId", "product_type": "productType"},
             "get_product_history": {"product_id": "productId", "product_type": "productType"},
         }
+        for old, new in common_aliases.items():
+            if old in args and new not in args:
+                args[new] = args.pop(old)
         for old, new in aliases.get(normalized_name, {}).items():
             if old in args and new not in args:
                 args[new] = args.pop(old)

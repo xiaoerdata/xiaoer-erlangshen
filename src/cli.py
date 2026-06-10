@@ -2080,7 +2080,7 @@ class CLI:
         groups = [
             ("市场概览", [
                 ("今天行情怎么样？先帮我看盘面主线和风险。", "super-66 MCP 指数/全球资产 + web_search + 服务端场景映射"),
-                ("今天市场是风险偏好修复，还是防御占优？", "宽盘快照 + 黄金/恒生科技等风险偏好参照"),
+                ("今天市场是风险偏好修复，还是防御占优？", "宽盘快照 + 黄金 + 港股科技指数等风险偏好参照"),
                 ("A股今天哪些方向值得跟踪？", "行情快照 + 本机大模型做主线归纳"),
             ]),
             ("单资产/产品", [
@@ -4780,8 +4780,8 @@ class CLI:
                 "goal": "回答“今天行情/盘面/市场主线/风险偏好”这类宽泛问题，先给事实快照，再给方向判断。",
                 "trigger": "用户没有给具体标的，但在问今天、当前、盘面、市场、风险偏好或主线。",
                 "preferred_chain": [
-                    "get_index_data: 沪深300/上证指数/创业板指",
-                    "get_global_asset_data: 黄金/恒生科技/美元等风险偏好参照",
+                    "get_index_data: 沪深300/上证指数/创业板指/恒生科技指数",
+                    "get_global_asset_data: 黄金/美元/原油等跨资产风险偏好参照",
                     "web_search: 当天政策、资金面、产业事件",
                     "server map: 受保护场景映射",
                     "local LLM: 自然语言综合",
@@ -4810,8 +4810,8 @@ class CLI:
                 "goal": "分析利率、汇率、政策、海外事件对多资产或风格的影响。",
                 "trigger": "用户问美元、利率、政策、通胀、海外市场、商品或跨资产传导。",
                 "preferred_chain": [
-                    "get_global_asset_data: 黄金/美元/原油/港股/美股参照",
-                    "get_index_data: 相关股票指数",
+                    "get_index_data: 相关 A股/港股/全球股票指数",
+                    "get_global_asset_data: 黄金/美元/原油/美股资产参照",
                     "web_search: 最新事件和政策原文",
                     "server map",
                     "local LLM",
@@ -4847,7 +4847,7 @@ class CLI:
             "mcp_tools": [
                 {
                     "name": "get_index_data",
-                    "use_when": "A股、指数、市场整体、沪深300、上证指数、创业板等行情问题",
+                    "use_when": "A股指数、港股指数、全球股票指数、市场整体、沪深300、上证指数、创业板、恒生科技指数等行情问题",
                     "args": {"index_name": "沪深300", "limit": 60},
                 },
                 {
@@ -4862,7 +4862,7 @@ class CLI:
                 },
                 {
                     "name": "get_global_asset_data",
-                    "use_when": "美股、港股、黄金、原油、美元、汇率、全球风险资产联动",
+                    "use_when": "黄金、原油、美元、汇率、美股资产等全球风险资产联动；港股指数优先用 get_index_data",
                     "args": {"asset_name": "黄金", "limit": 60},
                 },
                 {
@@ -4968,8 +4968,8 @@ class CLI:
                     "name": "market_overview",
                     "use_when": "用户问今天行情、市场怎么样、盘面怎么看但没有给具体标的",
                     "steps": [
-                        "get_index_data: 沪深300 / 上证指数 / 创业板指",
-                        "get_global_asset_data: 黄金 / 恒生科技 等风险偏好参照",
+                        "get_index_data: 沪深300 / 上证指数 / 创业板指 / 恒生科技指数",
+                        "get_global_asset_data: 黄金 / 美元 / 原油等跨资产风险偏好参照",
                         "web_search: 补充当天政策、资金面、产业新闻线索",
                         "server map: 获取受保护场景映射后再由本机大模型综合",
                     ],
@@ -4997,7 +4997,8 @@ class CLI:
                     "name": "macro_event",
                     "use_when": "用户问利率、汇率、政策、海外市场或宏观事件影响",
                     "steps": [
-                        "get_global_asset_data: 美元指数 / 黄金 / 原油 / 港股或美股风险资产",
+                        "get_index_data: 港股指数 / 相关股票指数",
+                        "get_global_asset_data: 美元指数 / 黄金 / 原油 / 美股资产",
                         "web_search: 查找最新公开事件线索",
                         "server map: 映射到服务端受保护宏观/市场场景",
                     ],
@@ -5028,8 +5029,8 @@ class CLI:
                     "trigger": "宽泛行情、盘面、今天市场、风险偏好方向判断",
                     "sequence": [
                         "本机 LLM 改写 query，补全市场范围和真实任务",
-                        "super-66 MCP: get_index_data 读取沪深300/上证/创业板等主指数",
-                        "super-66 MCP: get_global_asset_data 读取黄金/恒生科技等风险偏好参照",
+                        "super-66 MCP: get_index_data 读取沪深300/上证/创业板/恒生科技等主指数",
+                        "super-66 MCP: get_global_asset_data 读取黄金/美元/原油等风险偏好参照",
                         "web_search: 补当天政策、资金面、产业新闻线索",
                         "server map: 使用 rewritten_query 做受保护场景映射",
                         "local LLM: 综合 mcp_data + server map，输出自然分析和追问",
@@ -5211,7 +5212,7 @@ class CLI:
             {"name": "get_index_data", "arguments": {"index_name": "沪深300", **window}},
             {"name": "get_index_data", "arguments": {"index_name": "上证指数", **window}},
             {"name": "get_index_data", "arguments": {"index_name": "创业板指", **window}},
-            {"name": "get_global_asset_data", "arguments": {"asset_name": "恒生科技指数", **window}},
+            {"name": "get_index_data", "arguments": {"index_name": "恒生科技指数", **window}},
             {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", **window}},
             {"name": "web_search", "arguments": {"query": search_query, "count": 5}},
         ]
@@ -5285,6 +5286,45 @@ class CLI:
         if name == "get_future_market_data":
             return {"contract_code": label}
         return {"label": label}
+
+    def _is_index_market_asset_label(self, label: str) -> bool:
+        text = re.sub(r"\s+", "", self._text_field(label).lower())
+        if not text:
+            return False
+        aliases = (
+            "恒生科技",
+            "恒生科技指数",
+            "恒生指数",
+            "香港恒生指数",
+            "国企指数",
+            "恒生中国企业指数",
+            "hstech",
+            "hsi",
+        )
+        return any(alias.lower() in text for alias in aliases)
+
+    def _normalize_mcp_tool_route(self, name: str, arguments: dict) -> tuple[str, dict]:
+        args = dict(arguments or {})
+        if name == "get_global_asset_data":
+            label = (
+                self._text_field(args.get("asset_name"))
+                or self._text_field(args.get("assetName"))
+                or self._text_field(args.get("source_table"))
+                or self._text_field(args.get("sourceTable"))
+            )
+            if self._is_index_market_asset_label(label):
+                if "asset_name" in args and "index_name" not in args:
+                    args["index_name"] = args.pop("asset_name")
+                elif "assetName" in args and "index_name" not in args:
+                    args["index_name"] = args.pop("assetName")
+                elif label and "index_name" not in args:
+                    args["index_name"] = label
+                args.pop("asset_code", None)
+                args.pop("assetCode", None)
+                args.pop("source_table", None)
+                args.pop("sourceTable", None)
+                return "get_index_data", args
+        return name, args
 
     def _extract_mcp_tool_specs(self, plan: dict) -> list[dict]:
         if not isinstance(plan, dict):
@@ -5477,6 +5517,7 @@ class CLI:
                 continue
             name = normalized.get("name")
             arguments = normalized.get("arguments") if isinstance(normalized.get("arguments"), dict) else {}
+            name, arguments = self._normalize_mcp_tool_route(name, arguments)
             signature = (name, json.dumps(arguments, ensure_ascii=False, sort_keys=True))
             if name and signature not in seen:
                 seen.add(signature)
@@ -5987,7 +6028,7 @@ class CLI:
         followups = self._coerce_text_items(synthesis.get("followups"))
         next_actions = self._coerce_text_items(synthesis.get("next_actions"))
         artifact_results = synthesis.get("artifact_results") if isinstance(synthesis.get("artifact_results"), list) else []
-        view = self._text_field(synthesis.get("view")) or raw_text
+        view = self._strip_display_json_fragments(self._text_field(synthesis.get("view")) or raw_text)
         scene = self._text_field(top.get("scene")) or "未命中明确场景"
         confidence = top.get("confidence")
         lines = [
@@ -6293,7 +6334,7 @@ class CLI:
         return deduped
 
     def _align_view_with_data_availability(self, query: str, view: str, snapshot_lines, data_inputs: dict) -> str:
-        cleaned = self._text_field(view)
+        cleaned = self._strip_display_json_fragments(view)
         has_snapshot = bool(snapshot_lines)
         if has_snapshot:
             empty_data_patterns = (
@@ -6318,6 +6359,18 @@ class CLI:
             if prefix not in cleaned:
                 cleaned = prefix + ("\n\n" + cleaned if cleaned else "")
         return cleaned
+
+    def _strip_display_json_fragments(self, value) -> str:
+        text = value if isinstance(value, str) else self._text_field(value)
+        text = re.sub(r"```(?:json)?\s*\{.*?(?:```|$)", "", text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(
+            r"\s*\{[\s\"']*(?:view|suggestions|risk_controls|missing_data|followups|next_actions|artifacts)[\"']?\s*:.*$",
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        text = re.sub(r"```(?:json)?\s*$", "", text, flags=re.IGNORECASE).strip()
+        return self._text_field(text)
 
     def _mcp_source_line(self, data_inputs: dict) -> str:
         keys = data_inputs.get("mcp_data") if isinstance(data_inputs, dict) else []

@@ -754,7 +754,7 @@ async def test_tools_command_exposes_mcp_and_artifact_capabilities():
     assert "single_asset_or_product" in result
     assert "macro_event_cross_asset" in result
     assert "visualization_or_report_followup" in result
-    assert "工具链: get_index_data: 沪深300/上证指数/创业板指 -> get_global_asset_data: 黄金/恒生科技/美元等风险偏好参照" in result
+    assert "工具链: get_index_data: 沪深300/上证指数/创业板指/恒生科技指数 -> get_global_asset_data: 黄金/美元/原油等跨资产风险偏好参照" in result
     assert "生成的 HTML/JSON/图片/报告路径都加入 /links" in result
     assert "典型数据配方" in result
     assert "market_overview" in result
@@ -1367,7 +1367,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.32"
+    assert capsys.readouterr().out.strip() == "0.1.33"
 
 
 @pytest.mark.asyncio
@@ -3153,18 +3153,18 @@ async def test_vague_market_query_fetches_default_market_data(monkeypatch):
         "get_index_data",
         "get_index_data",
         "get_index_data",
-        "get_global_asset_data",
+        "get_index_data",
         "get_global_asset_data",
     ]
     assert calls[0][1]["index_name"] == "沪深300"
     assert calls[1][1]["index_name"] == "上证指数"
     assert calls[2][1]["index_name"] == "创业板指"
-    assert calls[3][1]["asset_name"] == "恒生科技指数"
+    assert calls[3][1]["index_name"] == "恒生科技指数"
     assert calls[4][1]["asset_name"] == "黄金"
     assert "get_index_data:沪深300" in data
     assert "get_index_data:上证指数" in data
     assert "get_index_data:创业板指" in data
-    assert "get_global_asset_data:恒生科技指数" in data
+    assert "get_index_data:恒生科技指数" in data
     assert "get_global_asset_data:黄金" in data
     assert data[search_key]["provider"] == "local_chrome"
     assert data[search_key]["query"].startswith(cli._today_market_search_query()[:10])
@@ -3233,10 +3233,11 @@ async def test_market_overview_intent_fetches_default_data_without_keyword_rules
         "get_index_data",
         "get_index_data",
         "get_index_data",
-        "get_global_asset_data",
+        "get_index_data",
         "get_global_asset_data",
     ]
     assert "get_index_data:沪深300" in data
+    assert "get_index_data:恒生科技指数" in data
     assert "get_global_asset_data:黄金" in data
     assert search_key in data
 
@@ -3302,7 +3303,18 @@ def test_intent_plan_accepts_string_mcp_tool_shortcuts():
 
     assert {"name": "get_index_data", "arguments": {"index_name": "上证指数"}} in plan["mcp_tools"]
     assert {"name": "web_search", "arguments": {"query": "资金面新闻", "count": 2}} in plan["mcp_tools"]
-    assert {"name": "get_global_asset_data", "arguments": {"asset_name": "恒生科技指数"}} in plan["mcp_tools"]
+    assert {"name": "get_index_data", "arguments": {"index_name": "恒生科技指数"}} in plan["mcp_tools"]
+
+
+def test_display_json_fragments_are_stripped_from_view():
+    cli = CLI()
+    text = '市场偏弱，先控制仓位。 ```json { "view": "内部结构", "suggestions": []'
+
+    cleaned = cli._strip_display_json_fragments(text)
+
+    assert cleaned == "市场偏弱，先控制仓位。"
+    assert "```json" not in cleaned
+    assert '"view"' not in cleaned
 
 
 def test_intent_plan_accepts_multiline_string_mcp_tool_shortcuts():
