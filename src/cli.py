@@ -3054,7 +3054,12 @@ class CLI:
         try:
             from src.client.server_client import ErlangshenServerClient
 
-            response = await ErlangshenServerClient().chart_artifact(
+            session = load_auth_session()
+            client = ErlangshenServerClient(
+                base_url=session.get("base_url") or get_config().erlangshen_api_base_url,
+                token=session.get("token"),
+            )
+            response = await client.chart_artifact(
                 chart_type="bar",
                 title=title,
                 data=data,

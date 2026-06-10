@@ -1365,7 +1365,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.27"
+    assert capsys.readouterr().out.strip() == "0.1.28"
 
 
 @pytest.mark.asyncio
@@ -2472,8 +2472,12 @@ def test_startup_workspace_prompt_can_select_and_authorize_path(monkeypatch, tmp
 @pytest.mark.asyncio
 async def test_chart_command_requests_server_artifact(monkeypatch):
     calls = []
+    init_kwargs = []
 
     class FakeServerClient:
+        def __init__(self, **kwargs):
+            init_kwargs.append(kwargs)
+
         async def chart_artifact(self, chart_type, title, data, width=960, height=540, metadata=None):
             calls.append((chart_type, title, data, metadata))
             return {
@@ -2486,9 +2490,11 @@ async def test_chart_command_requests_server_artifact(monkeypatch):
             }
 
     monkeypatch.setattr("src.client.server_client.ErlangshenServerClient", FakeServerClient)
+    monkeypatch.setattr("src.cli.load_auth_session", lambda: {"token": "chart-token", "base_url": "https://example.test/api"})
 
     result = await CLI().dispatch('/chart 资产表现 :: {"A股":1.2,"黄金":0.8}')
 
+    assert init_kwargs == [{"base_url": "https://example.test/api", "token": "chart-token"}]
     assert calls[0][0] == "bar"
     assert calls[0][1] == "资产表现"
     assert calls[0][2]["A股"] == 1.2
@@ -2507,6 +2513,9 @@ async def test_chart_command_saves_artifact_inside_authorized_workspace(monkeypa
     approve_workspace(project_dir)
 
     class FakeServerClient:
+        def __init__(self, **kwargs):
+            pass
+
         async def chart_artifact(self, chart_type, title, data, width=960, height=540, metadata=None):
             return {
                 "artifact": {
@@ -2544,6 +2553,9 @@ async def test_chart_command_saves_artifact_inside_authorized_workspace(monkeypa
 @pytest.mark.asyncio
 async def test_chart_command_collects_server_resource_links(monkeypatch):
     class FakeServerClient:
+        def __init__(self, **kwargs):
+            pass
+
         async def chart_artifact(self, chart_type, title, data, width=960, height=540, metadata=None):
             return {
                 "chart": {
