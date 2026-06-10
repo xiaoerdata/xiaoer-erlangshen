@@ -1367,7 +1367,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.30"
+    assert capsys.readouterr().out.strip() == "0.1.31"
 
 
 @pytest.mark.asyncio
@@ -3159,12 +3159,12 @@ async def test_vague_market_query_fetches_default_market_data(monkeypatch):
     assert calls[0][1]["index_name"] == "沪深300"
     assert calls[1][1]["index_name"] == "上证指数"
     assert calls[2][1]["index_name"] == "创业板指"
-    assert calls[3][1]["asset_name"] == "恒生科技"
+    assert calls[3][1]["asset_name"] == "恒生科技指数"
     assert calls[4][1]["asset_name"] == "黄金"
     assert "get_index_data:沪深300" in data
     assert "get_index_data:上证指数" in data
     assert "get_index_data:创业板指" in data
-    assert "get_global_asset_data:恒生科技" in data
+    assert "get_global_asset_data:恒生科技指数" in data
     assert "get_global_asset_data:黄金" in data
     assert data[search_key]["provider"] == "local_chrome"
     assert data[search_key]["query"].startswith(cli._today_market_search_query()[:10])
@@ -3294,7 +3294,7 @@ def test_intent_plan_accepts_string_mcp_tool_shortcuts():
             "tools": [
                 "get_index_data:上证指数",
                 "web_search:{\"query\":\"资金面新闻\",\"count\":2}",
-                "get_global_asset_data 恒生科技",
+                "get_global_asset_data 恒生科技指数",
             ],
         },
         "帮我查一下行情",
@@ -3302,7 +3302,7 @@ def test_intent_plan_accepts_string_mcp_tool_shortcuts():
 
     assert {"name": "get_index_data", "arguments": {"index_name": "上证指数"}} in plan["mcp_tools"]
     assert {"name": "web_search", "arguments": {"query": "资金面新闻", "count": 2}} in plan["mcp_tools"]
-    assert {"name": "get_global_asset_data", "arguments": {"asset_name": "恒生科技"}} in plan["mcp_tools"]
+    assert {"name": "get_global_asset_data", "arguments": {"asset_name": "恒生科技指数"}} in plan["mcp_tools"]
 
 
 def test_intent_plan_accepts_multiline_string_mcp_tool_shortcuts():
@@ -3676,6 +3676,40 @@ def test_super66_normalizes_supabase_rows_for_market_snapshot():
     assert lines == [
         "get_index_data:沪深300: 名称 沪深300，日期 2026-06-10，最新 4100，涨跌幅 1.2，成交额 123456"
     ]
+
+
+def test_super66_maps_mcp_arguments_to_production_schema():
+    mcp = Super66MCP()
+
+    assert mcp._normalize_tool_arguments(
+        "get_index_data",
+        {"index_name": "沪深300", "limit": 3},
+    ) == {"indexName": "沪深300", "limit": 3}
+    assert mcp._normalize_tool_arguments(
+        "get_global_asset_data",
+        {"asset_name": "黄金", "limit": 3},
+    ) == {"assetName": "黄金", "limit": 3}
+
+
+def test_super66_normalizes_columnar_market_series():
+    payload = {
+        "code": 200,
+        "data": {
+            "result": {
+                "dates": ["2026-06-09", "2026-06-10"],
+                "closes": [4050, 4100],
+                "volumes": [10, 20],
+            }
+        },
+    }
+
+    result = Super66MCP()._extract_result(payload, "get_index_data", {"indexName": "沪深300"})
+    lines = CLI()._mcp_snapshot_lines({"get_index_data:沪深300": result})
+
+    assert result["latest"]["index_name"] == "沪深300"
+    assert result["latest"]["date"] == "2026-06-10"
+    assert result["latest"]["close"] == 4100
+    assert lines == ["get_index_data:沪深300: 名称 沪深300，日期 2026-06-10，最新 4100，成交量 20"]
 
 
 def test_chrome_search_defaults_to_bing_and_filters_block_pages(monkeypatch):

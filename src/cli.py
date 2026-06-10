@@ -13,7 +13,7 @@ import os
 import re
 import shutil
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 from urllib.parse import urlparse
@@ -4481,7 +4481,7 @@ class CLI:
         if not chart_opportunity and (self._is_vague_market_query(query) or self._text_field(intent).lower() == "market_overview") and needs_mcp:
             chart_opportunity = True
             if not chart_rationale:
-                chart_rationale = "市场快照适合做指数、资产或主线对比图。"
+                chart_rationale = "使用 MCP 行情快照做指数、资产或主线对比图。"
         composition_patterns_used = self._normalize_composition_patterns(
             plan.get("composition_patterns_used") or plan.get("composition_pattern"),
             intent=intent,
@@ -5143,27 +5143,33 @@ class CLI:
 
     def _default_market_overview_tools(self) -> list[dict]:
         search_query = self._today_market_search_query()
+        window = self._recent_market_window_args(days=45)
         return [
-            {"name": "get_index_data", "arguments": {"index_name": "沪深300", "limit": 120}},
-            {"name": "get_index_data", "arguments": {"index_name": "上证指数", "limit": 120}},
-            {"name": "get_index_data", "arguments": {"index_name": "创业板指", "limit": 120}},
-            {"name": "get_global_asset_data", "arguments": {"asset_name": "恒生科技", "limit": 60}},
-            {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", "limit": 60}},
+            {"name": "get_index_data", "arguments": {"index_name": "沪深300", **window}},
+            {"name": "get_index_data", "arguments": {"index_name": "上证指数", **window}},
+            {"name": "get_index_data", "arguments": {"index_name": "创业板指", **window}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": "恒生科技指数", **window}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", **window}},
             {"name": "web_search", "arguments": {"query": search_query, "count": 5}},
         ]
 
+    def _recent_market_window_args(self, days: int = 45) -> dict:
+        end = datetime.now().date()
+        start = end - timedelta(days=days)
+        return {"startDate": start.isoformat(), "endDate": end.isoformat()}
+
     def _today_market_search_query(self) -> str:
-        today = datetime.now().strftime("%Y-%m-%d")
-        return f"{today} 今日市场行情 重要新闻 政策 资金面"
+        return "A股 今日行情 资金面 政策 重要新闻"
 
     def _default_tools_for_intent(self, intent: str, query: str = "") -> list[dict]:
         normalized = self._text_field(intent).lower()
         if normalized in {"market_overview", "data_lookup"}:
             return self._default_market_overview_tools()
         if normalized == "macro":
+            window = self._recent_market_window_args(days=60)
             return [
-                {"name": "get_global_asset_data", "arguments": {"asset_name": "美元指数", "limit": 60}},
-                {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", "limit": 60}},
+                {"name": "get_global_asset_data", "arguments": {"asset_name": "美元指数", **window}},
+                {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", **window}},
                 {"name": "web_search", "arguments": {"query": query or "最新宏观政策 市场影响", "count": 5}},
             ]
         return []

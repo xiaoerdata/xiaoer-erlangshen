@@ -62,7 +62,9 @@ class Super66MCP:
         use_cache: bool = True,
     ) -> dict[str, Any]:
         arguments = arguments or {}
-        cache_key = self._cache_key(tool_name, arguments)
+        normalized_tool = self._normalize_tool_name(tool_name)
+        normalized_arguments = self._normalize_tool_arguments(tool_name, arguments)
+        cache_key = self._cache_key(normalized_tool, normalized_arguments)
         if use_cache and cache_key in self._cache:
             value, expires_at = self._cache[cache_key]
             if time.time() < expires_at:
@@ -79,7 +81,7 @@ class Super66MCP:
         try:
             response = await self.client.post(
                 f"{self.base_url}/tools/call",
-                json={"name": self._normalize_tool_name(tool_name), "arguments": arguments},
+                json={"name": normalized_tool, "arguments": normalized_arguments},
                 headers={
                     "Authorization": format_bearer_token(token),
                     "Accept": "application/json",
@@ -92,7 +94,7 @@ class Super66MCP:
                     "error": f"HTTP {response.status_code}",
                     "detail": payload,
                 }
-            result = self._extract_result(payload, tool_name, arguments)
+            result = self._extract_result(payload, tool_name, normalized_arguments)
             if use_cache:
                 self._cache[cache_key] = (result, time.time() + self.cache_ttl)
             return result
@@ -126,6 +128,22 @@ class Super66MCP:
         if tool_name.startswith("dc66_"):
             return tool_name
         return f"dc66_{tool_name}"
+
+    def _normalize_tool_arguments(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        args = dict(arguments or {})
+        normalized_name = tool_name.removeprefix("dc66_")
+        aliases = {
+            "get_index_data": {"index_name": "indexName", "index_code": "indexName"},
+            "get_global_asset_data": {"asset_name": "assetName", "asset_code": "assetCode", "source_table": "sourceTable"},
+            "get_future_market_data": {"contract_code": "contractCode", "contract_type": "contractType"},
+            "search_products": {"product_type": "productType"},
+            "get_product_detail": {"product_id": "productId", "product_type": "productType"},
+            "get_product_history": {"product_id": "productId", "product_type": "productType"},
+        }
+        for old, new in aliases.get(normalized_name, {}).items():
+            if old in args and new not in args:
+                args[new] = args.pop(old)
+        return args
 
     def _parse_payload(self, response: httpx.Response) -> Any:
         if not response.content:
@@ -217,6 +235,9 @@ class Super66MCP:
             return rows
         if not isinstance(value, dict):
             return []
+        columnar_rows = self._columnar_rows(value)
+        if columnar_rows:
+            return columnar_rows
         row_keys = (
             "rows",
             "records",
@@ -244,6 +265,32 @@ class Super66MCP:
         if self._looks_like_market_row(value):
             return [value]
         return []
+
+    def _columnar_rows(self, value: dict[str, Any]) -> list[dict[str, Any]]:
+        dates = value.get("dates") or value.get("date") or value.get("trade_dates")
+        if not isinstance(dates, list) or not dates:
+            return []
+        series_aliases = {
+            "open": ("opens", "open"),
+            "high": ("highs", "high"),
+            "low": ("lows", "low"),
+            "close": ("closes", "close", "prices"),
+            "volume": ("volumes", "volume"),
+            "amount": ("amounts", "amount", "turnovers"),
+            "change_pct": ("change_pcts", "pct_chgs", "change_pct", "pct_chg"),
+        }
+        rows = []
+        for index, date in enumerate(dates):
+            row = {"date": date}
+            for field, aliases in series_aliases.items():
+                for alias in aliases:
+                    series = value.get(alias)
+                    if isinstance(series, list) and index < len(series):
+                        row[field] = series[index]
+                        break
+            if len(row) > 1:
+                rows.append(row)
+        return rows
 
     def _normalize_market_row(self, row: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(row)
@@ -280,11 +327,15 @@ class Super66MCP:
                 normalized[target] = self._coerce_market_value(value, percent=target == "change_pct")
         label = (
             arguments.get("index_name")
+            or arguments.get("indexName")
             or arguments.get("asset_name")
+            or arguments.get("assetName")
             or arguments.get("keyword")
             or arguments.get("code")
             or arguments.get("contract_code")
+            or arguments.get("contractCode")
             or arguments.get("product_id")
+            or arguments.get("productId")
         )
         if label and not any(normalized.get(key) for key in ("name", "index_name", "asset_name", "product_name")):
             normalized["index_name"] = str(label)
