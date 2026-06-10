@@ -12,12 +12,17 @@ import json
 import os
 import re
 import shutil
+import unicodedata
+from datetime import datetime
+from html import escape
+from pathlib import Path
+from urllib.parse import urlparse
 
 from src import __version__
 from src.auth.session import load_auth_session
 from src.config import get_config, get_config_path, update_config
 from src.model_presets import MODEL_PRESETS, get_provider_preset, normalize_provider
-from src.workspace import approve_workspace, resolve_workspace_path, workspace_status
+from src.workspace import approve_workspace, ensure_inside_workspace, recent_workspaces, resolve_workspace_path, select_workspace, workspace_status
 
 
 LOGO_WIDE = [
@@ -29,13 +34,23 @@ LOGO_WIDE = [
     "╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝",
 ]
 LOGO_COMPACT = [
-    "╭────────────────────────────────────╮",
-    "│ 二郎神 ERLANGSHEN                  │",
-    "│ Service-first investing CLI        │",
-    "╰────────────────────────────────────╯",
+    "╭─ ERLANGSHEN 二郎神 · Agent Console ─────╮",
+    "│  ███╗  MCP-first Investment Agent       │",
+    "│  ╚██║  Local LLM Key · Protected Core   │",
+    "│   ╚═╝  super-66 MCP · Chart Artifacts   │",
+    "│  ASK -> DATA -> MAP -> ANSWER -> LINKS  │",
+    "│  Ask · Data · Map · Think · Build · Open│",
+    "│  /setup workspace · /server · /tools    │",
+    "╰─────────────────────────────────────────╯",
 ]
 
 COMMAND_PALETTE = [
+    ("setup", "/setup", "初始化向导；/setup run 可选择项目文件夹并授权沙箱"),
+    ("setup-run", "/setup run", "执行式初始化：选择项目文件夹、授权沙箱、检查账号和模型"),
+    ("setup-workspace", "/setup workspace", "重新打开项目文件夹选择器并授权本地沙箱"),
+    ("init", "/init", "同 /setup，快速查看首次使用准备状态"),
+    ("brief", "/brief", "查看当前会话能力摘要、缺口和推荐开场问题"),
+    ("doctor", "/doctor", "本地诊断工作区、登录、大模型、MCP 与产物链路"),
     ("login", "/login xwab <账号>", "登录 XWAB/XCZT 账号，获取核心服务端访问权限"),
     ("logout", "/logout", "清除本地登录状态"),
     ("status", "/status", "查看本地登录状态，并校验服务端账号"),
@@ -51,7 +66,33 @@ COMMAND_PALETTE = [
     ("advice", "/advice <问题>", "服务端映射场景，本机大模型生成投资建议"),
     ("auth", "/auth <cmd>", "登录、账号状态和服务端地址管理"),
     ("server", "/server <cmd>", "直接调用核心服务端 API"),
-    ("workspace", "/workspace", "查看或授权当前项目文件夹沙箱"),
+    ("server-commands", "/server commands", "查看服务端 API 子命令面板"),
+    ("server-guide", "/server guide", "按当前任务选择服务端状态、映射、图表和诊断命令"),
+    ("server-goals", "/server goals", "按用户目标选择健康、账号、分析、映射、图表和排障路径"),
+    ("server-actions", "/server actions", "按用户目标查看服务端相关的下一步行动"),
+    ("server-status", "/server status", "查看服务端鉴权、模型、认知保护状态"),
+    ("server-me", "/server me", "查看服务端绑定账号和权限层级"),
+    ("server-flow", "/server flow", "查看客户端、MCP、服务端与图表产物协作链路"),
+    ("server-capabilities", "/server capabilities", "查看服务端开放能力和安全边界"),
+    ("server-artifact", "/server artifact", "查看服务端图表 artifact 通信方式"),
+    ("server-resources", "/server resources", "查看服务端网页、图片、HTML/PDF 和图表资源如何回到 CLI"),
+    ("server-map", "/server map <问题>", "把问题映射到服务端受保护认知场景"),
+    ("server-advice", "/server advice <问题>", "服务端建议接口；推荐优先使用客户端 /advice"),
+    ("workspace", "/workspace", "查看、选择或授权项目文件夹沙箱"),
+    ("workspace-browse", "/workspace browse", "用方向键浏览并选择项目文件夹"),
+    ("workspace-path", "/workspace path <路径>", "手动输入或粘贴项目文件夹路径"),
+    ("artifacts", "/artifacts", "查看当前项目文件夹里的图表和分析产物"),
+    ("open", "/open [chart|report|link N]", "打开最近图表、报告或 /links 中的资源；也可 /open 1"),
+    ("open-link", "/open link <序号>", "打开 /links 列表里的指定网页、图片或本地产物"),
+    ("links", "/links", "查看最近回答中的网页、图片和本地产物名称链接；也可 /links 1"),
+    ("links-open", "/links open <序号>", "从最近资源列表打开指定网页、图片或本地产物"),
+    ("chart", "/chart <标题> :: {\"A股\":1.2}", "请求服务端生成结构化图表 artifact"),
+    ("examples", "/examples", "查看自然语言提问范例和 MCP/图表调用路线"),
+    ("tools", "/tools", "查看 super-66 MCP、web_search 和图表 artifact 能力地图"),
+    ("mcp", "/mcp", "同 /tools，查看可调用的数据和工具组合"),
+    ("plan", "/plan", "查看最近一次分析的意图、工具调用和产物计划"),
+    ("context", "/context", "查看或清空最近对话上下文"),
+    ("context-clear", "/context clear", "清空最近对话上下文，保留登录、模型和工作区"),
     ("analyze", "/analyze <query>", "本地综合分析"),
     ("macro", "/macro <query>", "本地宏观分析"),
     ("stock", "/stock <query>", "本地股票分析"),
@@ -64,10 +105,186 @@ COMMAND_PALETTE = [
     ("omniscient", "/omniscient [cmd]", "全知投资 agent 框架"),
     ("god", "/god [cmd]", "全知投资 agent 快捷入口"),
     ("cognition", "/cognition <cmd>", "投资认知体系"),
-    ("clear", "/clear", "清屏并重新展示启动面板"),
+    ("clear", "/clear", "清屏并开启干净上下文"),
     ("help", "/help", "查看完整帮助"),
     ("exit", "/exit", "退出交互模式"),
 ]
+
+COMMAND_GROUPS = [
+    ("Getting Started", {"setup", "setup-run", "setup-workspace", "init", "brief", "doctor"}),
+    ("Account & Model", {"login", "logout", "status", "whoami", "model", "model-select", "model-key"}),
+    ("Server & Mapping", {
+        "service", "health", "me", "map", "advice", "auth", "server",
+        "server-commands", "server-guide", "server-goals", "server-actions", "server-status", "server-me", "server-flow", "server-capabilities",
+        "server-artifact", "server-resources", "server-map", "server-advice",
+    }),
+    ("Workspace & Artifacts", {"workspace", "workspace-browse", "workspace-path", "artifacts", "open", "open-link", "links", "links-open", "chart", "report", "memo"}),
+    ("Market Intelligence", {"examples", "tools", "mcp", "plan", "context", "context-clear", "analyze", "macro", "stock", "search", "portfolio", "risk", "invest", "omniscient", "god", "cognition"}),
+    ("Session", {"commands", "clear", "help", "exit"}),
+]
+
+SLASH_SUBCOMMAND_ROOTS = {
+    "server": {"server-commands", "server-guide", "server-goals", "server-actions", "server-status", "server-me", "server-flow", "server-capabilities", "server-artifact", "server-resources", "server-map", "server-advice"},
+    "workspace": {"workspace-browse", "workspace-path", "workspace"},
+    "model": {"model-select", "model-key", "model"},
+    "context": {"context-clear", "context"},
+    "setup": {"setup-run", "setup-workspace", "setup"},
+    "auth": {"login", "logout", "status", "whoami", "auth"},
+    "chart": {"chart", "artifacts", "links", "open", "open-link"},
+    "open": {"open", "open-link", "artifacts", "links"},
+    "links": {"links", "links-open", "open-link"},
+}
+
+SLASH_CONTEXT_HINTS = {
+    "server": "Server Workbench: status / me / map / advice / flow / artifact / resources",
+    "workspace": "Project Sandbox: browse / path / allow / artifacts",
+    "setup": "Setup Wizard: run / workspace / login / model key",
+    "model": "Local Model: select provider/model / test and save API key",
+    "auth": "Account: login / logout / status / whoami",
+    "chart": "Artifacts: chart / links / open",
+    "open": "Resource Opener: open chart/report/link N",
+    "links": "Resource Inbox: links / open / open link N",
+    "context": "Session Memory: context / context clear",
+}
+
+SLASH_SUBCOMMAND_ORDER = {
+    "server": [
+        "server-status",
+        "server-me",
+        "server-map",
+        "server-advice",
+        "server-flow",
+        "server-artifact",
+        "server-resources",
+        "server-capabilities",
+        "server-goals",
+        "server-actions",
+        "server-guide",
+        "server-commands",
+        "server",
+    ],
+    "workspace": [
+        "workspace-browse",
+        "workspace-path",
+        "workspace",
+        "artifacts",
+        "open",
+        "open-link",
+        "links",
+        "links-open",
+    ],
+    "setup": [
+        "setup-run",
+        "setup-workspace",
+        "setup",
+        "login",
+        "model-select",
+        "model-key",
+        "doctor",
+    ],
+    "model": [
+        "model-select",
+        "model-key",
+        "model",
+    ],
+    "links": [
+        "links-open",
+        "open-link",
+        "links",
+        "open",
+    ],
+    "open": [
+        "open-link",
+        "open",
+        "links",
+        "artifacts",
+    ],
+}
+
+SERVER_COMMAND_DETAILS = {
+    "/setup": "用途: 查看初始化向导和当前准备度 | 适合: 第一次启动或不知道下一步该做什么 | 输出: workspace/account/model 三项检查和首要下一步 | 下一步: /setup run | 边界: 不读取项目文件，除非用户授权工作区",
+    "/setup run": "用途: 执行式初始化 | 适合: 想一次补齐项目文件夹、登录和本机模型 Key | 输出: 初始化完成度和缺口清单 | 下一步: /workspace browse、/login xwab <账号> 或 /model key",
+    "/setup workspace": "用途: 重新选择项目文件夹沙箱 | 适合: 切换到新的分析项目或授权图表/报告保存位置 | 输出: 授权状态和 .erlangshen/artifacts 位置 | 下一步: /setup run 或直接提问",
+    "/login xwab <账号>": "用途: 登录 XWAB/XCZT 账号体系 | 适合: 需要访问服务端场景映射和 super-66 MCP 数据 | 输出: 本地 token 和绑定账号状态 | 下一步: /model key | 边界: 账号 token 只保存在本机会话文件",
+    "/model": "用途: 查看本机大模型配置和安全边界 | 适合: 不确定 provider/model/API Key 是否准备好 | 输出: Model Agent Flow、当前模型、Key 状态和可选模型 | 下一步: /model select 或 /model key | 边界: 大模型 Key 不发送服务端",
+    "/model select": "用途: 用光标选择大模型供应商和型号 | 适合: 初始化或切换 OpenAI/Claude/DeepSeek/MiMo/Kimi | 输出: provider/model 写入本机配置，随后可测试 Key | 下一步: /model key | 边界: 选择模型不会保存 API Key",
+    "/model key": "用途: 本机测试并保存当前供应商 API Key | 适合: 启用本机大模型生成投资分析 | 输出: 连接测试结果，成功后保存到本机配置 | 下一步: 直接输入投资问题 | 边界: Key 不接收、不存储、不转发到二郎神服务端",
+    "/server commands": "用途: 查看服务端子命令面板 | 适合: 不确定有哪些服务端能力 | 输出: 状态、账号、映射、图表、排障命令索引 | 下一步: /server actions | 边界: 不暴露内部认知库",
+    "/server guide": "用途: 按任务选择服务端路径 | 适合: 想知道现在该先查状态、映射还是生成图表 | 输出: 面向任务的命令路线 | 下一步: 直接输入问题或 /server actions | 边界: 只解释开放能力",
+    "/server goals": "用途: 按目标选择健康、账号、完整分析、只看映射、图表和排障路径 | 适合: 想从目标反推命令 | 输出: 每个目标的首选命令和替代命令 | 下一步: 执行首选命令",
+    "/server actions": "用途: 按目标列出健康、账号、映射、图表、排障动作 | 适合: 需要一个可以直接执行的下一步 | 输出: 可复制执行的行动清单 | 下一步: 选一个行动执行",
+    "/server status": "用途: 检查鉴权、账号、模型、认知保护 | 适合: 登录后确认生产服务是否可用 | 输出: 服务端状态和本地修复建议 | 下一步: /login 或 /model key | 边界: 用户 Key 不发服务端",
+    "/server me": "用途: 查看绑定账号和权限层级 | 适合: 确认 XWAB/XCZT 账号是否打通 | 输出: 服务端识别到的用户和权限 | 下一步: 直接提问或 /server status | 边界: 复用 XWAB/XCZT 登录态",
+    "/server flow": "用途: 查看 local LLM、MCP、server map、chart artifact 协作链路 | 适合: 想理解一次回答背后的执行过程 | 输出: 本机模型、MCP、服务端映射、图表产物链路 | 下一步: /plan 复盘实际执行",
+    "/server capabilities": "用途: 查看服务端开放能力和安全边界 | 适合: 设计客户端/服务端通信和权限边界 | 输出: 开放 API、资源链接、artifact 能力 | 下一步: /tools 查看客户端 MCP 编排",
+    "/server artifact": "用途: 查看 chart artifact 通信方式 | 适合: 需要让服务端生成图表并传回客户端 | 输入: artifacts/charts/visualizations/chart_requests | 输出: JSON/HTML/图片/网页名称链接 | 下一步: /chart 或继续说“做成图表”",
+    "/server resources": "用途: 查看非文本资源通信方式 | 适合: 服务端、MCP 或 web_search 返回网页、图片、HTML/PDF、图表和报告 | 输出: label/target/type 结构、/links 索引和 /open 打开路径 | 下一步: /links 或 /open 1 | 边界: CLI 不内嵌富文本和二进制内容",
+    "/server map <问题>": "用途: 只做受保护场景映射 | 适合: 想看核心认知命中的场景但不生成完整建议 | 输入: 一个投资问题 | 输出: 场景、置信度、风险边界 | 下一步: /advice <问题> 完整分析 | 边界: 不泄露认知库全文",
+    "/server advice <问题>": "用途: 兼容旧服务端建议接口 | 适合: 排查服务端建议接口或兼容旧流程 | 输入: 一个投资问题 | 输出: 服务端建议响应 | 下一步: 推荐用 /advice 走本机模型和 MCP",
+    "/server <cmd>": "用途: 服务端交互工作台入口 | 适合: 输入 /server 后继续选择子命令 | 下一步: 输入 /server 后加空格展开 status/guide/goals/actions/flow/artifact/resources | 边界: 不暴露内部认知库",
+    "/workspace": "用途: 查看项目文件夹沙箱状态 | 适合: 确认图表、报告和工作记忆会保存到哪里 | 输出: 当前路径、授权状态、最近项目和沙箱边界 | 下一步: /workspace browse 或 /workspace path <路径> | 边界: 未授权前不写入本地文件",
+    "/workspace browse": "用途: 用方向键选择项目文件夹 | 适合: 初始化、切换分析项目或授权产物保存位置 | 输出: Project Sandbox Setup 选择器和二次授权确认 | 下一步: /workspace allow 或 /setup run | 边界: 授权后仅写入所选项目的 .erlangshen/artifacts",
+    "/workspace path <路径>": "用途: 手动粘贴或输入项目路径 | 适合: 非交互终端、远程机器或明确知道项目路径 | 输出: 选中路径的沙箱状态 | 下一步: /workspace allow | 边界: 只记录路径，未授权前不会保存图表和报告",
+    "/artifacts": "用途: 查看授权项目内的图表和报告 | 适合: 找回服务端 chart artifact、本地 HTML 图表或 Markdown 报告 | 输出: charts/reports 摘要和最近可打开路径 | 下一步: /open chart、/open report 或 /links | 边界: 只列出授权项目内 .erlangshen/artifacts",
+    "/chart <标题> :: {\"A股\":1.2}": "用途: 请求服务端生成结构化图表 artifact | 适合: 把 MCP 快照、收益、回撤、涨跌幅或配置比例做成可打开图表 | 输入: 图表标题和 JSON 数据 | 输出: JSON/HTML artifact、本地保存路径和 /links 资源 | 下一步: /open chart 或 /artifacts | 边界: 图表数据来自本轮上下文或用户显式输入，不上传大模型 API Key",
+    "/tools": "用途: 查看 MCP、web_search、chart artifact 和 resource_links 能力地图 | 适合: 想知道本机大模型能调用哪些数据、如何组合工具 | 输出: super-66 注册表、工具结果契约、组合模式和典型数据配方 | 下一步: 直接输入问题或 /plan | 边界: 能力地图进入本机大模型上下文，服务端仍只接收受保护映射请求",
+    "/plan": "用途: 复盘最近一次分析的意图和工具链路 | 适合: 检查本机大模型为什么选择 MCP/web_search/图表或为什么降级 | 输出: 路由来源、工具理由、MCP 快照、服务端映射、资源链接和产物计划 | 下一步: 继续追问、/links 或 /clear | 边界: 只展示本次 CLI 进程内上下文",
+    "/links": "用途: 查看最近回答里的网页、图片、图表和报告链接 | 下一步: /links 1 或 /links open 1",
+    "/links open <序号>": "用途: 直接打开 /links 列表中的指定资源 | 示例: /links open 1 | 无桌面 opener 时返回可复制链接",
+    "/open link <序号>": "用途: 等同 /links open <序号>，打开最近资源链接 | 示例: /open link 1 或 /open 1",
+    "/open [chart|report|link N]": "用途: 打开最近图表、报告或资源链接 | 示例: /open 1 打开第 1 个资源 | 下一步: /artifacts 或 /links",
+}
+
+COMMAND_NEXT_HINTS = {
+    "/setup": "/setup run",
+    "/setup run": "/workspace browse 或 /workspace path <路径>",
+    "/setup workspace": "/setup run 或直接输入投资问题",
+    "/init": "/setup run",
+    "/brief": "直接输入投资问题或 /setup run",
+    "/doctor": "按首要修复项执行，或 /setup run",
+    "/login xwab <账号>": "/model key",
+    "/logout": "/login xwab <账号>",
+    "/status": "/server status 或 /whoami",
+    "/whoami": "直接输入问题或 /server status",
+    "/model": "/model select 或 /model key",
+    "/model select": "/model key",
+    "/model key": "直接输入投资问题",
+    "/commands": "输入 / 继续筛选",
+    "/service": "/server actions 或直接提问",
+    "/health": "/server status",
+    "/me": "直接提问或 /server status",
+    "/map <问题>": "/advice <问题>",
+    "/advice <问题>": "/plan",
+    "/auth <cmd>": "/status",
+    "/workspace": "/workspace browse 或 /workspace path <路径>",
+    "/workspace browse": "/workspace allow",
+    "/workspace path <路径>": "/workspace allow",
+    "/artifacts": "/open chart 或 /open report",
+    "/open link <序号>": "/links",
+    "/chart <标题> :: {\"A股\":1.2}": "/open chart 或 /artifacts",
+    "/server resources": "/links 或 /open 1",
+    "/examples": "选择一个问题直接输入",
+    "/tools": "直接输入问题或 /plan",
+    "/mcp": "直接输入问题或 /plan",
+    "/plan": "继续追问或 /clear",
+    "/links": "/links 1 或 /open 1",
+    "/links open <序号>": "/open 1",
+    "/open [chart|report|link N]": "/artifacts 或 /links",
+    "/context": "/context clear 或继续追问",
+    "/context clear": "直接输入新问题",
+    "/clear": "直接输入新问题",
+    "/help": "输入 / 打开命令面板",
+    "/exit": "退出当前 CLI 会话",
+}
+
+COMMAND_GROUP_NEXT_HINTS = {
+    "Getting Started": "/setup run",
+    "Account & Model": "/status",
+    "Server & Mapping": "/server actions",
+    "Workspace & Artifacts": "/artifacts 或 /links",
+    "Market Intelligence": "直接输入问题或 /plan",
+    "Session": "/help",
+}
 
 PROVIDER_KEY_HINTS = {
     "openai": ("OPENAI_API_KEY", "OPENAI_MODEL"),
@@ -95,19 +312,67 @@ def _terminal_width() -> int:
     return shutil.get_terminal_size((100, 20)).columns
 
 
+def _display_width(text: str) -> int:
+    width = 0
+    for char in str(text):
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
+
+
+def _clip_display(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    output = []
+    width = 0
+    for char in str(text):
+        char_width = 0 if unicodedata.combining(char) else (2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1)
+        if width + char_width > limit:
+            break
+        output.append(char)
+        width += char_width
+    return "".join(output)
+
+
+def _pad_display(text: str, width: int) -> str:
+    clipped = _clip_display(text, width)
+    return clipped + " " * max(0, width - _display_width(clipped))
+
+
 def _logo() -> str:
     lines = LOGO_WIDE if _terminal_width() >= 96 else LOGO_COMPACT
+    if _terminal_width() >= 96:
+        lines = [
+            "╭─ ERLANGSHEN 二郎神 · Agent Console " + "─" * 46 + "╮",
+            *lines,
+            "│  MCP-FIRST INVESTMENT AGENT · LOCAL LLM KEY · PROTECTED SERVICE SIGNALS        │",
+            "│  ASK -> SUPER-66 MCP / WEB_SEARCH -> SERVER MAP -> LOCAL ANSWER -> CHART / LINKS │",
+            "│  ASK · DATA · MAP · THINK · BUILD · OPEN                                       │",
+            "│  Natural language in · named resources out · every chart/report has a link      │",
+            "│  Project Sandbox · Server Workbench · Tool Map · Chart Artifacts · Link Inbox  │",
+            "│  Type / · /setup workspace · /server · /tools · /links 1 opens resources          │",
+            "╰" + "─" * 86 + "╯",
+        ]
     return "\n".join(_color(line, "36;1") for line in lines)
 
 
 def _panel(title: str, rows: list[tuple[str, str]]) -> str:
-    width = min(max(54, *(len(label) + len(value) + 8 for label, value in rows)), 92)
-    top = f"╭─ {title} " + "─" * max(0, width - len(title) - 5) + "╮"
-    bottom = "╰" + "─" * (len(top) - 2) + "╯"
+    width = min(max(54, *(_display_width(label) + _display_width(value) + 8 for label, value in rows)), 92)
+    top = f"╭─ {title} " + "─" * max(0, width - _display_width(title) - 5) + "╮"
+    bottom = "╰" + "─" * (width - 2) + "╯"
     body = []
     for label, value in rows:
-        text = f"{label:<10} {value}"
-        body.append("│ " + text[: width - 3].ljust(width - 3) + "│")
+        text = _pad_display(str(label), 10) + " " + str(value)
+        body.append("│ " + _pad_display(text, width - 3) + "│")
+    return "\n".join([_color(top, "36"), *body, _color(bottom, "36")])
+
+
+def _text_panel(title: str, lines: list[str], min_width: int = 72, max_width: int = 110) -> str:
+    width = min(max(min_width, *(_display_width(line) + 4 for line in lines)), max_width, max(60, _terminal_width() - 4))
+    top = f"╭─ {title} " + "─" * max(0, width - _display_width(title) - 5) + "╮"
+    bottom = "╰" + "─" * (width - 2) + "╯"
+    body = ["│ " + _pad_display(line, width - 3) + "│" for line in lines]
     return "\n".join([_color(top, "36"), *body, _color(bottom, "36")])
 
 
@@ -140,8 +405,9 @@ class CLI:
         "service": ("server", "status"),
         "health": ("server", "health"),
         "map": ("server", "map"),
+        "init": ("setup", ""),
     }
-    LOCAL_COMMANDS = {"commands", "cmd", "?", "model", "models", "config"}
+    LOCAL_COMMANDS = {"commands", "cmd", "?", "model", "models", "config", "setup", "tools", "mcp", "plan", "context", "clear", "doctor", "brief", "examples", "links"}
 
     def __init__(self):
         self.brain = None
@@ -151,6 +417,12 @@ class CLI:
         self._input_history: list[str] = []
         self._prompt_session = None
         self._slash_selected = 0
+        self._last_agent_plan: dict | None = None
+        self._agent_trace: list[str] | None = None
+        self._conversation_history: list[dict[str, str]] = []
+        self._last_mcp_data: dict | None = None
+        self._last_artifact_results: list[dict] = []
+        self._last_resource_links: list[dict[str, object]] = []
 
     async def dispatch(self, user_input: str) -> str:
         """把交互输入或一次性参数分发到对应命令。"""
@@ -182,6 +454,28 @@ class CLI:
             return self.help_text()
         if command in {"commands", "cmd", "?"}:
             return self.command_palette_text()
+        if command in {"setup", "init", "初始化", "向导"}:
+            setup_args = args.strip().lower().split()
+            if setup_args and setup_args[0] in {"workspace", "project", "folder", "path", "workdir", "目录", "项目", "文件夹"}:
+                return await self.setup_workspace_interactive()
+            if setup_args and setup_args[0] in {"run", "start", "go", "wizard", "执行", "开始"}:
+                force_workspace = any(item in {"workspace", "project", "folder", "path", "workdir", "目录", "项目", "文件夹"} for item in setup_args[1:])
+                return await self.setup_run_interactive(force_workspace=force_workspace)
+            return self.setup_text()
+        if command in {"doctor", "check", "诊断", "自检"}:
+            return self.doctor_text()
+        if command in {"brief", "home", "summary", "能力摘要", "会话"}:
+            return self.brief_text()
+        if command in {"tools", "tool", "mcp", "工具", "能力"}:
+            return self.tools_text(args)
+        if command in {"examples", "example", "prompts", "提问", "示例"}:
+            return self.examples_text()
+        if command in {"plan", "计划", "trace", "过程"}:
+            return self.plan_text()
+        if command in {"context", "ctx", "上下文", "记忆"}:
+            return self.context_text(args)
+        if command in {"clear", "new", "新会话", "清空"}:
+            return self.clear_session_text()
         if command in {"model", "models", "config"}:
             if args.strip().lower() in {"select", "choose", "set", "配置", "选择"}:
                 return await self.model_select_interactive()
@@ -194,6 +488,14 @@ class CLI:
             return await self.client_side_advice(args.strip())
         if command in {"workspace", "工作区", "项目"}:
             return self.workspace_text(args)
+        if command in {"artifacts", "artifact-list", "产物"}:
+            return self.artifacts_text(args)
+        if command in {"open", "打开", "查看产物"}:
+            return self.open_artifact_text(args)
+        if command in {"links", "link", "resources", "resource", "资源", "链接"}:
+            return self.links_text(args)
+        if command in {"chart", "artifact", "图表"}:
+            return await self.chart_text(args)
         if command in self.COMMANDS:
             try:
                 command_class = self._load_command_class(command)
@@ -254,8 +556,8 @@ class CLI:
     async def interactive_mode(self):
         """交互模式"""
         self._setup_completion()
-        self.print_header()
         self._confirm_workspace_sandbox()
+        self.print_header()
 
         # Session start hook
         if self._init_hooks():
@@ -277,8 +579,11 @@ class CLI:
                     continue
 
                 if user_input == "/clear":
+                    self._clear_session_state()
                     os.system("cls" if os.name == "nt" else "clear")
                     self.print_header()
+                    print(_color("已清空本次会话上下文和最近分析计划；登录、模型 Key、工作区和已保存产物不受影响。", "2"))
+                    print()
                     continue
 
                 result = await self.dispatch(user_input)
@@ -307,11 +612,54 @@ class CLI:
         session = load_auth_session()
         config = get_config()
         base_url = session.get("base_url") or config.erlangshen_api_base_url
+        workspace = workspace_status()
         user = session.get("user") or {}
         username = user.get("username") or user.get("email") or user.get("id")
         auth_text = username or ("已保存 token" if session.get("token") else "未登录")
         provider, model, llm_ready, key_hint = self._llm_status(config)
         print(_logo())
+        print()
+        print(self._welcome_panel(
+            base_url=base_url,
+            auth_text=auth_text,
+            provider=provider,
+            model=model,
+            llm_ready=llm_ready,
+            workspace=workspace,
+        ))
+        print()
+        print(self._command_ribbon_panel(
+            session=session,
+            llm_ready=llm_ready,
+            workspace=workspace,
+        ))
+        print()
+        print(self._mission_control_panel(
+            session=session,
+            base_url=base_url,
+            llm_ready=llm_ready,
+            workspace=workspace,
+        ))
+        print()
+        print(self._agent_hud_panel(
+            session=session,
+            base_url=base_url,
+            llm_ready=llm_ready,
+            workspace=workspace,
+        ))
+        print()
+        print(self._launchpad_panel(
+            session=session,
+            llm_ready=llm_ready,
+            workspace=workspace,
+        ))
+        print()
+        print(self._agent_readiness_panel(
+            session=session,
+            base_url=base_url,
+            llm_ready=llm_ready,
+            workspace=workspace,
+        ))
         print()
         print(_panel("Session", [
             ("version", f"v{__version__}"),
@@ -320,6 +668,15 @@ class CLI:
             ("model", f"{provider} / {model} ({'key ready' if llm_ready else 'missing key'})"),
             ("mode", "service-first / protected by xwab/xczt"),
         ]))
+        print()
+        print(_panel("Workspace & Tools", [
+            ("workspace", f"{'已授权' if workspace.get('allowed') else '未授权'} {workspace.get('path')}"),
+            ("market", "super-66 MCP first"),
+            ("artifacts", "/chart uses server chart artifact channel"),
+            ("picker", "type / then use arrows"),
+        ]))
+        print()
+        print(self._workspace_passport_panel(workspace))
         print()
         next_steps = self._next_steps(session, llm_ready)
         if next_steps:
@@ -331,6 +688,217 @@ class CLI:
         print(_color("输入 / 会弹出命令选择器；自然语言会先请求服务端场景映射，再由本机大模型生成建议；输入 /exit 退出。", "2"))
         print()
 
+    def _welcome_panel(
+        self,
+        *,
+        base_url: str,
+        auth_text: str,
+        provider: str,
+        model: str,
+        llm_ready: bool,
+        workspace: dict,
+    ) -> str:
+        account = "ready" if auth_text not in {"未登录", ""} else "login needed"
+        model_state = "ready" if llm_ready else "key needed"
+        workspace_state = "ready" if workspace.get("allowed") else "sandbox needed"
+        token_ready = account == "ready"
+        workspace_ready = bool(workspace.get("allowed"))
+        primary_action = self._setup_primary_action(workspace_ready, token_ready, llm_ready)
+        account_badge = "[OK]" if account == "ready" else "[SETUP]"
+        model_badge = "[OK]" if llm_ready else "[KEY]"
+        workspace_badge = "[OK]" if workspace.get("allowed") else "[SAFE]"
+        return _text_panel("Erlangshen Agent Console", [
+            "ERLANGSHEN  投资智能体工作台",
+            "agentic investment analyst · MCP-first · service-protected · local LLM key",
+            f"Primary Action  {primary_action}",
+            "Command Deck    / 打开可选择命令面板；/setup run 进入执行式初始化",
+            "",
+            "First Run Path",
+            "  1  /workspace browse  用方向键选择项目文件夹，确认本轮可写入的沙箱",
+            "  2  /login xwab <账号>   绑定 XWAB/XCZT 账号，复用 super-66 MCP 鉴权",
+            "  3  /model key           本机测试并保存大模型 API Key，不发送服务端",
+            "  4  直接输入问题          本机 LLM 选择 MCP/web_search，再请求服务端映射",
+            "  5  /links 1 或 /open 1   打开网页、图片、图表、PDF 或报告",
+            "",
+            "Operator Layout",
+            "  左侧是用户问题，右侧是二郎神回答；过程提示会显示取数、映射、生成和产物",
+            "  非文本结果不会挤进终端正文，都会变成 /links 与 /open 可打开的名称链接",
+            "  需要图表时直接说“做成图表”，chart artifact 会保存到授权项目文件夹",
+            "",
+            "Agent Loop",
+            "  1  理解问题        本机大模型改写问题、判断意图、选择工具组合",
+            "  2  读取数据        super-66 MCP / web_search 优先补齐行情、产品和事件线索",
+            "  3  映射场景        服务端返回受保护场景、方向和置信度",
+            "  4  形成判断        本机大模型生成自然分析，并可请求图表 artifact",
+            "",
+            "Command Deck",
+            "  /setup run        初始化工作区、账号、大模型 Key 和产物权限",
+            "  /setup workspace  重新选择项目文件夹并授权本地沙箱",
+            "  /tools            查看 MCP、web_search、chart artifact 能力地图",
+            "  /server actions   按目标查看服务端状态、映射、图表和排障路径",
+            "  /server flow      查看客户端与服务端协作流程",
+            "  /plan             查看最近一次工具选择、MCP 快照和图表产物",
+            "  /links open 1     打开最近网页、图片、图表或报告资源",
+            "",
+            "Signal Rail",
+            "  intent  ->  mcp data  ->  protected map  ->  local synthesis  ->  artifact",
+            "",
+            "Starter Prompts",
+            *self._starter_prompt_lines(compact=True),
+            "",
+            "Trust Boundary",
+            "  API Key 只保存在本机；服务端地址隐藏；认知库只返回受保护信号；工作区写入需授权",
+            "",
+            f"Readiness  {account_badge} account {account} · {model_badge} model {model_state} · {workspace_badge} workspace {workspace_state} · server {self._server_display_text(base_url)}",
+            f"Model      {provider} / {model}",
+            "Start      按 Primary Action 补齐缺口；准备好后直接输入投资问题",
+        ])
+
+    def _command_ribbon_panel(self, *, session: dict, llm_ready: bool, workspace: dict) -> str:
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(workspace.get("allowed"))
+        resource_count = len(self._recent_resource_links(limit=24))
+        primary = self._setup_primary_action(workspace_ready, token_ready, llm_ready)
+        ask = "直接输入投资问题" if token_ready and llm_ready else "/setup run"
+        verify = "/plan" if self._last_agent_plan else "/server goals"
+        create = "/chart <标题> :: {json}" if workspace_ready else "/workspace browse"
+        recover = "/links open 1" if resource_count else "/links"
+        rows = [
+            "Now       " + primary,
+            "Ask       " + ask + " · 本机 LLM 先理解意图，再选择 MCP/web_search",
+            "Verify    " + verify + " · 看服务端状态、工具链路和本轮 Agent 计划",
+            "Create    " + create + " · 服务端 chart artifact -> 授权工作区",
+            f"Recover   {recover} · 网页/图片/图表/报告链接收件箱 links[{resource_count}]",
+            "Mode      /server 进入服务端工作台 · /tools 查看 MCP playbook · /workspace 管理沙箱",
+        ]
+        return _text_panel("Agent Command Ribbon", rows, min_width=82, max_width=120)
+
+    def _mission_control_panel(self, *, session: dict, base_url: str, llm_ready: bool, workspace: dict) -> str:
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(workspace.get("allowed"))
+        server_ready = bool(base_url)
+        resource_count = len(self._recent_resource_links(limit=24))
+        lanes = [
+            ("INPUT", "natural language", "ready"),
+            ("DATA", "super-66/web_search", "ready" if token_ready else "login"),
+            ("CORE", "protected map", "ready" if server_ready and token_ready else "setup"),
+            ("OUTPUT", "answer/chart/links", "ready" if llm_ready and workspace_ready else "setup"),
+        ]
+        rail = "  ->  ".join(f"{name}[{state}]" for name, _, state in lanes)
+        rows = [
+            "Mission     Ask -> Data -> Protected Core -> Local Answer -> Artifact",
+            f"Rail        {rail}",
+            f"Ask         直接输入问题；或 /server map <问题> 只检查服务端理解",
+            "Data        super-66 MCP 优先；web_search 补新闻和网页线索",
+            "Create      说“做成图表/报告”或 /chart <标题> :: {json}",
+            f"Resources   /links 1 或 /open 1 打开网页、图片、图表和报告 · links[{resource_count}]",
+        ]
+        return _text_panel("Mission Control", rows, min_width=82, max_width=120)
+
+    def _agent_hud_panel(self, *, session: dict, base_url: str, llm_ready: bool, workspace: dict) -> str:
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(workspace.get("allowed"))
+        resource_count = len(self._recent_resource_links(limit=24))
+        chips = [
+            self._status_chip("account", token_ready),
+            self._status_chip("model", llm_ready),
+            self._status_chip("workspace", workspace_ready),
+            self._status_chip("mcp", token_ready),
+            self._status_chip("server", bool(base_url)),
+            self._status_chip("chart", workspace_ready),
+            f"links[{resource_count}]" if resource_count else "links[none]",
+        ]
+        if token_ready and llm_ready and workspace_ready:
+            fastest = "直接输入投资问题；需要图表时继续说“做成图表/报告”"
+        elif not workspace_ready:
+            fastest = "/workspace browse 选择项目文件夹，或 /workspace path <路径> 手动指定"
+        elif not token_ready:
+            fastest = "/login xwab <账号> 登录后复用账号访问服务端和 super-66 MCP"
+        else:
+            fastest = "/model key 在本机测试并保存大模型 API Key"
+        workspace_path = str(workspace.get("path") or resolve_workspace_path())
+        if len(workspace_path) > 54:
+            workspace_path = "..." + workspace_path[-51:]
+        return _text_panel("Agent HUD", [
+            "Status      " + "  ".join(chips),
+            "Data Flow   prompt -> local intent -> super-66/web_search -> server map -> local LLM -> chart",
+            f"Workspace   {workspace_path}",
+            f"Fast Path   {fastest}",
+            f"Resources   links[{resource_count}] · {'/links open 1 打开最近资源' if resource_count else '回答产生网页/图片/图表后会出现在 /links'}",
+            "Palette     输入 / 打开命令面板；输入 /server 或 /workspace 会收窄到对应子命令",
+        ], min_width=78, max_width=120)
+
+    def _status_chip(self, label: str, ok: bool) -> str:
+        return f"{label}[{'ok' if ok else 'need'}]"
+
+    def _launchpad_panel(self, *, session: dict, llm_ready: bool, workspace: dict) -> str:
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(workspace.get("allowed"))
+        ask_action = "直接输入投资问题" if token_ready and llm_ready else "/setup run 补齐账号和本机大模型"
+        create_action = "说“把这个做成图表/报告”" if workspace_ready else "/workspace browse 或 /workspace path <路径> 选择项目文件夹并授权"
+        rows = [
+            ("Ask", f"{ask_action} · 先取 MCP，再做服务端映射和本机分析"),
+            ("Verify", "/server actions · /doctor · /plan"),
+            ("Create", f"{create_action} · 服务端 chart artifact -> 本地 .erlangshen/artifacts"),
+            ("Links", "/links 查看资源；/links open 1 打开网页、图片、图表或报告"),
+            ("Data", "super-66 MCP 行情/产品优先；web_search 补事件线索"),
+        ]
+        return _panel("Agent Launchpad", rows)
+
+    def _starter_prompt_examples(self) -> list[tuple[str, str]]:
+        return [
+            ("今天行情怎么样？先帮我看盘面主线和风险。", "市场概览: super-66 MCP 指数/全球资产 + web_search + 服务端场景映射"),
+            ("帮我看一下贵州茅台今天怎么走。", "单资产: search_astocks/get_astock_realtime + 新闻线索 + 本机分析"),
+            ("我现在偏红利和黄金，下一步要不要降低波动？", "组合风控: 用户约束 + MCP 数据 + 本机模型生成执行建议"),
+            ("把刚才的资产表现做成图表。", "产物生成: 复用 recent_conversation/MCP，服务端 chart artifact 保存到工作区"),
+        ]
+
+    def _starter_prompt_lines(self, *, compact: bool = False) -> list[str]:
+        lines = []
+        for index, (prompt, route) in enumerate(self._starter_prompt_examples(), 1):
+            if compact:
+                lines.append(f"  {index}  {prompt}")
+            else:
+                lines.append(f"{index}. {prompt}")
+                lines.append(f"   路线: {route}")
+        return lines
+
+    def _workspace_passport_panel(self, workspace: dict) -> str:
+        path = str(workspace.get("path") or resolve_workspace_path())
+        allowed = bool(workspace.get("allowed"))
+        permission = "已授权，可保存图表、报告和工作记忆" if allowed else "未授权，当前不会写入本地文件"
+        action = "/workspace browse 用方向键选择项目文件夹；/workspace allow 授权写入" if not allowed else "/artifacts 查看产物；/open 打开图表/报告；/open link 1 打开资源"
+        return _text_panel("Project Sandbox", [
+            f"Path        {path}",
+            f"Permission  {permission}",
+            "Artifacts   .erlangshen/artifacts inside selected project",
+            f"Action      {action}",
+        ], min_width=72, max_width=110)
+
+    def _agent_readiness_panel(
+        self,
+        *,
+        session: dict,
+        base_url: str,
+        llm_ready: bool,
+        workspace: dict,
+    ) -> str:
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(workspace.get("allowed"))
+        states = [
+            ("account", token_ready, "/login"),
+            ("model", llm_ready, "/model key"),
+            ("workspace", workspace_ready, "/workspace browse"),
+            ("mcp", token_ready, "xwab/xczt"),
+            ("server", bool(base_url), "configured"),
+            ("artifacts", workspace_ready, ".erlangshen"),
+        ]
+        rows = []
+        for name, ok, hint in states:
+            mark = "OK" if ok else "NEED"
+            rows.append((name, f"{mark} · {hint}"))
+        return _panel("Agent Readiness", rows)
+
     def prompt(self) -> str:
         session = load_auth_session()
         user = session.get("user") or {}
@@ -338,6 +906,44 @@ class CLI:
         if len(name) > 24:
             name = name[:21] + "..."
         return f"erlangshen:{name}> "
+
+    def _prompt_status_text(self) -> str:
+        session = load_auth_session()
+        config = get_config()
+        workspace = workspace_status()
+        provider, model, llm_ready, _ = self._llm_status(config)
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(workspace.get("allowed"))
+        resource_count = len(self._recent_resource_links(limit=24))
+        chips = [
+            self._status_chip("account", token_ready),
+            self._status_chip("model", llm_ready),
+            self._status_chip("workspace", workspace_ready),
+            self._status_chip("mcp", token_ready),
+            self._status_chip("chart", workspace_ready),
+            f"links[{resource_count}]" if resource_count else "links[none]",
+        ]
+        if not token_ready or not llm_ready or not workspace_ready:
+            action = "/setup run"
+        elif self._last_agent_plan:
+            action = "/plan"
+        else:
+            action = "直接提问"
+        model_text = f"{provider}/{model}"
+        if len(model_text) > 34:
+            model_text = model_text[:31] + "..."
+        return (
+            "  ".join(chips)
+            + f"  model:{model_text}"
+            + f"  next:{action}"
+            + ("  links:/links open 1" if resource_count else "")
+            + "  / 打开命令  /server goals  /tools"
+        )
+
+    def _prompt_status_bar_fragments(self):
+        width = min(max(72, _terminal_width()), 150)
+        text = self._prompt_status_text()
+        return [("class:status", text[:width])]
 
     def _server_display_text(self, base_url: str | None) -> str:
         return "已配置" if (base_url or "").strip() else "未配置"
@@ -379,24 +985,57 @@ class CLI:
             if not raw_line:
                 lines.append("│ " + "".ljust(width - 3) + "│")
                 continue
-            for line in self._wrap_text(raw_line, width - 4):
+            display_line = self._message_display_line(raw_line)
+            for line in self._wrap_text(display_line, width - 4):
                 lines.append("│ " + line.ljust(width - 3) + "│")
         return "\n".join([top, *lines, bottom])
 
-    def _wrap_text(self, text: str, limit: int) -> list[str]:
+    def _message_display_line(self, text: str) -> str:
+        line = str(text).rstrip()
+        heading = re.match(r"^\s{0,3}#{1,3}\s+(.+)$", line)
+        if heading:
+            return f"▸ {heading.group(1).strip()}"
+        bullet = re.match(r"^(\s*)([-*]|\d+[.、])\s+(.+)$", line)
+        if bullet:
+            indent, marker, content = bullet.groups()
+            return f"{indent}{marker} {content.strip()}"
+        return line
+
+    def _wrap_text(self, text: str, limit: int, *, continuation_indent: int | None = None) -> list[str]:
         text = str(text)
         if len(text) <= limit:
             return [text]
+        prefix = ""
+        if continuation_indent is None:
+            match = re.match(r"^(\s*(?:[-*]|\d+[.、])\s+)", text)
+            if match:
+                prefix = " " * len(match.group(1))
+        elif continuation_indent > 0:
+            prefix = " " * continuation_indent
         result = []
-        current = ""
-        for char in text:
-            if len(current) >= limit:
-                result.append(current)
-                current = ""
-            current += char
-        if current:
-            result.append(current)
+        remaining = text
+        first = True
+        while len(remaining) > limit:
+            current_prefix = "" if first else prefix
+            available = max(8, limit - len(current_prefix))
+            cut = self._wrap_cut_index(remaining, available)
+            chunk = remaining[:cut].rstrip()
+            result.append(current_prefix + chunk)
+            remaining = remaining[cut:].lstrip()
+            first = False
+        if remaining:
+            result.append(remaining if first else prefix + remaining)
         return result
+
+    def _wrap_cut_index(self, text: str, limit: int) -> int:
+        if len(text) <= limit:
+            return len(text)
+        window = text[:limit + 1]
+        for pattern in (" ", "，", "。", "；", "、", ",", ";", "/"):
+            index = window.rfind(pattern)
+            if index >= max(8, int(limit * 0.55)):
+                return index + (0 if pattern == " " else 1)
+        return limit
 
     def _confirm_workspace_sandbox(self) -> None:
         if not sys.stdin.isatty() or os.getenv("ERLANGSHEN_SKIP_WORKSPACE_PROMPT"):
@@ -404,23 +1043,258 @@ class CLI:
         workspace = resolve_workspace_path()
         status = workspace_status(workspace)
         if status.get("allowed"):
-            print(_color(f"项目文件夹: 已授权 {workspace}", "2"))
+            resource_count = self._workspace_resource_count(workspace)
+            suffix = f" · 资源索引 {resource_count} 条" if resource_count else " · 资源索引已启用"
+            print(_color(f"项目文件夹: 已授权 {workspace}{suffix}", "2"))
             print()
             return
+        line, _ = self._select_and_authorize_workspace(workspace, force=True)
+        if "已跳过" in line:
+            print(_color("项目文件夹未授权，本次仅进行对话与远程接口调用，不写入本地分析产物。", "33"))
+        elif "已授权" in line:
+            print(_color(line.replace("- 工作区: ", "项目文件夹"), "32"))
+        else:
+            print(_color(line.replace("- 工作区: ", "项目文件夹"), "33"))
+        print()
+
+    def _select_and_authorize_workspace(self, workspace, *, force: bool = False) -> tuple[str, dict]:
+        status = workspace_status(workspace)
+        if status.get("allowed") and not force:
+            return f"- 工作区: 已授权 {status.get('path')}", status
+        try:
+            selected = self._read_workspace_path_selection(workspace)
+        except (KeyboardInterrupt, EOFError, OSError):
+            selected = "n"
+        selected_key = selected.lower()
+        if selected_key in {"n", "no", "否", "跳过", "skip"}:
+            return "- 工作区: 已跳过授权，本次不会写入图表或报告", workspace_status(workspace)
+        workspace = resolve_workspace_path(None if selected_key in {"", "y", "yes", "是", "好", "允许"} else selected)
+        select_workspace(workspace)
         try:
             answer = input(
-                f"是否允许二郎神在当前项目文件夹读写分析产物？\n"
+                f"是否允许二郎神在该项目文件夹读写分析产物？\n"
                 f"  {workspace}\n"
-                "用于保存图表、报告和工作记忆；不会越过该目录访问其他路径 [y/N]: "
+                "用于保存图表、报告、工作记忆和资源链接索引；不会越过该目录访问其他路径 [Y/n]: "
             ).strip().lower()
         except (KeyboardInterrupt, EOFError, OSError):
-            answer = ""
-        if answer in {"y", "yes", "是", "好", "允许"}:
-            approve_workspace(workspace)
-            print(_color("项目文件夹已授权，本次会在该沙箱内工作。", "32"))
+            answer = "n"
+        if answer in {"", "y", "yes", "是", "好", "允许"}:
+            approved = approve_workspace(workspace)
+            return f"- 工作区: 已授权 {approved.get('path')}", approved
+        return f"- 工作区: 已选择但未授权 {workspace}", workspace_status(workspace)
+
+    def _read_workspace_path_selection(self, workspace) -> str:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            selected = self._browse_workspace_directory(workspace)
+            if selected is not None:
+                return selected
+        return self._prompt_workspace_path(workspace)
+
+    def _prompt_workspace_path(self, workspace) -> str:
+        prompt = (
+            "请选择二郎神本次可使用的项目文件夹（Tab 补全路径；输入 n 跳过）。\n"
+            f"  当前候选: {workspace}\n"
+            "路径（直接回车使用当前候选；输入 n 跳过本地文件写入）: "
+        )
+        if self._prompt_toolkit_available():
+            try:
+                from prompt_toolkit import PromptSession
+                from prompt_toolkit.completion import PathCompleter
+
+                session = PromptSession(
+                    completer=PathCompleter(only_directories=True, expanduser=True),
+                    complete_while_typing=True,
+                )
+                return session.prompt(prompt, default=str(workspace)).strip()
+            except (KeyboardInterrupt, EOFError, OSError):
+                raise
+            except Exception:
+                pass
+        return input(prompt).strip()
+
+    def _browse_workspace_directory(self, workspace) -> str | None:
+        try:
+            import termios
+            import tty
+        except ImportError:
+            return None
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return None
+
+        current = self._normalize_workspace_browser_path(workspace)
+        selected = 0
+        rendered_height = 0
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while True:
+                items = self._workspace_directory_items(current)
+                selected = max(0, min(selected, len(items) - 1))
+                rendered_height = self._render_workspace_browser(current, items, selected)
+                ch = sys.stdin.read(1)
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch == "\x04":
+                    raise EOFError
+                if ch in {"q", "Q"}:
+                    return "n"
+                if ch in {"\r", "\n"}:
+                    action, path, _ = items[selected]
+                    if action == "use":
+                        return str(current)
+                    if action == "choose":
+                        return str(path)
+                    if action == "manual":
+                        self._clear_terminal_block(rendered_height)
+                        rendered_height = 0
+                        return self._prompt_workspace_path(current)
+                    current = path
+                    selected = 0
+                    continue
+                if ch in {"p", "P"}:
+                    self._clear_terminal_block(rendered_height)
+                    rendered_height = 0
+                    return self._prompt_workspace_path(current)
+                if ch == "\x1b":
+                    action = self._read_escape_sequence()
+                    if action == "escape":
+                        return "n"
+                    if action == "up":
+                        selected = (selected - 1) % len(items)
+                    elif action == "down":
+                        selected = (selected + 1) % len(items)
+                    continue
+                if ch in {"k", "K"}:
+                    selected = (selected - 1) % len(items)
+                elif ch in {"j", "J"}:
+                    selected = (selected + 1) % len(items)
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except OSError:
+                pass
+            if rendered_height:
+                self._clear_terminal_block(rendered_height)
+
+    def _normalize_workspace_browser_path(self, workspace) -> Path:
+        path = Path(str(workspace)).expanduser()
+        if path.exists() and path.is_file():
+            path = path.parent
+        if not path.exists():
+            existing = next((parent for parent in [path, *path.parents] if parent.exists()), Path.cwd())
+            path = existing
+        try:
+            return path.resolve()
+        except OSError:
+            return Path.cwd().resolve()
+
+    def _workspace_directory_items(self, current: Path) -> list[tuple[str, Path, str]]:
+        items: list[tuple[str, Path, str]] = [
+            ("use", current, "使用当前目录作为项目沙箱"),
+            ("manual", current, "手动输入或粘贴其他路径"),
+        ]
+        seen_paths = {str(current)}
+        for item in recent_workspaces(limit=4):
+            path = Path(str(item.get("path") or "")).expanduser()
+            if not path.exists() or not path.is_dir() or str(path.resolve()) in seen_paths:
+                continue
+            seen_paths.add(str(path.resolve()))
+            badge = "已授权" if item.get("allowed") else "未授权"
+            resource_count = self._workspace_resource_count(path)
+            resource_badge = f" · {resource_count} 资源" if resource_count else ""
+            items.append(("choose", path.resolve(), f"最近项目 · {badge}{resource_badge} · 直接切换"))
+        parent = current.parent
+        if parent != current:
+            items.append(("open", parent, ".. 上一级目录"))
+        try:
+            children = [
+                child for child in current.iterdir()
+                if child.is_dir() and not child.name.startswith(".")
+            ]
+        except OSError:
+            children = []
+        for child in sorted(children, key=lambda item: item.name.lower())[:40]:
+            items.append(("open", child, child.name + "/"))
+        return items
+
+    def _workspace_resource_count(self, workspace: str | Path) -> int:
+        try:
+            return len(self._read_resource_index(self._resource_index_path(workspace)))
+        except (OSError, PermissionError, TypeError, ValueError):
+            return 0
+
+    def _render_workspace_browser(
+        self,
+        current: Path,
+        items: list[tuple[str, Path, str]],
+        selected: int,
+    ) -> int:
+        width = min(max(76, _terminal_width() - 4), 120)
+        max_rows = 12
+        visible = items[:max_rows]
+        if selected >= max_rows and len(items) > max_rows:
+            start = min(selected - max_rows + 1, len(items) - max_rows)
+            visible = items[start:start + max_rows]
         else:
-            print(_color("项目文件夹未授权，本次仅进行对话与远程接口调用，不写入本地分析产物。", "33"))
-        print()
+            start = 0
+        lines = [
+            _color("╭─ Project Sandbox Setup " + "─" * max(0, width - _display_width("Project Sandbox Setup") - 5) + "╮", "36"),
+            self._browser_line("选择二郎神本次可访问的项目文件夹", width),
+            self._browser_line(f"当前浏览: {str(current)}", width),
+            self._browser_line(self._workspace_browser_resource_hint(current), width),
+            self._browser_line("授权后: 仅在该目录内保存图表、报告、工作记忆和可打开资源索引", width),
+            self._browser_line("不会写入: 大模型 API Key、账号 token、服务端内部认知库", width),
+            self._browser_line("↑↓/jk 选择  Enter 打开/确认  p 粘贴路径  q/Esc 跳过", width),
+            "├" + "─" * (width - 2) + "┤",
+        ]
+        for row_index in range(max_rows):
+            if row_index < len(visible):
+                absolute_index = start + row_index
+                action, path, label = visible[row_index]
+                marker = "›" if absolute_index == selected else " "
+                description = str(path) if action in {"use", "manual", "choose"} else str(path.name or path)
+                text = f"{marker} {_pad_display(label, 34)} {description}"
+            else:
+                text = ""
+            line = self._browser_line(text, width)
+            if row_index < len(visible) and start + row_index == selected:
+                line = _color(line, self._ansi_selected_style())
+            lines.append(line)
+        footer = f"{len(items)} 个可选项 · 产物/资源索引 .erlangshen/artifacts · 后续 /setup run"
+        if len(items) > max_rows:
+            footer += f" · 当前 {selected + 1}/{len(items)}"
+        lines.extend([
+            "├" + "─" * (width - 2) + "┤",
+            self._browser_line(footer, width),
+            self._browser_line("提示: 选定后还会再次确认写入权限；也可稍后用 /workspace browse 重新选择", width),
+            _color("╰" + "─" * (width - 2) + "╯", "36"),
+        ])
+        sys.stdout.write("\n".join(lines) + "\n")
+        sys.stdout.write(f"\033[{len(lines)}A")
+        sys.stdout.flush()
+        return len(lines)
+
+    def _browser_line(self, text: str, width: int) -> str:
+        return "│ " + _pad_display(text, width - 3) + "│"
+
+    def _workspace_browser_resource_hint(self, current: Path) -> str:
+        count = self._workspace_resource_count(current)
+        if count:
+            return f"当前项目资源索引: 已发现 {count} 条网页/图片/图表/报告链接"
+        return "当前项目资源索引: 暂无；授权后会保存 resources.json"
+
+    def _clear_terminal_block(self, height: int) -> None:
+        for _ in range(height):
+            sys.stdout.write("\033[2K\r\n")
+        sys.stdout.write(f"\033[{height}A")
+        sys.stdout.flush()
+
+    def _prompt_toolkit_available(self) -> bool:
+        try:
+            return importlib.util.find_spec("prompt_toolkit") is not None
+        except Exception:
+            return False
 
     def print_help(self):
         """打印帮助信息"""
@@ -440,19 +1314,35 @@ class CLI:
   /model                      检查大模型 provider/model/API key 配置
   /model select               光标选择大模型供应商和型号
   /model key                  在本机测试并保存当前供应商 API Key
+  /setup                      查看初始化向导和当前准备状态
+  /setup run                  交互式选择项目文件夹并授权沙箱
+  /setup workspace            重新选择项目文件夹并授权本地沙箱
+  /doctor                     本地诊断工作区、登录、大模型、MCP 与产物链路
+  /tools                      查看 MCP、web_search 和图表 artifact 能力地图
+  /plan                       查看最近一次分析的意图、工具调用和产物计划
+  /context                    查看最近对话上下文；/context clear 清空
   /commands                   打开命令面板
   /service                    查看服务端状态
   /health                     服务端健康检查
   /map <问题>                 映射服务端认知场景
   /advice <问题>              服务端映射场景，本机大模型生成建议
   <自然语言问题>              等同于 /advice <问题>
-  /clear                      清屏
+  /clear                      清屏并开启干净上下文
   /exit                       退出
 
 完整命令:
   /auth <cmd>                 登录、账号、服务端地址
   /server <cmd>               调用核心服务端 API
   /workspace                  查看或授权当前项目文件夹沙箱
+  /workspace browse           用方向键选择项目文件夹
+  /workspace path <路径>       手动输入或粘贴项目文件夹路径
+  /workspace allow [路径]      授权项目文件夹写入 .erlangshen/artifacts 和 resources.json
+  /artifacts                  查看当前项目文件夹内的图表和报告
+  /open [chart|report|link N]  打开最近图表、报告或 /links 中的资源
+  /open link <序号>            打开 /links 列表里的指定网页、图片或本地产物
+  /links                      查看最近网页、图片和本地产物名称链接
+  /chart <标题> :: {json}      生成结构化图表 artifact
+  /tools                      查看数据工具、搜索和图表通信能力
 
 本地开发命令:
   /analyze <query>            综合分析
@@ -471,6 +1361,10 @@ class CLI:
   erlangshen /model
   erlangshen /model select
   erlangshen /model key
+  erlangshen /setup workspace
+  erlangshen /workspace browse
+  erlangshen /workspace path /path/to/project
+  erlangshen /workspace allow
   erlangshen /commands
   erlangshen /status
   erlangshen /map 全球流动性转向时风险资产怎么看
@@ -480,49 +1374,1944 @@ class CLI:
 
     def command_palette_text(self) -> str:
         """Return a compact slash-command palette."""
-        rows = [("command", "what it does")]
-        rows.extend((shortcut, description) for _, shortcut, description in COMMAND_PALETTE)
-        return "\n".join([
+        by_id = {item[0]: item for item in COMMAND_PALETTE}
+        lines = [
             "【二郎神命令面板】",
-            _panel("Slash Commands", rows),
+            _panel("Command Workbench", [
+                ("start", "/setup run · 初始化项目沙箱、账号和本机大模型"),
+                ("ask", "直接输入自然语言问题 · 本机 LLM 选择 MCP/web_search 和服务端映射"),
+                ("server", "/server  · status / goals / flow / artifact / capabilities"),
+                ("workspace", "/workspace browse · 选择项目文件夹并授权图表/报告保存"),
+                ("model", "/model select · /model key 本机测试并保存 API Key"),
+                ("resources", "/links 1 · /open 1 打开网页、图片、图表和报告"),
+                ("audit", "/plan · /brief · /doctor 复盘工具链路、会话状态和诊断"),
+            ]),
             "",
-            "提示: 在交互模式下输入 / 会弹出可选择命令列表；输入字母可过滤，↑↓ 选择，Enter 确认。",
-        ])
+        ]
+        seen: set[str] = set()
+        for title, command_ids in COMMAND_GROUPS:
+            group_lines = ["command                          what it does"]
+            for command_id, shortcut, description in COMMAND_PALETTE:
+                if command_id in command_ids:
+                    group_lines.append(f"{shortcut:<32} {description}")
+                    seen.add(command_id)
+            if len(group_lines) > 1:
+                lines.append(_text_panel(title, group_lines, min_width=88, max_width=120))
+                lines.append("")
+        remaining = [item for item in COMMAND_PALETTE if item[0] not in seen and item[0] in by_id]
+        if remaining:
+            group_lines = ["command                          what it does"]
+            group_lines.extend(f"{shortcut:<32} {description}" for _, shortcut, description in remaining)
+            lines.append(_text_panel("More", group_lines, min_width=88, max_width=120))
+            lines.append("")
+        lines.append("提示: 在交互模式下输入 / 会弹出可选择命令列表；输入字母可过滤，↑↓ 选择，Enter 确认。")
+        return "\n".join(lines)
 
     def workspace_text(self, args: str = "") -> str:
-        action = (args or "").strip().lower()
+        raw = (args or "").strip()
+        parts = raw.split(maxsplit=1)
+        action = parts[0].lower() if parts else ""
+        path_arg = parts[1].strip() if len(parts) > 1 else ""
         if action in {"allow", "approve", "授权", "允许"}:
-            status = approve_workspace()
+            status = approve_workspace(path_arg or None)
+        elif action in {"use", "select", "cd", "切换", "选择"}:
+            status = select_workspace(path_arg or None)
+        elif action in {"browse", "browser", "pick", "浏览", "选择器"}:
+            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                return "\n".join([
+                    "【项目文件夹选择器】",
+                    "- 当前不是交互终端，无法打开目录选择器。",
+                    "- 请在本机终端运行: erlangshen /workspace browse",
+                    "- 或执行: erlangshen /workspace path <项目路径>",
+                    "- 或直接执行: erlangshen /workspace use <项目路径>",
+                ])
+            selected = self._browse_workspace_directory(resolve_workspace_path(path_arg or None))
+            if not selected or selected.lower() in {"n", "no", "否", "跳过", "skip"}:
+                return "已取消项目文件夹选择。"
+            status = select_workspace(selected)
+        elif action in {"path", "manual", "input", "路径", "手动", "输入"}:
+            if path_arg:
+                status = select_workspace(path_arg)
+            elif not sys.stdin.isatty() or not sys.stdout.isatty():
+                return "\n".join([
+                    "【手动选择项目文件夹】",
+                    "- 当前不是交互终端，无法安全读取路径输入。",
+                    "- 请执行: erlangshen /workspace path <项目路径>",
+                    "- 然后授权: erlangshen /workspace allow",
+                ])
+            else:
+                selected = self._prompt_workspace_path(resolve_workspace_path())
+                if not selected or selected.lower() in {"n", "no", "否", "跳过", "skip"}:
+                    return "已取消项目文件夹选择。"
+                status = select_workspace(selected)
         elif action in {"revoke", "deny", "撤销", "拒绝"}:
             from src.workspace import revoke_workspace
 
-            status = revoke_workspace()
+            status = revoke_workspace(path_arg or None)
         else:
             status = workspace_status()
-        return "\n".join([
+        return self._workspace_status_panel(status)
+
+    def _workspace_status_panel(self, status: dict) -> str:
+        workspace = str(status.get("path") or resolve_workspace_path())
+        allowed = bool(status.get("allowed"))
+        permission = "已授权，可保存图表、报告和工作记忆" if allowed else "未授权，当前不会写入本地文件"
+        lines = [
             "【项目文件夹沙箱】",
-            f"- 路径: {status['path']}",
-            f"- 权限: {'已授权' if status.get('allowed') else '未授权'}",
+            f"- 当前路径: {workspace}",
+            f"- 权限: {permission}",
             f"- 模式: {status.get('mode')}",
-            "- 说明: 只有授权后，二郎神才会在该目录内保存图表、报告或分析产物。",
+            "- 产物目录: <项目>/.erlangshen/artifacts",
+            "",
+        ]
+        if allowed:
+            index_path = self._resource_index_path(workspace)
+            resource_count = self._workspace_resource_count(workspace)
+            lines.extend([
+                f"- 资源索引: {index_path}",
+                f"- 已索引资源: {resource_count} 条",
+                "",
+            ])
+            lines.extend([
+                "现在可以:",
+                "- 直接继续提问，图表和报告会保存到授权项目内",
+                "- /artifacts 查看已保存产物",
+                "- /open 打开最近图表或报告",
+                "- /links 查看最近网页、图片、PDF、图表和报告名称链接",
+                "- /open 1 或 /links 1 直接打开最近资源",
+            ])
+        else:
+            lines.extend([
+                "选择项目文件夹:",
+                "- /workspace browse        打开方向键路径选择器",
+                "- /workspace path <路径>   手动粘贴或输入项目路径",
+                "- /workspace use <路径>    手动粘贴或输入项目路径",
+                "- /workspace allow [路径]  授权写入图表、报告、工作记忆和资源链接索引",
+            ])
+        lines.extend([
+            "",
+            "产物和链接:",
+            "- 网页、图片、PDF、HTML 和本地图表不会塞进终端正文，会显示为可打开的名称链接。",
+            "- 服务端返回 chart artifact 后，客户端只在授权项目内保存 JSON/HTML。",
+            "- 授权后最近资源会写入项目资源索引；未授权时仅保存在当前 CLI 进程内。",
+            "- 可用 /links 查看资源索引，用 /open 1 或 /links 1 打开。",
+        ])
+        recent = recent_workspaces(limit=4)
+        lines.extend(["", "最近项目:"])
+        if recent:
+            for item in recent:
+                path = str(item.get("path") or "")
+                if not path:
+                    continue
+                badge = "已授权" if item.get("allowed") else "未授权"
+                marker = "当前" if path == workspace else "可选"
+                lines.append(f"- {marker} · {badge} · {path}")
+        else:
+            lines.append("- 暂无；可以先用 /workspace browse 选择，或 /workspace use <路径> 指定")
+        lines.extend([
+            "",
+            "沙箱边界:",
+            "- 未授权前不会写入本地文件。",
+            "- 授权后只在所选项目目录内保存 .erlangshen/artifacts 和 resources.json。",
+            "- 大模型 API Key 仍只保存在本机配置，不会写入项目文件夹。",
             "",
             "命令:",
-            "  /workspace allow",
-            "  /workspace revoke",
+            "  /workspace browse",
+            "  /workspace path <路径>",
+            "  /workspace use <路径>",
+            "  /workspace allow [路径]",
+            "  /workspace revoke [路径]",
         ])
+        return "\n".join(lines)
+
+    def artifacts_text(self, args: str = "") -> str:
+        status = workspace_status()
+        workspace = status.get("path")
+        if not status.get("allowed"):
+            return "\n".join([
+                "【分析产物】",
+                f"- 工作区: {workspace}",
+                "- 状态: 未授权",
+                "- 下一步: /workspace browse 选择项目文件夹，或 /workspace path <路径> 手动指定，然后 /workspace allow 授权保存图表和报告",
+            ])
+        root = ensure_inside_workspace(os.path.join(str(workspace), ".erlangshen", "artifacts"), workspace)
+        charts_dir = root / "charts"
+        reports_dir = root / "reports"
+        if not charts_dir.exists() and not reports_dir.exists():
+            return "\n".join([
+                "【分析产物】",
+                f"- 工作区: {workspace}",
+                "- 暂无分析产物",
+                "- 可执行: /chart 资产表现 :: {\"A股\":1.2,\"黄金\":0.8}",
+                "- 也可以直接问: 把刚才的分析做成图表/报告",
+            ])
+        chart_files = self._artifact_files(charts_dir, {".json", ".html"})
+        report_files = self._artifact_files(reports_dir, {".md"})
+        chart_records = self._chart_artifact_records(charts_dir, workspace)
+        if not chart_files and not report_files:
+            return "\n".join([
+                "【分析产物】",
+                f"- 工作区: {workspace}",
+                "- 暂无分析产物",
+                "- 可执行: /chart 资产表现 :: {\"A股\":1.2,\"黄金\":0.8}",
+                "- 也可以直接问: 把刚才的分析做成图表/报告",
+            ])
+        lines = [
+            "【分析产物】",
+            f"- 工作区: {workspace}",
+            f"- 摘要: reports {len(report_files)} / charts {len(chart_files)}",
+            f"- 图表视图: {len(chart_records)}",
+            f"- 最近报告: {self._relative_workspace_path(report_files[0], workspace) if report_files else '暂无'}",
+            f"- 最近图表: {self._relative_workspace_path(chart_files[0], workspace) if chart_files else '暂无'}",
+            f"- 最近可打开: {self._latest_openable_artifact_label(workspace)}",
+            "- 打开: /open report 或 /open chart",
+            "- 继续生成: 直接说“把这个做成图表/报告”，或使用 /chart <标题> :: {...}",
+            "- 用途: 图表由服务端 chart artifact 通道生成，报告由客户端保存到授权项目文件夹。",
+            "",
+            "产物收件箱:",
+            "- 图表: /open chart 打开最近 HTML 图表；/artifacts 查看全部",
+            "- 报告: /open report 打开最近 Markdown 报告",
+            "- 资源: /links 1 或 /open 1 打开网页、图片、图表和报告名称链接",
+        ]
+        openable = self._latest_artifact_for_open("", workspace)
+        if openable:
+            lines.append(f"- 名称链接: {self._workspace_file_link(openable, workspace, label='打开最近产物')}")
+        if chart_records:
+            lines.append("")
+            lines.append("- 最近图表摘要:")
+            for record in chart_records[:5]:
+                link_path = record.get("open_abs_path") or record.get("json_abs_path") or ""
+                link_text = self._workspace_file_link(link_path, workspace, label=f"打开 {record['title']}") if link_path else ""
+                lines.append(
+                    f"  - {record['title']} ({record['chart_type']}): "
+                    f"{', '.join(record['data_keys']) or '无数据键'} -> {record['open_path'] or record['json_path']}"
+                    + (f" · {link_text}" if link_text else "")
+                )
+        if report_files:
+            lines.append("")
+            lines.append("- 分析报告:")
+            for path in report_files[:8]:
+                lines.append(f"  - {self._relative_workspace_path(path, workspace)} · {self._workspace_file_link(path, workspace, label='打开报告')}")
+        if chart_files:
+            lines.append("")
+            lines.append("- 图表产物:")
+            for path in chart_files[:12]:
+                label = "打开图表" if path.suffix.lower() == ".html" else "打开 JSON"
+                lines.append(f"  - {self._relative_workspace_path(path, workspace)} · {self._workspace_file_link(path, workspace, label=label)}")
+        return "\n".join(lines)
+
+    def _chart_artifact_records(self, charts_dir: Path, workspace: str) -> list[dict]:
+        json_files = self._artifact_files(charts_dir, {".json"})
+        records = []
+        for json_path in json_files:
+            artifact = {}
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    artifact = loaded if isinstance(loaded, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                artifact = {}
+            html_path = json_path.with_suffix(".html")
+            data = artifact.get("data") if isinstance(artifact.get("data"), dict) else {}
+            records.append({
+                "title": self._text_field(artifact.get("title")) or json_path.stem,
+                "chart_type": self._text_field(artifact.get("type")) or "chart",
+                "data_keys": [str(key) for key in data.keys()][:8],
+                "json_path": self._relative_workspace_path(json_path, workspace),
+                "json_abs_path": str(json_path),
+                "open_path": self._relative_workspace_path(html_path, workspace) if html_path.exists() else "",
+                "open_abs_path": str(html_path) if html_path.exists() else "",
+            })
+        return records
+
+    def _latest_openable_artifact_label(self, workspace: str) -> str:
+        target = self._latest_artifact_for_open("", workspace)
+        if not target:
+            return "暂无"
+        return self._relative_workspace_path(target, workspace)
+
+    def open_artifact_text(self, args: str = "") -> str:
+        if self._is_resource_open_args(args):
+            return self.open_resource_link_text(args)
+        status = workspace_status()
+        workspace = status.get("path")
+        if not status.get("allowed"):
+            return "\n".join([
+                "【打开分析产物】",
+                f"- 工作区: {workspace}",
+                "- 状态: 未授权",
+                "- 下一步: /workspace allow <路径>",
+            ])
+        target = self._latest_artifact_for_open(args, workspace)
+        if not target:
+            return "\n".join([
+                "【打开分析产物】",
+                f"- 工作区: {workspace}",
+                "- 暂无可打开产物",
+                "- 可先执行: /chart 资产表现 :: {\"A股\":1.2,\"黄金\":0.8}",
+            ])
+        opener = self._system_open_command()
+        if opener:
+            try:
+                import subprocess
+
+                subprocess.Popen([*opener, str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return "\n".join([
+                    "【打开分析产物】",
+                    f"- 已尝试打开: {self._relative_workspace_path(target, workspace)}",
+                    f"- 路径: {target}",
+                    f"- 链接: {self._workspace_file_link(target, workspace, label='打开产物')}",
+                ])
+            except OSError as exc:
+                return "\n".join([
+                    "【打开分析产物】",
+                    f"- 自动打开失败: {exc}",
+                    f"- 路径: {target}",
+                    f"- 链接: {self._workspace_file_link(target, workspace, label='打开产物')}",
+                    "- 可手动在浏览器或编辑器中打开该文件。",
+                ])
+        return "\n".join([
+            "【打开分析产物】",
+            "- 当前环境没有可用桌面打开命令。",
+            f"- 路径: {target}",
+            f"- 链接: {self._workspace_file_link(target, workspace, label='打开产物')}",
+            "- 可手动在浏览器或编辑器中打开该文件。",
+        ])
+
+    def _is_resource_open_args(self, args: str) -> bool:
+        first = ((args or "").strip().split(maxsplit=1) or [""])[0].lower()
+        return first.isdigit() or first in {"link", "links", "resource", "resources", "url", "网页", "链接", "资源"}
+
+    def open_resource_link_text(self, args: str = "") -> str:
+        parts = (args or "").strip().split()
+        raw_index = parts[0] if parts and parts[0].isdigit() else (parts[1] if len(parts) > 1 else "1")
+        try:
+            index = max(1, int(raw_index))
+        except ValueError:
+            return "请提供要打开的资源序号，例如 /open link 1。"
+        entries = self._recent_resource_links(limit=24)
+        if not entries:
+            return "\n".join([
+                "【打开最近资源】",
+                "- 暂无最近资源链接。",
+                "- 下一步: 先输入投资问题，或用 /links 查看当前资源列表。",
+                "- 快捷打开: /open 1 或 /links 1",
+            ])
+        if index > len(entries):
+            return "\n".join([
+                "【打开最近资源】",
+                f"- 序号超出范围: {index}",
+                f"- 当前可打开资源数: {len(entries)}",
+                "- 输入 /links 查看完整列表。",
+            ])
+        entry = entries[index - 1]
+        label, target = self._resource_entry_label_target(entry)
+        opener = self._system_open_command()
+        if opener:
+            try:
+                import subprocess
+
+                subprocess.Popen([*opener, target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return "\n".join([
+                    "【打开最近资源】",
+                    f"- 已尝试打开: {label}",
+                    f"- 来源: {self._text_field(entry.get('source')) or 'resource'}",
+                    f"- 类型: {self._text_field(entry.get('type')) or self._resource_type_for_target(target)}",
+                    f"- 链接: {self._resource_link(label, target)}",
+                ])
+            except OSError as exc:
+                return "\n".join([
+                    "【打开最近资源】",
+                    f"- 自动打开失败: {exc}",
+                    f"- 链接: {self._resource_link(label, target)}",
+                    "- 可手动在浏览器或编辑器中打开该资源。",
+                ])
+        return "\n".join([
+            "【打开最近资源】",
+            "- 当前环境没有可用桌面打开命令。",
+            f"- 链接: {self._resource_link(label, target)}",
+            "- 可手动在浏览器或编辑器中打开该资源。",
+        ])
+
+    def _split_named_link(self, link_text: str) -> tuple[str, str]:
+        text = self._text_field(link_text)
+        matches = re.findall(r"(?:https?|file)://[^\s)\]\x1b]+", text, flags=re.I)
+        if matches:
+            target = matches[-1].rstrip(".,;，。；")
+            label = text.split(target, 1)[0].strip(" :-—()[]\x1b\\")
+            if ": " in label:
+                label = label.rsplit(": ", 1)[0]
+            return label.strip() or "打开资源", target
+        if ": " in text:
+            label, target = text.rsplit(": ", 1)
+            return label.strip() or "打开资源", self._normalize_open_target(target.strip())
+        return "打开资源", self._normalize_open_target(text)
+
+    def _normalize_open_target(self, target: str) -> str:
+        text = self._text_field(target)
+        if not text:
+            return ""
+        if re.match(r"^(?:https?|file)://", text, flags=re.I):
+            return text
+        if text.startswith("/") or text.startswith("~"):
+            return self._file_uri(text)
+        return text
+
+    def links_text(self, args: str = "") -> str:
+        raw = (args or "").strip()
+        if raw:
+            parts = raw.split()
+            if parts and parts[0].isdigit():
+                return self.open_resource_link_text(parts[0])
+            if parts and parts[0].lower() in {"open", "打开", "go"}:
+                index = parts[1] if len(parts) > 1 else "1"
+                return self.open_resource_link_text(f"link {index}")
+        entries = self._recent_resource_links(limit=12)
+        status = workspace_status()
+        index_path = self._resource_index_path(str(status.get("path") or "")) if status.get("allowed") else None
+        lines = [
+            "【最近可打开资源】",
+            "- 范围: 本次 CLI 最近回答 + 已授权项目资源索引里的网页、图片和本地产物链接",
+            "- 边界: 只保存命名链接，不包含 API Key、token 或服务端内部认知库内容",
+        ]
+        if index_path:
+            lines.append(f"- 索引: {index_path}")
+        else:
+            lines.append("- 索引: 未授权项目文件夹时不写入磁盘")
+        if not entries:
+            lines.extend([
+                "",
+                "暂无资源链接。",
+                "下一步:",
+                "- 直接提问并允许二郎神读取 MCP/web_search，回答里会出现“可打开资源”。",
+                "- 如果需要图表，可以说“把这个做成图表”，再用 /links 或 /open 查看。",
+            ])
+            return "\n".join(lines)
+        lines.append("")
+        for index, entry in enumerate(entries, 1):
+            query = self._text_field(entry.get("query")) or "上一轮回答"
+            source = self._text_field(entry.get("source")) or "resource"
+            label, target = self._resource_entry_label_target(entry)
+            resource_type = self._text_field(entry.get("type")) or self._resource_type_for_target(target)
+            lines.append(f"{index}. {source} · {query}")
+            lines.append(f"   名称: {self._resource_link(label, target)}")
+            lines.append(f"   类型: {resource_type} · 目标: {target}")
+        lines.extend([
+            "",
+            "命令:",
+            "  /links 1          打开第 1 个最近资源",
+            "  /links open 1     打开第 1 个最近资源",
+            "  /open 1           打开第 1 个最近资源",
+            "  /open link 1      打开第 1 个最近资源",
+            "  /open chart        打开最近本地图表",
+            "  /artifacts         查看全部本地产物",
+            "  /context clear     清空最近上下文和资源链接",
+        ])
+        return "\n".join(lines)
+
+    def _latest_artifact_for_open(self, args: str, workspace: str) -> Path | None:
+        kind = (args or "").strip().lower()
+        root = Path(str(workspace)) / ".erlangshen" / "artifacts"
+        if kind in {"report", "reports", "报告"}:
+            candidates = self._artifact_files(root / "reports", {".md"})
+        elif kind in {"chart", "charts", "html", "图表"}:
+            candidates = self._artifact_files(root / "charts", {".html"})
+        else:
+            candidates = [
+                *self._artifact_files(root / "charts", {".html"}),
+                *self._artifact_files(root / "reports", {".md"}),
+            ]
+            candidates = sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+        if not candidates:
+            return None
+        return ensure_inside_workspace(candidates[0], workspace)
+
+    def _system_open_command(self) -> list[str] | None:
+        if sys.platform == "darwin":
+            return ["open"]
+        if os.name == "nt":
+            return ["cmd", "/c", "start", ""]
+        if shutil.which("xdg-open"):
+            return ["xdg-open"]
+        return None
+
+    def doctor_text(self) -> str:
+        session = load_auth_session()
+        config = get_config()
+        workspace = workspace_status()
+        provider, model, llm_ready, key_hint = self._llm_status(config)
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(workspace.get("allowed"))
+        opener_ready = bool(self._system_open_command())
+        web_search_ready, web_search_detail = self._local_chrome_search_ready()
+        checks = [
+            ("workspace", workspace_ready, f"{workspace.get('path')}", "/workspace browse 或 /workspace path <路径> && /workspace allow"),
+            ("account", token_ready, self._doctor_account_label(session), "/login xwab <账号>"),
+            ("model", llm_ready, f"{provider} / {model}", f"/model select && /model key ({key_hint})"),
+            ("server", bool(config.erlangshen_api_base_url), self._server_display_text(config.erlangshen_api_base_url), "/auth server <url>"),
+            ("super-66 MCP", token_ready, "复用 XWAB/XCZT 登录态", "/login xwab <账号>"),
+            ("web_search", web_search_ready, web_search_detail, "python3 -m pip install playwright && python3 -m playwright install chrome"),
+            ("artifacts", workspace_ready, ".erlangshen/artifacts", "/workspace allow <路径>"),
+            ("open", opener_ready, "desktop opener available" if opener_ready else "no desktop opener", "/open 会返回文件路径"),
+        ]
+        core_checks = checks[:5]
+        core_ready = sum(1 for _, ok, _, _ in core_checks if ok)
+        primary_fix = self._doctor_primary_fix(checks)
+        lines = [
+            "【二郎神本地诊断】",
+            "- 说明: 这是本地 readiness 检查，不会把大模型 API Key 发给服务端，也不会访问远程网络。",
+            f"- 核心就绪度: {core_ready}/{len(core_checks)}",
+            f"- 首要修复: {primary_fix}",
+            "",
+        ]
+        ok_count = 0
+        for name, ok, detail, action in checks:
+            mark = "OK" if ok else "NEED"
+            if ok:
+                ok_count += 1
+            lines.append(f"- {mark:<4} {name:<12} {detail}")
+            if not ok:
+                lines.append(f"       next: {action}")
+        lines.extend(["", "生产链路矩阵:"])
+        for name, status, purpose, command, boundary in self._doctor_repair_matrix(
+            workspace_ready=workspace_ready,
+            token_ready=token_ready,
+            llm_ready=llm_ready,
+            web_search_ready=web_search_ready,
+            opener_ready=opener_ready,
+            key_hint=key_hint,
+        ):
+            lines.append(f"- {status:<5} {name}: {purpose}")
+            lines.append(f"        command: {command}")
+            lines.append(f"        boundary: {boundary}")
+        ux_checks = self._doctor_ux_checks()
+        lines.extend(["", "Agent UX:"])
+        for name, detail in ux_checks:
+            lines.append(f"- OK   {name:<16} {detail}")
+        lines.extend([
+            "",
+            f"总体: {ok_count}/{len(checks)} 项就绪",
+            f"交互能力: {len(ux_checks)}/{len(ux_checks)} 项可用",
+            "",
+            "本地 Chrome web_search:",
+            "- 用途: 补充 super-66 MCP 不覆盖的新闻、公告、网页、图片入口和最新事件线索。",
+            "- 依赖: python3 -m pip install playwright && python3 -m playwright install chrome",
+            "- 边界: 在用户本机无头 Chrome 中检索公开网页；不会把大模型 API Key 发给二郎神服务端。",
+            "- 输出: results/title/url 会进入 MCP 快照；网页、图片、HTML、PDF 会进入 /links 和 /open 资源入口。",
+            "",
+            "资源和图表:",
+            "- 服务器、MCP、web_search 或本机大模型返回网页/图片/HTML/PDF 时，CLI 会显示名称链接，而不是尝试渲染富文本。",
+            "- 近期资源: /links；直接打开: /links 1 或 /open 1；图表产物: /artifacts 或 /open chart。",
+            "- 授权工作区后，图表和报告会保存到 .erlangshen/artifacts，资源索引会保存为 resources.json。",
+            "建议: /setup run 初始化；/tools 查看数据能力；/service 做服务端远程状态检查。",
+        ])
+        return "\n".join(lines)
+
+    def _doctor_repair_matrix(
+        self,
+        *,
+        workspace_ready: bool,
+        token_ready: bool,
+        llm_ready: bool,
+        web_search_ready: bool,
+        opener_ready: bool,
+        key_hint: str,
+    ) -> list[tuple[str, str, str, str, str]]:
+        def status(ok: bool, optional: bool = False) -> str:
+            if ok:
+                return "ready"
+            return "setup" if optional else "fix"
+
+        return [
+            (
+                "account",
+                status(token_ready),
+                "XWAB/XCZT 登录态，保护服务端映射和 super-66 MCP 鉴权",
+                "/login xwab <账号>",
+                "只保存会话 token；大模型 Key 不会随登录发送给服务端",
+            ),
+            (
+                "model",
+                status(llm_ready),
+                "本机大模型负责意图理解、工具编排和最终自然语言分析",
+                f"/model select && /model key ({key_hint})",
+                "API Key 只保存在本机配置，用于客户端直连供应商",
+            ),
+            (
+                "workspace",
+                status(workspace_ready),
+                "项目沙箱用于保存报告、图表、JSON 和资源索引",
+                "/workspace browse 或 /workspace path <路径> && /workspace allow",
+                "只在用户授权的项目目录内写入 .erlangshen/artifacts",
+            ),
+            (
+                "super-66 MCP",
+                status(token_ready),
+                "优先读取行情、产品、持仓相关数据，避免模糊问题机械追问",
+                "/tools 查看工具；/login xwab <账号> 修复鉴权",
+                "复用账号体系，不要求用户额外配置 MCP 密钥",
+            ),
+            (
+                "web_search",
+                status(web_search_ready, optional=True),
+                "补充当天新闻、公告、网页和图片入口，作为 MCP 未覆盖的信息线索",
+                "python3 -m pip install playwright && python3 -m playwright install chrome",
+                "本机 Chrome 检索公开网页；结果 URL 会进入 /links",
+            ),
+            (
+                "chart artifact",
+                status(workspace_ready),
+                "服务端生成或客户端保存图表 HTML/JSON，并返回可打开名称链接",
+                "/chart <问题> 或自然语言要求“做成图表”；/open chart 打开最新图表",
+                "产物写入授权工作区；CLI 只展示链接和轻量预览",
+            ),
+            (
+                "resource links",
+                "ready",
+                "网页、图片、HTML、PDF、图表和报告统一进入可点击资源入口",
+                "/links 查看；/links 1 或 /open 1 直接打开",
+                "终端不内嵌富文本或二进制内容，只展示名称和 URL/路径",
+            ),
+            (
+                "desktop open",
+                status(opener_ready, optional=True),
+                "调用系统打开器打开网页、图片、报告和图表",
+                "/open 1、/links open 1、/open chart",
+                "没有系统打开器时仍返回文件路径或 URL，用户可手动打开",
+            ),
+            (
+                "server",
+                "ready",
+                "受保护场景映射、能力说明和 chart artifact 通道",
+                "/server status、/server flow、/server artifact",
+                "服务端不接收用户的大模型 API Key",
+            ),
+        ]
+
+    def brief_text(self) -> str:
+        session = load_auth_session()
+        config = get_config()
+        workspace = workspace_status()
+        provider, model, llm_ready, key_hint = self._llm_status(config)
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(workspace.get("allowed"))
+        mcp_context = self._last_mcp_context_brief()
+        artifact_context = self._recent_artifact_context()
+        resource_context = self._recent_resource_context()
+        plan = self._last_agent_plan or {}
+        capability_rows = [
+            ("account", "OK" if token_ready else "NEED", "/login xwab <账号>"),
+            ("model", "OK" if llm_ready else "NEED", f"/model key ({key_hint})"),
+            ("workspace", "OK" if workspace_ready else "NEED", "/workspace browse && /workspace allow"),
+            ("mcp", "OK" if token_ready else "NEED", "复用 XWAB/XCZT 登录态"),
+            ("chart", "OK" if workspace_ready else "NEED", "授权工作区后保存图表/报告"),
+        ]
+        lines = [
+            "【二郎神会话能力摘要】",
+            f"- 模型: {provider} / {model} ({'ready' if llm_ready else 'missing key'})",
+            f"- 工作区: {workspace.get('path')} ({'已授权' if workspace_ready else '未授权'})",
+            f"- 最近计划: {plan.get('query') or '暂无'}",
+            f"- 上轮 MCP: {', '.join(mcp_context.get('usable_sources') or []) or '暂无'}",
+            f"- 最近产物: {', '.join(item.get('title') or '未命名' for item in artifact_context) or '暂无'}",
+            f"- 最近资源: {len(resource_context)} 个可打开链接" if resource_context else "- 最近资源: 暂无",
+            "",
+            "能力状态:",
+        ]
+        for name, status, hint in capability_rows:
+            lines.append(f"- {name}: {status} · {hint}")
+        lines.extend([
+            "",
+            "Agent 回合就绪度:",
+            *self._brief_agent_turn_lines(
+                token_ready=token_ready,
+                llm_ready=llm_ready,
+                workspace_ready=workspace_ready,
+                mcp_context=mcp_context,
+                artifact_context=artifact_context,
+                resource_context=resource_context,
+            ),
+            "",
+            "你现在可以这样开始:",
+            "- 今天行情怎么样？先帮我看盘面主线和风险。",
+            "- 帮我看一下某个指数/股票/基金的走势和风险信号。",
+            "- 把刚才的资产表现做成图表。",
+            "",
+            "推荐命令:",
+            "- /setup run 初始化工作区、账号和本机大模型",
+            "- /tools 查看 super-66 MCP、web_search 和 chart artifact 能力",
+            "- /server goals 按目标选择服务端相关操作",
+            "- /plan 复盘最近一次意图、工具链路和 MCP 数据",
+            "- /links 查看最近网页、图片和本地产物名称链接",
+            "- /artifacts 查看已保存图表和报告",
+            "",
+            "边界: 大模型 API Key 只在本机直连供应商；服务端只接收问题做受保护场景映射和 chart artifact。",
+        ])
+        return "\n".join(lines)
+
+    def _brief_agent_turn_lines(
+        self,
+        *,
+        token_ready: bool,
+        llm_ready: bool,
+        workspace_ready: bool,
+        mcp_context: dict,
+        artifact_context: list[dict],
+        resource_context: list[dict],
+    ) -> list[str]:
+        mcp_status = "ready" if token_ready else "login needed"
+        model_status = "ready" if llm_ready else "key needed"
+        workspace_status_text = "ready" if workspace_ready else "sandbox needed"
+        service_status = "ready" if token_ready else "login needed"
+        artifact_status = "ready" if workspace_ready else "workspace needed"
+        resource_status = f"ready · {len(resource_context)} links" if resource_context else "ready · 0 links"
+        last_mcp = ", ".join(mcp_context.get("usable_sources") or []) or "暂无上一轮 MCP 快照"
+        last_artifacts = ", ".join(item.get("title") or "未命名" for item in artifact_context) or "暂无产物"
+        return [
+            "- Ask: ready · 直接输入自然语言问题",
+            f"- Think: {model_status} · 本机大模型负责意图、工具组合和最终分析",
+            f"- Data: {mcp_status} · super-66 MCP 优先；上一轮 {last_mcp}",
+            f"- Map: {service_status} · 服务端只做受保护场景映射和 chart artifact",
+            f"- Build: {artifact_status} · 图表/报告保存到授权工作区；最近 {last_artifacts}",
+            f"- Open: {resource_status} · /links 1 或 /open 1 打开网页、图片、图表和报告",
+            f"- Sandbox: {workspace_status_text} · API Key/token 不写入项目目录",
+        ]
+
+    def examples_text(self) -> str:
+        groups = [
+            ("市场概览", [
+                ("今天行情怎么样？先帮我看盘面主线和风险。", "super-66 MCP 指数/全球资产 + web_search + 服务端场景映射"),
+                ("今天市场是风险偏好修复，还是防御占优？", "宽盘快照 + 黄金/恒生科技等风险偏好参照"),
+                ("A股今天哪些方向值得跟踪？", "行情快照 + 本机大模型做主线归纳"),
+            ]),
+            ("单资产/产品", [
+                ("帮我看一下贵州茅台今天怎么走。", "search_astocks/get_astock_realtime + 新闻线索"),
+                ("黄金最近的趋势和风险信号是什么？", "get_global_asset_data + 服务端宏观/市场映射"),
+                ("这个基金近期回撤为什么扩大？", "search_products/get_product_detail/get_product_history"),
+            ]),
+            ("组合和风控", [
+                ("我现在偏红利和黄金，下一步要不要降低波动？", "用户约束 + MCP 数据 + 本机模型生成风控建议"),
+                ("如果美元指数继续走强，对港股和黄金有什么影响？", "global assets + web_search + 服务端映射"),
+                ("给我一个更偏执行的版本：仓位、观察信号和失效条件。", "沿用 recent_conversation 和上一轮 MCP 摘要"),
+            ]),
+            ("图表/报告", [
+                ("把刚才的资产表现做成图表。", "复用上一轮 MCP 数据，服务端生成 chart artifact"),
+                ("把这几个方向的涨跌幅做个对比。", "本机模型选择可视化字段，保存到授权工作区"),
+                ("生成一份带图表的简短报告。", "报告保存到 .erlangshen/artifacts/reports"),
+            ]),
+        ]
+        lines = [
+            "【二郎神提问范例】",
+            "直接输入自然语言即可；本机大模型会理解上下文、选择 super-66 MCP/web_search、请求服务端受保护映射，并在需要时生成图表产物。",
+            "",
+            "复制一个开场:",
+            *self._starter_prompt_lines(),
+            "",
+            "使用前建议:",
+            "- /setup run 补齐工作区、账号和本机大模型 API Key",
+            "- /brief 查看当前会话还能做什么",
+            "- /tools 查看完整 MCP 和 chart artifact 能力地图",
+            "",
+        ]
+        for title, examples in groups:
+            lines.append(f"{title}:")
+            for prompt, route in examples:
+                lines.append(f"- {prompt}")
+                lines.append(f"  路线: {route}")
+            lines.append("")
+        lines.extend([
+            "追问方式:",
+            "- “那如果换成港股呢？”",
+            "- “把刚才这个做成图表。”",
+            "- “更偏执行一点，列观察信号和失效条件。”",
+            "",
+            "边界: 大模型 API Key 只在本机使用；服务端只返回受保护场景信号和 chart artifact，不暴露内部认知库全文。",
+        ])
+        return "\n".join(lines)
+
+    def _doctor_primary_fix(self, checks: list[tuple[str, bool, str, str]]) -> str:
+        for name, ok, _, action in checks:
+            if not ok:
+                return f"{name} -> {action}"
+        return "全部核心链路可用；直接输入投资问题开始分析"
+
+    def _doctor_account_label(self, session: dict) -> str:
+        user = session.get("user") or {}
+        return user.get("username") or user.get("email") or user.get("id") or ("已保存 token" if session.get("token") else "未登录")
+
+    def _local_chrome_search_ready(self) -> tuple[bool, str]:
+        try:
+            if importlib.util.find_spec("playwright") is None:
+                return False, "optional Playwright not installed"
+        except Exception:
+            return False, "optional Playwright not installed"
+        return True, "Playwright available; Chrome search can run locally"
+
+    def _doctor_ux_checks(self) -> list[tuple[str, str]]:
+        return [
+            ("slash picker", "输入 / 后可按分组选择命令，支持 /server flow /context /clear"),
+            ("workspace browser", "/workspace browse 和 /setup run 可用方向键选择项目文件夹"),
+            ("context memory", "最近对话上下文会进入本机大模型；/context 可查看或清空"),
+            ("agent trace", "回答和 /plan 会展示本轮理解、取数、映射、生成过程"),
+            ("chart preview", "chart artifact 会保存 JSON/HTML，并在终端生成轻量预览"),
+            ("server panels", "/server commands/flow/capabilities/artifact 可解释服务端边界"),
+        ]
+
+    def tools_text(self, args: str = "") -> str:
+        catalog = self._mcp_capability_catalog((args or "").strip())
+        lines = [
+            "【二郎神工具能力地图】",
+            "- 数据优先级: super-66 MCP > 用户提供数据 > 本地 Chrome web_search 补充",
+            "- 编排方式: 本机大模型先理解意图，再选择 MCP 工具组合；服务端只做受保护场景映射和 chart artifact 通道",
+            "- 鉴权边界: super-66 MCP 复用 XWAB/XCZT 登录态；大模型 API Key 只保存在本机",
+            f"- 注册表来源: {catalog.get('registry_source')} / {len(catalog.get('registry_tools') or [])} 个工具",
+            "",
+            "super-66 注册表工具:",
+        ]
+        for tool in catalog.get("registry_tools") or []:
+            lines.append(f"- {tool.get('name')}: {tool.get('description')}")
+        lines.extend([
+            "",
+            "可调用 MCP / 数据工具:",
+        ])
+        for tool in catalog.get("mcp_tools") or []:
+            args_text = json.dumps(tool.get("args") or {}, ensure_ascii=False)
+            lines.append(f"- {tool.get('name')}: {tool.get('use_when')}")
+            lines.append(f"  默认参数: {args_text}")
+        artifact = catalog.get("artifact_channel") or {}
+        resource_channel = catalog.get("resource_link_channel") or {}
+        lines.extend([
+            "",
+            "图表与产物通信:",
+            f"- {artifact.get('name')}: {artifact.get('use_when')}",
+            f"- transport: {artifact.get('transport')}",
+            f"- command: {artifact.get('client_command')}",
+            f"- supported: {', '.join(artifact.get('supported_types') or [])}",
+            "",
+            "资源链接通信:",
+            f"- {resource_channel.get('name')}: {resource_channel.get('use_when')}",
+            f"- transport: {resource_channel.get('transport')}",
+            f"- commands: {', '.join(resource_channel.get('client_commands') or [])}",
+            f"- supported: {', '.join(resource_channel.get('supported_types') or [])}",
+            f"- boundary: {resource_channel.get('boundary')}",
+            "",
+            "本地 Chrome web_search:",
+            f"- name: {catalog.get('local_web_search', {}).get('name')}",
+            f"- {catalog.get('local_web_search', {}).get('use_when')}",
+            f"- 依赖: {catalog.get('local_web_search', {}).get('install')}",
+            f"- 输出: {catalog.get('local_web_search', {}).get('result_shape')}",
+            f"- 资源: {catalog.get('local_web_search', {}).get('resource_behavior')}",
+            f"- 边界: {catalog.get('local_web_search', {}).get('boundary')}",
+            "",
+            "工具结果契约:",
+        ])
+        for key, value in self._agent_tool_contract().items():
+            lines.append(f"- {key}: {value}")
+        lines.extend([
+            "",
+            "服务端/客户端通信契约:",
+        ])
+        for key, value in self._server_client_contract().items():
+            if isinstance(value, dict):
+                lines.append(f"- {key}:")
+                for child_key, child_value in value.items():
+                    rendered = ", ".join(child_value) if isinstance(child_value, list) else child_value
+                    lines.append(f"  - {child_key}: {rendered}")
+            elif isinstance(value, list):
+                lines.append(f"- {key}: {', '.join(value)}")
+            else:
+                lines.append(f"- {key}: {value}")
+        protocol = self._agent_orchestration_protocol()
+        lines.extend([
+            "",
+            "智能体编排协议:",
+            f"- decision_owner: {protocol.get('decision_owner')}",
+            f"- client_role: {protocol.get('client_role')}",
+            "- do_not:",
+        ])
+        for item in protocol.get("do_not") or []:
+            lines.append(f"  - {item}")
+        lines.append("- llm_must_return:")
+        for item in protocol.get("llm_must_return") or []:
+            lines.append(f"  - {item}")
+        lines.append("- client_may_override_only_when:")
+        for item in protocol.get("client_may_override_only_when") or []:
+            lines.append(f"  - {item}")
+        lines.append(f"- audit_surface: {protocol.get('audit_surface')}")
+        lines.extend([
+            "",
+            "工具结果形态:",
+        ])
+        for name, hint in (catalog.get("tool_result_hints") or {}).items():
+            fields = ", ".join(hint.get("use_fields") or [])
+            lines.append(f"- {name}: {hint.get('result_shape')}")
+            lines.append(f"  字段: {fields}")
+            lines.append(f"  图表: {hint.get('chart_fit')}")
+        lines.extend(["", "工具组合模式:"])
+        for pattern in catalog.get("composition_patterns") or []:
+            lines.append(f"- {pattern.get('name')}: {pattern.get('when')}")
+            lines.append(f"  工具: {' -> '.join(pattern.get('tools') or [])}")
+            fields = ", ".join(pattern.get("read_fields") or [])
+            lines.append(f"  读取: {fields}")
+            lines.append(f"  降级: {pattern.get('fallback')}")
+            lines.append(f"  产物: {pattern.get('artifact')}")
+        lines.extend([
+            "",
+            "Agent Playbook:",
+        ])
+        for item in catalog.get("agent_playbook") or []:
+            lines.append(f"- {item.get('task')}: {item.get('goal')}")
+            lines.append(f"  触发: {item.get('trigger')}")
+            lines.append(f"  工具链: {' -> '.join(item.get('preferred_chain') or [])}")
+            lines.append(f"  产物: {item.get('artifact_rule')}")
+            lines.append(f"  资源: {item.get('resource_rule')}")
+            lines.append(f"  降级: {item.get('fallback')}")
+        lines.extend([
+            "",
+            "典型数据配方:",
+        ])
+        for recipe in catalog.get("data_recipes") or []:
+            lines.append(f"- {recipe.get('name')}: {recipe.get('use_when')}")
+            for step in recipe.get("steps") or []:
+                lines.append(f"  - {step}")
+            examples = recipe.get("examples") or []
+            if examples:
+                lines.append("  可以这样问:")
+                for example in examples[:3]:
+                    lines.append(f"  - {example}")
+        lines.extend(["", "Agent 编排路线:"])
+        for route in catalog.get("route_plans") or []:
+            lines.append(f"- {route.get('name')}: {route.get('trigger')}")
+            for step in route.get("sequence") or []:
+                lines.append(f"  - {step}")
+            lines.append(f"  输出: {route.get('output')}")
+        lines.extend([
+            "",
+            "提示: 直接输入自然语言问题时，这份能力地图也会进入本机大模型上下文。",
+        ])
+        return "\n".join(lines)
+
+    def plan_text(self) -> str:
+        plan = self._last_agent_plan
+        if not plan:
+            return "\n".join([
+                "【最近一次分析计划】",
+                "- 暂无记录",
+                "- 下一步: 直接输入一个投资问题，或执行 /advice <问题>",
+                "- 说明: 二郎神会记录最近一次意图理解、MCP 工具、服务端映射和产物通道摘要。",
+            ])
+        tools = plan.get("mcp_tools") or []
+        lines = [
+            "【最近一次分析计划】",
+            f"- 问题: {plan.get('query')}",
+            f"- 意图: {plan.get('intent')} / {plan.get('tone')}",
+            f"- 路由来源: {self._route_source_label(plan.get('route_source'))}",
+            f"- 重写问题: {plan.get('rewritten_query')}",
+            f"- 服务端映射问题: {plan.get('mapping_query') or plan.get('rewritten_query')}",
+            f"- 上下文追问: {'是' if plan.get('is_followup') else '否'}"
+            + (f" / {plan.get('followup_target')}" if plan.get("followup_target") else ""),
+            f"- 路由摘要: {plan.get('route_summary') or '未说明'}",
+            f"- 工具理由: {plan.get('tool_rationale') or '未说明'}",
+            f"- 数据策略: {plan.get('data_strategy') or '未说明'}",
+            f"- 资源呈现: {plan.get('resource_presentation') or '命名链接 + /links 1 或 /open 1'}",
+            f"- 打开命令: {', '.join(plan.get('open_commands') or ['/links 1', '/open 1'])}",
+            f"- 数据充分度: {plan.get('data_confidence') or '未说明'}",
+            f"- 组合模式: {', '.join(plan.get('composition_patterns_used') or []) or '未说明'}",
+            f"- 图表机会: {'建议' if plan.get('chart_opportunity') else '暂不需要'}"
+            + (f" / {plan.get('chart_rationale')}" if plan.get("chart_rationale") else ""),
+            f"- 产物计划: {self._format_artifact_plan(plan.get('artifact_plan'))}",
+            f"- 服务端映射: {'需要' if plan.get('needs_server_mapping') else '不需要'}",
+            f"- MCP 数据: {'需要' if plan.get('needs_mcp') else '不需要'}",
+            f"- 工具来源: {self._tool_selection_source_label(plan.get('tool_selection_source'))}",
+            f"- 工具来源说明: {plan.get('tool_selection_note') or '未说明'}",
+            f"- 本机模型: {plan.get('provider')} / {plan.get('model')}",
+            f"- Key 边界: {plan.get('key_boundary')}",
+            "",
+            "编排审计:",
+            *self._plan_orchestration_audit_lines(plan),
+            "",
+            "计划调用工具:",
+        ]
+        if plan.get("status") == "failure":
+            lines.insert(4, f"- 状态: 失败 / {plan.get('failure_stage') or 'unknown'}")
+            if plan.get("failure_message"):
+                lines.insert(5, f"- 失败原因: {plan.get('failure_message')}")
+        if plan.get("route_warning"):
+            lines.append(f"- 路由提示: {plan.get('route_warning')}")
+        if tools:
+            for item in tools:
+                args_text = json.dumps(item.get("arguments") or {}, ensure_ascii=False)
+                lines.append(f"- {item.get('name')}: {args_text}")
+        else:
+            lines.append("- 未计划 MCP 工具")
+        tool_plan = plan.get("tool_plan") if isinstance(plan.get("tool_plan"), list) else []
+        if tool_plan:
+            lines.extend(["", "工具链路解释:"])
+            for item in tool_plan[:8]:
+                label = self._text_field(item.get("label")) or self._text_field(item.get("tool"))
+                why = self._text_field(item.get("why")) or "未说明"
+                status = self._text_field(item.get("status")) or "计划中"
+                keys = item.get("data_keys") if isinstance(item.get("data_keys"), list) else []
+                args_text = json.dumps(item.get("arguments") or {}, ensure_ascii=False)
+                lines.append(f"- {label}: {status}")
+                lines.append(f"  用途: {why}")
+                lines.append(f"  参数: {args_text}")
+                lines.append(f"  数据键: {', '.join(keys) or '尚未返回'}")
+        pattern_details = self._composition_pattern_details(plan.get("composition_patterns_used") or [])
+        if pattern_details:
+            lines.extend(["", "组合模式说明:"])
+            for item in pattern_details:
+                lines.append(f"- {item.get('name')}: {item.get('when')}")
+                tools_text = " -> ".join(item.get("tools") or [])
+                if tools_text:
+                    lines.append(f"  工具链: {tools_text}")
+                fields_text = ", ".join(item.get("read_fields") or [])
+                if fields_text:
+                    lines.append(f"  读取字段: {fields_text}")
+                fallback = self._text_field(item.get("fallback"))
+                if fallback:
+                    lines.append(f"  降级: {fallback}")
+                artifact = self._text_field(item.get("artifact"))
+                if artifact:
+                    lines.append(f"  产物: {artifact}")
+        playbook_cards = self._plan_playbook_cards(plan)
+        if playbook_cards:
+            lines.extend(["", "本轮 Playbook:"])
+            for item in playbook_cards:
+                lines.append(f"- {item.get('task')}: {item.get('goal')}")
+                lines.append(f"  触发: {item.get('trigger')}")
+                lines.append(f"  工具链: {' -> '.join(item.get('preferred_chain') or [])}")
+                lines.append(f"  产物: {item.get('artifact_rule')}")
+                lines.append(f"  资源: {item.get('resource_rule')}")
+                lines.append(f"  降级: {item.get('fallback')}")
+        missing_inputs = plan.get("missing_inputs") or []
+        if missing_inputs:
+            lines.extend(["", "路由层认为还缺:"])
+            for item in missing_inputs[:5]:
+                lines.append(f"- {item}")
+        lines.extend([
+            "",
+            f"实际 MCP 数据键: {', '.join(plan.get('mcp_data_keys') or []) or '未提供'}",
+            f"MCP 快照: {'；'.join(plan.get('mcp_snapshots') or []) or '未提取'}",
+            f"执行过程: {'；'.join(plan.get('agent_trace') or []) or '未记录'}",
+            f"服务端命中场景: {', '.join(plan.get('server_scenes') or []) or '未返回'}",
+            f"图表/产物: {', '.join(plan.get('artifact_titles') or []) or '未请求'}",
+        ])
+        resource_links = plan.get("resource_links") if isinstance(plan.get("resource_links"), list) else []
+        if resource_links:
+            lines.extend(["", "本轮可打开资源:"])
+            for index, item in enumerate(resource_links[:8], 1):
+                source = self._text_field(item.get("source")) if isinstance(item, dict) else "resource"
+                link = self._text_field(item.get("link")) if isinstance(item, dict) else self._text_field(item)
+                if link:
+                    lines.append(f"{index}. {source}: {link}")
+        lines.extend(["", "建议下一步:"])
+        for action in self._plan_next_actions(plan):
+            lines.append(f"- {action}")
+        lines.extend([
+            "",
+            "说明: /plan 只保留最近一次过程摘要，不保存大模型 API Key，不展示原始敏感数据。",
+        ])
+        return "\n".join(lines)
+
+    def _plan_orchestration_audit_lines(self, plan: dict) -> list[str]:
+        route_source = self._text_field(plan.get("route_source"))
+        tool_source = self._text_field(plan.get("tool_selection_source"))
+        fallback_sources = {"client_default_by_intent", "client_market_overview_fallback", "previous_mcp_context"}
+        if tool_source == "local_llm" or route_source == "local_llm":
+            owner = "本机大模型"
+        elif tool_source in fallback_sources:
+            owner = "客户端兜底"
+        elif route_source == "provided_payload":
+            owner = "调用方提供的 intent_plan"
+        elif route_source == "fallback":
+            owner = "保守兜底路由"
+        else:
+            owner = "未明确"
+        override = "是" if tool_source in fallback_sources or route_source == "fallback" else "否"
+        resource_count = len(plan.get("resource_links") or []) if isinstance(plan.get("resource_links"), list) else 0
+        artifact_plan = plan.get("artifact_plan") if isinstance(plan.get("artifact_plan"), dict) else {}
+        artifact_type = self._text_field(artifact_plan.get("type")) or ("chart" if plan.get("chart_opportunity") else "none")
+        return [
+            f"- 决策者: {owner}",
+            f"- 客户端兜底: {override} · {plan.get('tool_selection_note') or '未触发兜底'}",
+            f"- 可复盘字段: route_summary / tool_rationale / data_strategy / composition_patterns_used / artifact_plan",
+            f"- 安全边界: {plan.get('key_boundary') or 'API Key 仅本机使用，不发送服务端'}",
+            f"- 产物与资源: artifact_plan={artifact_type} · resource_links={resource_count} · /links 1 或 /open 1 打开",
+        ]
+
+    def _plan_playbook_cards(self, plan: dict) -> list[dict[str, object]]:
+        intent = self._text_field(plan.get("intent")).lower()
+        patterns = {
+            self._text_field(item).lower()
+            for item in (plan.get("composition_patterns_used") or [])
+        }
+        artifact_plan = plan.get("artifact_plan") if isinstance(plan.get("artifact_plan"), dict) else {}
+        artifact_type = self._text_field(artifact_plan.get("type")).lower()
+        selected: list[str] = []
+        if intent in {"market_overview", "market", "macro"} or "market_snapshot_to_narrative" in patterns:
+            selected.append("market_overview")
+        if intent in {"single_asset", "data_lookup"} or "name_to_realtime_snapshot" in patterns or "product_history_to_risk" in patterns:
+            selected.append("single_asset_or_product")
+        if intent in {"macro", "risk"}:
+            selected.append("macro_event_cross_asset")
+        if artifact_type in {"chart", "report"} or "mcp_table_to_chart_artifact" in patterns:
+            selected.append("visualization_or_report_followup")
+        if not selected and patterns:
+            selected.append("market_overview")
+        by_task = {
+            self._text_field(item.get("task")): item
+            for item in self._agent_playbook()
+            if isinstance(item, dict)
+        }
+        result = []
+        for task in selected:
+            card = by_task.get(task)
+            if card and card not in result:
+                result.append(card)
+        return result[:3]
+
+    def _composition_pattern_details(self, names: list[str]) -> list[dict]:
+        wanted = [self._text_field(name) for name in names or [] if self._text_field(name)]
+        if not wanted:
+            return []
+        catalog = self._mcp_capability_catalog("")
+        by_name = {
+            self._text_field(item.get("name")): item
+            for item in catalog.get("composition_patterns") or []
+            if isinstance(item, dict) and self._text_field(item.get("name"))
+        }
+        details = []
+        for name in wanted:
+            item = by_name.get(name)
+            if item:
+                details.append(item)
+        return details[:4]
+
+    def _plan_next_actions(self, plan: dict) -> list[str]:
+        actions = []
+        if plan.get("status") == "failure":
+            stage = self._text_field(plan.get("failure_stage"))
+            if stage == "server_mapping":
+                actions.append("/login xwab <账号> 重新登录，或 /service 检查服务端鉴权和反向代理状态。")
+            elif stage == "local_llm_synthesis":
+                actions.append("/model key 重新测试本机大模型 API Key，或 /model select 切换供应商。")
+            else:
+                actions.append("/doctor 检查账号、本机模型、super-66 MCP、web_search 和服务端连通性。")
+        artifact_plan = plan.get("artifact_plan") if isinstance(plan.get("artifact_plan"), dict) else {}
+        planned_type = self._text_field(artifact_plan.get("type")).lower()
+        if planned_type in {"chart", "report"} and not plan.get("artifact_titles"):
+            title = self._text_field(artifact_plan.get("title")) or "本轮分析"
+            if planned_type == "chart":
+                actions.append(f"继续说“把{title}做成图表”，或用 /chart <标题> :: {{...}} 生成可保存 artifact。")
+            else:
+                actions.append(f"继续说“生成{title}报告”，二郎神会保存到已授权项目文件夹。")
+        elif plan.get("chart_opportunity") and not plan.get("artifact_titles"):
+            actions.append("继续说“把这个做成图表”，或用 /chart <标题> :: {...} 生成可保存 artifact。")
+        if plan.get("artifact_titles"):
+            actions.append("/open 打开最近图表或报告，/artifacts 查看全部产物。")
+        if plan.get("resource_links"):
+            actions.append("/links 查看最近网页、图片、图表和报告名称链接；/links open 1 直接打开第一个资源。")
+        if plan.get("missing_inputs"):
+            actions.append("补充路由层认为还缺的信息后继续追问，二郎神会沿用最近上下文。")
+        mcp_keys = plan.get("mcp_data_keys") or []
+        if plan.get("needs_mcp") and not mcp_keys:
+            actions.append("/doctor 检查账号、super-66 MCP 和 web_search 状态。")
+        if not actions:
+            actions.append("直接继续追问，或输入 /clear 开启一个干净的新会话。")
+        return actions[:4]
+
+    def _format_artifact_plan(self, artifact_plan) -> str:
+        if not isinstance(artifact_plan, dict):
+            return "none"
+        plan_type = self._text_field(artifact_plan.get("type")).lower() or "none"
+        if plan_type == "none":
+            return "none"
+        title = self._text_field(artifact_plan.get("title"))
+        data_hint = self._text_field(artifact_plan.get("data_hint"))
+        parts = [plan_type]
+        if title:
+            parts.append(title)
+        if data_hint:
+            parts.append(data_hint)
+        if artifact_plan.get("save_to_workspace"):
+            parts.append("保存到授权项目文件夹")
+        return " / ".join(parts)
+
+    def _route_source_label(self, source) -> str:
+        labels = {
+            "local_llm": "本机大模型意图理解",
+            "provided_payload": "调用方显式提供 intent_plan",
+            "fallback": "保守兜底路由",
+        }
+        return labels.get(self._text_field(source), "本机大模型意图理解")
+
+    def _tool_selection_source_label(self, source) -> str:
+        labels = {
+            "local_llm": "本机大模型选择",
+            "provided_payload": "调用方显式提供",
+            "client_default_by_intent": "客户端按意图补齐",
+            "client_market_overview_fallback": "客户端行情兜底补齐",
+            "previous_mcp_context": "复用上一轮 MCP 数据",
+            "none": "未选择工具",
+        }
+        return labels.get(self._text_field(source), "未说明")
+
+    def context_text(self, args: str = "") -> str:
+        action = (args or "").strip().lower()
+        if action in {"clear", "reset", "clean", "清空", "重置"}:
+            self._clear_session_state(clear_plan=False)
+            return "\n".join([
+                "【最近对话上下文】",
+                "- 已清空",
+                "- 说明: 只清空本次 CLI 进程内的临时上下文和临时资源链接；不会影响登录、模型 Key、工作区、已保存报告或项目 resources.json 索引。",
+            ])
+        context = self._recent_conversation_context(limit=6)
+        mcp_context = self._last_mcp_context_brief()
+        artifacts = self._recent_artifact_context()
+        resources = self._recent_resource_context(limit=8)
+        workspace = workspace_status()
+        lines = [
+            "【最近对话上下文】",
+            f"- 条数: {len(context)}",
+            "- 进入本机大模型: recent_conversation、previous_mcp_context、recent_artifacts、recent_resources",
+            "- 范围: 本次 CLI 进程内的对话/MCP/产物摘要 + 已授权项目的资源索引",
+            "- 安全边界: 不展示 API Key、token、password、authorization 或服务端内部认知库全文",
+            f"- 工作区: {'已授权' if workspace.get('allowed') else '未授权'} · {workspace.get('path')}",
+        ]
+        lines.extend([
+            "",
+            "上下文来源:",
+            f"- recent_conversation: {len(context)} 条压缩对话",
+            f"- previous_mcp_context: {mcp_context.get('status')} · {', '.join(mcp_context.get('usable_sources') or []) or '暂无可用数据源'}",
+            f"- recent_artifacts: {len(artifacts)} 个图表/报告摘要",
+            f"- recent_resources: {len(resources)} 个网页/图片/图表/报告链接",
+        ])
+        if mcp_context.get("snapshots"):
+            lines.extend(["", "最近 MCP 快照:"])
+            for item in (mcp_context.get("snapshots") or [])[:6]:
+                lines.append(f"- {item}")
+        if artifacts:
+            lines.extend(["", "最近产物摘要:"])
+            for item in artifacts[:6]:
+                title = self._text_field(item.get("title")) or "未命名产物"
+                status = self._text_field(item.get("status")) or "unknown"
+                data_keys = ", ".join(item.get("data_keys") or []) or "无数据键"
+                open_path = self._text_field(item.get("html") or item.get("json"))
+                lines.append(f"- {title}: {status} · {data_keys}" + (f" · {open_path}" if open_path else ""))
+        if resources:
+            lines.extend(["", "最近可打开资源:"])
+            for index, item in enumerate(resources[:8], 1):
+                source = self._text_field(item.get("source")) or "resource"
+                link = self._text_field(item.get("link"))
+                query = self._text_field(item.get("query"))
+                lines.append(f"{index}. {source} · {query}: {link}")
+        if not context:
+            lines.extend([
+                "",
+                "暂无上下文。直接输入投资问题后，二郎神会保存最近几轮压缩摘要。",
+                "如果回答产生网页、图片、图表或报告，资源会进入 /links；授权工作区后也会进入项目 resources.json 索引。",
+            ])
+            return "\n".join(lines)
+        lines.append("")
+        for index, item in enumerate(context, 1):
+            lines.append(f"{index}. 你: {item.get('user') or ''}")
+            lines.append(f"   二郎神: {item.get('assistant') or ''}")
+        lines.extend([
+            "",
+            "继续使用:",
+            "- 直接追问“那如果换成港股呢？”这类问题，本机大模型会参考以上上下文。",
+            "- 说“把刚才的结论做成图表/报告”，可复用最近上下文生成产物。",
+            "- 说“打开刚才那个网页/图片/图表”，二郎神会参考 recent_resources，并提示 /links 或 /open。",
+            "",
+            "命令:",
+            "  /context clear",
+            "  /plan",
+            "  /links",
+            "  /clear",
+        ])
+        return "\n".join(lines)
+
+    def clear_session_text(self) -> str:
+        self._clear_session_state(clear_plan=True)
+        return "\n".join([
+            "【新会话已开始】",
+            "- 已清空: 最近对话上下文、本次进程内资源链接、最近一次 /plan、临时执行过程",
+            "- 保留: 登录状态、模型 Key、工作区授权、已保存图表和报告、项目 resources.json 索引",
+            "- 下一步: 直接输入新的投资问题，或输入 /setup 查看准备状态。",
+        ])
+
+    def _clear_session_state(self, *, clear_plan: bool = True) -> None:
+        self._conversation_history.clear()
+        self._agent_trace = None
+        self._last_mcp_data = None
+        self._last_artifact_results = []
+        self._last_resource_links = []
+        if clear_plan:
+            self._last_agent_plan = None
+
+    def _remember_agent_plan(
+        self,
+        *,
+        query: str,
+        intent_plan: dict,
+        mapping_query: str,
+        mcp_data,
+        matches: list[dict],
+        synthesis: dict | None,
+        provider: str,
+        model: str,
+    ) -> None:
+        artifact_results = synthesis.get("artifact_results") if isinstance(synthesis, dict) else []
+        self._last_agent_plan = {
+            "query": query,
+            "intent": self._text_field(intent_plan.get("intent")) or "general_investment",
+            "tone": self._text_field(intent_plan.get("tone")) or "natural_analyst",
+            "route_source": self._normalize_route_source(intent_plan.get("route_source")),
+            "route_warning": self._text_field(intent_plan.get("route_warning") or intent_plan.get("intent_error")),
+            "rewritten_query": self._text_field(intent_plan.get("rewritten_query")) or query,
+            "mapping_query": self._text_field(mapping_query) or self._text_field(intent_plan.get("rewritten_query")) or query,
+            "is_followup": bool(intent_plan.get("is_followup")),
+            "followup_target": self._text_field(intent_plan.get("followup_target")),
+            "route_summary": self._text_field(intent_plan.get("route_summary")),
+            "tool_rationale": self._text_field(intent_plan.get("tool_rationale")),
+            "data_strategy": self._text_field(intent_plan.get("data_strategy")),
+            "data_confidence": self._text_field(intent_plan.get("data_confidence")),
+            "tool_selection_source": self._text_field(intent_plan.get("tool_selection_source")),
+            "tool_selection_note": self._text_field(intent_plan.get("tool_selection_note")),
+            "chart_opportunity": bool(intent_plan.get("chart_opportunity")),
+            "chart_rationale": self._text_field(intent_plan.get("chart_rationale")),
+            "artifact_plan": intent_plan.get("artifact_plan") if isinstance(intent_plan.get("artifact_plan"), dict) else {},
+            "resource_links": self._coerce_resource_links(intent_plan.get("resource_links")),
+            "resource_presentation": self._text_field(intent_plan.get("resource_presentation")),
+            "open_commands": self._coerce_text_items(intent_plan.get("open_commands")) or ["/links 1", "/open 1"],
+            "missing_inputs": self._coerce_text_items(intent_plan.get("missing_inputs")),
+            "needs_server_mapping": bool(intent_plan.get("needs_server_mapping", True)),
+            "needs_mcp": bool(intent_plan.get("needs_mcp")),
+            "mcp_tools": self._dedupe_mcp_tools(intent_plan.get("mcp_tools") or []),
+            "tool_plan": self._tool_plan_explanations(intent_plan, mcp_data),
+            "mcp_data_keys": sorted((mcp_data or {}).keys()) if isinstance(mcp_data, dict) else [],
+            "mcp_snapshots": self._mcp_snapshot_lines(mcp_data),
+            "agent_trace": self._agent_trace_lines(),
+            "server_scenes": [
+                self._text_field(match.get("scene"))
+                for match in (matches or [])[:3]
+                if isinstance(match, dict) and self._text_field(match.get("scene"))
+            ],
+            "artifact_titles": [
+                self._text_field(item.get("title"))
+                for item in (artifact_results or [])
+                if isinstance(item, dict) and self._text_field(item.get("title"))
+            ],
+            "provider": provider,
+            "model": model,
+            "key_boundary": "API Key 仅本机直连供应商，未发送给二郎神服务端",
+        }
+
+    def _remember_agent_failure_plan(
+        self,
+        *,
+        query: str,
+        intent_plan: dict | None,
+        mapping_query: str,
+        mcp_data,
+        matches: list[dict] | None,
+        provider: str,
+        model: str,
+        failure_stage: str,
+        failure_message: str,
+    ) -> None:
+        safe_intent_plan = intent_plan if isinstance(intent_plan, dict) else {}
+        self._remember_agent_plan(
+            query=query,
+            intent_plan=safe_intent_plan,
+            mapping_query=mapping_query,
+            mcp_data=mcp_data,
+            matches=matches or [],
+            synthesis={},
+            provider=provider,
+            model=model,
+        )
+        if isinstance(self._last_agent_plan, dict):
+            self._last_agent_plan.update({
+                "status": "failure",
+                "failure_stage": self._text_field(failure_stage),
+                "failure_message": self._text_field(failure_message),
+                "route_warning": self._text_field(failure_message) or self._last_agent_plan.get("route_warning"),
+            })
+
+    def _tool_plan_explanations(self, intent_plan: dict, mcp_data) -> list[dict]:
+        tools = self._dedupe_mcp_tools(intent_plan.get("mcp_tools") or []) if isinstance(intent_plan, dict) else []
+        if not tools:
+            return []
+        catalog = {
+            self._text_field(tool.get("name")): tool
+            for tool in self._mcp_capability_catalog("").get("mcp_tools") or []
+            if isinstance(tool, dict)
+        }
+        data_keys = sorted(str(key) for key in (mcp_data or {}).keys()) if isinstance(mcp_data, dict) else []
+        explanations = []
+        for item in tools:
+            name = self._text_field(item.get("name"))
+            arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+            matching_keys = [key for key in data_keys if key.startswith(f"{name}:")]
+            error_keys = [key for key in matching_keys if "error" in key.lower()]
+            ok_keys = [key for key in matching_keys if key not in error_keys]
+            if ok_keys:
+                status = "已返回"
+            elif error_keys:
+                status = "失败"
+            else:
+                status = "计划中"
+            catalog_item = catalog.get(name) or {}
+            explanations.append({
+                "tool": name,
+                "label": self._mcp_tool_label(name, arguments),
+                "why": self._text_field(catalog_item.get("use_when")) or "由本机大模型根据上下文选择",
+                "arguments": arguments,
+                "status": status,
+                "data_keys": matching_keys[:4],
+            })
+        return explanations
+
+    def setup_text(self) -> str:
+        session = load_auth_session()
+        config = get_config()
+        workspace = workspace_status()
+        provider, model, llm_ready, key_hint = self._llm_status(config)
+        user = session.get("user") or {}
+        username = user.get("username") or user.get("email") or user.get("id")
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(workspace.get("allowed"))
+        rows = [
+            ("workspace", f"{'已授权' if workspace_ready else '未授权'} {workspace.get('path')}"),
+            ("account", username or ("已保存 token" if token_ready else "未登录")),
+            ("model", f"{provider} / {model} ({'key ready' if llm_ready else 'missing key'})"),
+            ("mcp", "super-66 MCP 使用 XWAB/XCZT 登录态，不需要单独账号"),
+            ("artifacts", self._setup_artifact_status(workspace)),
+            ("agent route", "NL -> local intent -> MCP/search -> server map -> local answer"),
+        ]
+        actions = []
+        if not workspace_ready:
+            actions.append("/workspace browse 打开路径选择器，或 /workspace path <路径> 手动指定，然后 /workspace allow 授权写入图表和报告")
+        if not token_ready:
+            actions.append("/login xwab <账号> 登录后才能访问服务端场景映射和 super-66 MCP")
+        if not llm_ready:
+            actions.append(f"/model select 选择供应商和型号，然后 /model key 测试并保存 {key_hint}")
+        if workspace_ready and token_ready and llm_ready:
+            actions.append("直接输入投资问题；二郎神会先取 MCP 数据，再做服务端场景映射和本机大模型分析")
+            actions.append("/artifacts 查看已经保存的报告和图表")
+        if workspace_ready:
+            actions.append("/setup workspace 重新选择当前项目文件夹，适合切换到新的分析项目")
+        ready_count = sum([workspace_ready, token_ready, llm_ready])
+        primary_action = actions[0] if actions else "直接输入投资问题开始分析"
+
+        lines = [
+            "【二郎神初始化向导】",
+            f"初始化完成度: {ready_count}/3",
+            f"首要下一步: {primary_action}",
+            "",
+            _panel("Readiness", rows),
+            "",
+            self._workspace_choice_deck(workspace),
+            "",
+            self._setup_agent_sandbox_panel(workspace, token_ready, provider, model, llm_ready, key_hint),
+            "",
+            self._model_setup_deck(provider, model, llm_ready, key_hint),
+            "",
+            "推荐顺序:",
+        ]
+        for idx, action in enumerate(actions, 1):
+            lines.append(f"{idx}. {action}")
+        lines.extend([
+            "",
+            "运行边界:",
+            "- 大模型 API Key 只保存在本机，用于客户端直连供应商；不会发送给二郎神服务端。",
+            "- 服务端负责受保护场景映射和图表 artifact 通道；不向客户端暴露内部认知库全文。",
+            "- 行情和产品数据优先从 super-66 MCP 获取；新闻和网页信息可用本地 Chrome web_search 补充。",
+            "- 输入 /tools 可查看本机大模型可选择的数据工具、搜索能力和图表通信方式。",
+            "- 输入 /workspace browse 可方向键选择项目文件夹；输入 /workspace path <路径> 可手动粘贴路径。",
+            "- 授权后产物和资源链接索引会写入 .erlangshen/artifacts。",
+        ])
+        return "\n".join(lines)
+
+    async def setup_workspace_interactive(self) -> str:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return "\n".join([
+                "【项目文件夹初始化】",
+                "当前不是交互终端，不能安全打开方向键路径选择器。",
+                "",
+                "请在本机终端运行:",
+                "  erlangshen /setup workspace",
+                "",
+                "或手动执行:",
+                "  erlangshen /workspace path <项目路径>",
+                "  erlangshen /workspace allow",
+            ])
+        line, status = self._select_and_authorize_workspace(resolve_workspace_path(), force=True)
+        return "\n".join([
+            "【项目文件夹初始化】",
+            line,
+            "",
+            self._workspace_status_panel(status),
+            "",
+            "下一步: /setup run 检查账号和本机大模型，或直接输入投资问题。",
+        ])
+
+    async def setup_run_interactive(self, *, force_workspace: bool = False) -> str:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return "\n".join([
+                self.setup_text(),
+                "",
+                "【执行式初始化】",
+                "当前不是交互终端，不能安全打开路径选择和授权确认。",
+                "",
+                "请在本机终端运行:",
+                "  erlangshen /setup run",
+                "  erlangshen /setup workspace",
+                "",
+                "或手动执行:",
+                "  erlangshen /workspace path <项目路径>",
+                "  erlangshen /workspace use <项目路径>",
+                "  erlangshen /workspace allow",
+                "  erlangshen /login xwab <账号>",
+                "  erlangshen /model select",
+                "  erlangshen /model key",
+            ])
+
+        lines = ["【二郎神初始化执行】"]
+        workspace = resolve_workspace_path()
+        status = workspace_status(workspace)
+        if status.get("allowed") and not force_workspace:
+            lines.append(f"- 工作区: 已授权 {status.get('path')}")
+        else:
+            workspace_line, status = self._select_and_authorize_workspace(workspace, force=force_workspace)
+            lines.append(workspace_line)
+
+        session = load_auth_session()
+        config = get_config()
+        provider, model, llm_ready, key_hint = self._llm_status(config)
+        user = session.get("user") or {}
+        username = user.get("username") or user.get("email") or user.get("id")
+        if session.get("token"):
+            lines.append(f"- 账号: 已登录 {username or '已保存 token'}")
+        else:
+            lines.append("- 账号: 未登录，下一步执行 /login xwab <账号>")
+        if llm_ready:
+            lines.append(f"- 大模型: 已配置 {provider} / {model}")
+        else:
+            lines.append(f"- 大模型: 缺少 {key_hint}，下一步执行 /model select 和 /model key")
+        final_workspace = workspace_status(status.get("path") or workspace)
+        token_ready = bool(session.get("token"))
+        workspace_ready = bool(final_workspace.get("allowed"))
+        ready_count = sum([workspace_ready, token_ready, llm_ready])
+        primary_action = self._setup_primary_action(workspace_ready, token_ready, llm_ready, key_hint)
+        lines.extend([
+            f"- 初始化完成度: {ready_count}/3",
+            f"- 首要下一步: {primary_action}",
+            "- MCP: super-66 MCP 会复用 XWAB/XCZT 登录态",
+            "- 产物: 授权工作区后，图表和报告会保存到 .erlangshen/artifacts",
+            "",
+            self._workspace_choice_deck(final_workspace),
+            "",
+            self._setup_agent_sandbox_panel(final_workspace, token_ready, provider, model, llm_ready, key_hint),
+            "",
+            "完成后可以直接输入投资问题，或输入 /service 检查服务端状态。",
+        ])
+        return "\n".join(lines)
+
+    def _workspace_choice_deck(self, workspace: dict) -> str:
+        path = str(workspace.get("path") or resolve_workspace_path())
+        allowed = bool(workspace.get("allowed"))
+        resource_count = self._workspace_resource_count(path)
+        recent = recent_workspaces(limit=3)
+        if recent:
+            recent_text = "；".join(
+                f"{Path(str(item.get('path'))).name or item.get('path')} ({'已授权' if item.get('allowed') else '未授权'})"
+                for item in recent
+            )
+        else:
+            recent_text = "暂无；首次使用建议选择当前项目根目录"
+        rows = [
+            ("current", f"{path} · {'已授权' if allowed else '未授权'}"),
+            ("choose", "/workspace browse 方向键浏览目录，Enter 选择，p 粘贴路径，q 跳过"),
+            ("manual", "/workspace path <路径> 粘贴任意项目文件夹，然后 /workspace allow 授权"),
+            ("recent", recent_text),
+            ("writes", ".erlangshen/artifacts 下保存图表、报告、工作记忆和 resources.json"),
+            ("links", f"当前项目资源索引 {resource_count} 条；网页/图片/HTML/PDF 统一进入 /links"),
+            ("privacy", "不会把大模型 API Key、账号 token 或服务端内部认知库写进项目目录"),
+            ("skip", "输入 n/skip 可跳过；未授权时只进行对话和远程接口调用"),
+        ]
+        title = "Project Folder Picker" if not allowed else "Project Folder Ready"
+        return _panel(title, rows)
+
+    def _setup_agent_sandbox_panel(
+        self,
+        workspace: dict,
+        token_ready: bool,
+        provider: str,
+        model: str,
+        llm_ready: bool,
+        key_hint: str,
+    ) -> str:
+        workspace_ready = bool(workspace.get("allowed"))
+        primary_action = self._setup_primary_action(workspace_ready, token_ready, llm_ready, key_hint)
+        rows = [
+            ("workspace", "OK" if workspace_ready else "NEED"),
+            ("account", "OK" if token_ready else "NEED"),
+            ("model", f"{provider} / {model}" if llm_ready else f"NEED {key_hint}"),
+            ("sandbox", "写入仅限授权项目 .erlangshen/artifacts" if workspace_ready else "未授权前不写入本地项目"),
+            ("data", "super-66 MCP 优先，web_search 补当天公开事件线索"),
+            ("flow", "intent -> MCP/search -> map -> answer"),
+            ("next", primary_action),
+        ]
+        title = "Agent Sandbox Ready" if workspace_ready and token_ready and llm_ready else "Agent Setup Checklist"
+        return _panel(title, rows)
+
+    def _setup_primary_action(self, workspace_ready: bool, token_ready: bool, llm_ready: bool, key_hint: str = "") -> str:
+        if not workspace_ready:
+            return "/workspace browse 选择项目文件夹，或 /workspace path <路径> 手动指定，然后 /workspace allow 授权"
+        if not token_ready:
+            return "/login xwab <账号> 登录服务端和 super-66 MCP"
+        if not llm_ready:
+            suffix = f" ({key_hint})" if key_hint else ""
+            return f"/model select 然后 /model key 测试并保存本机 API Key{suffix}"
+        return "直接输入投资问题开始分析"
+
+    def _setup_artifact_status(self, workspace: dict) -> str:
+        if not workspace.get("allowed"):
+            return "未启用；授权工作区后可保存 .erlangshen/artifacts"
+        root = Path(str(workspace.get("path"))) / ".erlangshen" / "artifacts"
+        charts = self._artifact_files(root / "charts", {".json", ".html"})
+        reports = self._artifact_files(root / "reports", {".md"})
+        return f"已启用；reports {len(reports)} / charts {len(charts)}"
+
+    def _model_setup_deck(self, provider: str, model: str, ready: bool, key_hint: str) -> str:
+        preset = get_provider_preset(provider)
+        status = "ready" if ready else f"missing {key_hint}"
+        action = "直接提问" if ready else "/model select -> /model key"
+        rows = [
+            ("provider", f"{preset.id} ({preset.display_name})"),
+            ("model", model),
+            ("key", status),
+            ("test", "/model key 会先本机直连供应商测试，成功后才保存"),
+            ("boundary", "Key 只在本机；服务端只接收问题做受保护场景映射"),
+            ("commands", action),
+            ("env", f"LLM_PROVIDER={preset.id} · {key_hint}=... · {preset.model_env}={model}"),
+        ]
+        return _panel("Model Setup", rows)
+
+    def _artifact_files(self, directory: Path, suffixes: set[str]) -> list[Path]:
+        if not directory.exists():
+            return []
+        return sorted(
+            [path for path in directory.iterdir() if path.suffix.lower() in suffixes],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+
+    def _relative_workspace_path(self, path: Path, workspace: str) -> str:
+        try:
+            return str(path.relative_to(Path(workspace)))
+        except ValueError:
+            return str(path)
+
+    def _file_uri(self, path: str | Path) -> str:
+        try:
+            return Path(str(path)).expanduser().resolve().as_uri()
+        except (OSError, ValueError):
+            return str(path)
+
+    def _resource_link(self, label: str, target: str | Path) -> str:
+        clean_label = self._text_field(label) or "打开资源"
+        target_text = self._text_field(target)
+        if not target_text:
+            return clean_label
+        if re.match(r"^https?://", target_text, flags=re.I):
+            uri = target_text
+        elif re.match(r"^file://", target_text, flags=re.I):
+            uri = target_text
+        else:
+            uri = self._file_uri(target_text)
+        if sys.stdout.isatty() and not os.getenv("ERLANGSHEN_NO_OSC8"):
+            return f"\033]8;;{uri}\033\\{clean_label}\033]8;;\033\\ ({uri})"
+        return f"{clean_label}: {uri}"
+
+    def _workspace_file_link(self, path: str | Path, workspace: str, label: str | None = None) -> str:
+        path_obj = Path(str(path)).expanduser()
+        display = label or self._relative_workspace_path(path_obj, workspace)
+        return self._resource_link(display, path_obj)
+
+    async def chart_text(self, args: str = "") -> str:
+        raw = (args or "").strip()
+        if not raw:
+            return "\n".join([
+                "请提供图表标题和 JSON 数据。",
+                "示例: /chart 资产表现 :: {\"A股\":1.2,\"黄金\":0.8,\"美元\":-0.3}",
+            ])
+        title, data = self._parse_chart_args(raw)
+        if not data:
+            return "图表数据需要是 JSON 对象。示例: /chart 资产表现 :: {\"A股\":1.2,\"黄金\":0.8}"
+        try:
+            from src.client.server_client import ErlangshenServerClient
+
+            response = await ErlangshenServerClient().chart_artifact(
+                chart_type="bar",
+                title=title,
+                data=data,
+                metadata={"workspace": workspace_status().get("path"), "source": "cli"},
+            )
+            artifact = self._chart_artifact_from_response(response)
+            if not isinstance(artifact, dict):
+                resource_links = [
+                    {"source": "server artifact", "link": link}
+                    for link in self._resource_links_from_value(response, title)
+                ]
+                self._remember_resource_links(f"/chart {title}", resource_links)
+                lines = [f"图表 artifact 已返回: {artifact}"]
+                if resource_links:
+                    lines.extend([
+                        "",
+                        "可打开资源:",
+                        *[f"- {item['link']}" for item in resource_links[:6]],
+                        "- 输入 /links 1 或 /open 1 打开最近资源。",
+                    ])
+                return "\n".join(lines)
+            metadata = artifact.get("metadata") or {}
+            saved_path = self._save_chart_artifact(artifact, title)
+            resource_links = [
+                {"source": "server artifact", "link": link}
+                for link in self._resource_links_from_value(response, title)
+            ]
+            lines = [
+                "【图表 Artifact】",
+                f"- 标题: {artifact.get('title') or title}",
+                f"- 类型: {artifact.get('type') or 'bar'}",
+                f"- 数据键: {', '.join(str(key) for key in (artifact.get('data') or data).keys())}",
+                f"- 来源: {metadata.get('source') or 'erlangshen-server'}",
+            ]
+            if saved_path:
+                workspace = str(workspace_status().get("path") or "")
+                json_link = self._workspace_file_link(saved_path["json"], workspace)
+                html_link = self._workspace_file_link(saved_path["html"], workspace, label=(artifact.get("title") or title) + " HTML")
+                lines.append(f"- 已保存: {json_link}")
+                lines.append(f"- 可视化: {html_link}")
+                resource_links.extend([
+                    {"source": "local artifact", "link": html_link},
+                    {"source": "local artifact", "link": json_link},
+                ])
+            else:
+                lines.append("- 保存: 工作区未授权，仅展示结构化 artifact 摘要。")
+                lines.append("- 下一步: /workspace browse 选择项目文件夹，或 /workspace path <路径> 手动指定，然后 /workspace allow 授权保存。")
+            if resource_links:
+                self._remember_resource_links(f"/chart {title}", resource_links)
+                lines.append("- 资源入口: 已加入 /links，可用 /links 1 或 /open 1 打开最近图表/网页/图片。")
+            lines.append("- 说明: 客户端可根据该结构化 artifact 渲染图表或写入报告。")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"图表 artifact 生成失败: {self._sanitize_api_key_error(exc, '')}"
+
+    def _chart_artifact_from_response(self, response):
+        if not isinstance(response, dict):
+            return response
+        artifact = response.get("artifact")
+        if isinstance(artifact, dict):
+            return artifact
+        for key in ("chart", "visualization", "result"):
+            nested = response.get(key)
+            if isinstance(nested, dict):
+                return nested
+        if any(key in response for key in ("type", "chart_type", "title", "data", "url", "html_url", "image_url", "resource_links")):
+            return response
+        return artifact if artifact is not None else response
+
+    def _parse_chart_args(self, raw: str) -> tuple[str, dict]:
+        title = "二郎神图表"
+        payload = raw
+        if "::" in raw:
+            title_part, payload = raw.split("::", 1)
+            title = title_part.strip() or title
+        try:
+            data = json.loads(payload.strip())
+        except json.JSONDecodeError:
+            return title, {}
+        return title, data if isinstance(data, dict) else {}
+
+    def _save_chart_artifact(self, artifact: dict, title: str) -> dict[str, str] | None:
+        status = workspace_status()
+        if not status.get("allowed"):
+            return None
+        workspace = status.get("path")
+        slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "-", title).strip("-") or "chart"
+        slug = slug[:48]
+        filename = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{slug}.json"
+        target = ensure_inside_workspace(
+            os.path.join(str(workspace), ".erlangshen", "artifacts", "charts", filename),
+            workspace,
+        )
+        html_target = ensure_inside_workspace(target.with_suffix(".html"), workspace)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(artifact, f, ensure_ascii=False, indent=2)
+        with open(html_target, "w", encoding="utf-8") as f:
+            f.write(self._chart_artifact_html(artifact, title))
+        return {"json": str(target), "html": str(html_target)}
+
+    def _save_advice_report(self, *, query: str, content: str, artifact_results, data_inputs: dict) -> str | None:
+        status = workspace_status()
+        if not status.get("allowed"):
+            return None
+        workspace = status.get("path")
+        slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "-", query).strip("-") or "analysis"
+        slug = slug[:48]
+        filename = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{slug}.md"
+        target = ensure_inside_workspace(
+            os.path.join(str(workspace), ".erlangshen", "artifacts", "reports", filename),
+            workspace,
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        artifact_lines = []
+        for item in artifact_results or []:
+            if not isinstance(item, dict):
+                continue
+            saved = item.get("saved") if isinstance(item.get("saved"), dict) else {}
+            if saved:
+                target_path = saved.get("html") or saved.get("json")
+                title = self._text_field(item.get("title")) or "图表"
+                if target_path:
+                    artifact_lines.append(f"- [{title}]({self._file_uri(target_path)})")
+        snapshot_lines = self._report_list_lines(data_inputs.get("mcp_snapshot"))
+        trace_lines = self._report_list_lines(data_inputs.get("agent_trace"))
+        resource_lines = self._report_list_lines([
+            *(data_inputs.get("mcp_links") if isinstance(data_inputs.get("mcp_links"), list) else []),
+            *(data_inputs.get("intent_resource_links") if isinstance(data_inputs.get("intent_resource_links"), list) else []),
+        ])
+        report = [
+            f"# 二郎神分析报告: {query}",
+            "",
+            f"- 生成时间: {datetime.now().isoformat(timespec='seconds')}",
+            f"- MCP 数据键: {', '.join(data_inputs.get('mcp_data') or []) or '未提供'}",
+            f"- 用户数据键: {', '.join(data_inputs.get('user_data') or []) or '未提供'}",
+            "",
+            "## 回答",
+            "",
+            content,
+        ]
+        context_lines = []
+        if snapshot_lines:
+            context_lines.extend(["### MCP 快照", "", *snapshot_lines])
+        if resource_lines:
+            if context_lines:
+                context_lines.append("")
+            context_lines.extend(["### 可打开资源", "", *resource_lines])
+        if trace_lines:
+            if context_lines:
+                context_lines.append("")
+            context_lines.extend(["### 执行过程", "", *trace_lines])
+        if context_lines:
+            report.extend(["", "## 数据与执行上下文", "", *context_lines])
+        if artifact_lines:
+            report.extend(["", "## 图表与产物", "", *artifact_lines])
+        report.extend([
+            "",
+            "## 下一步",
+            "",
+            "- 在 CLI 中输入 `/links` 查看最近网页、图片、图表和报告链接。",
+            "- 输入 `/open link 1` 或 `/links open 1` 打开最近资源。",
+            "- 输入 `/artifacts` 查看当前项目已保存的图表和报告。",
+        ])
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("\n".join(report).rstrip() + "\n")
+        return str(target)
+
+    def _report_list_lines(self, values) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        lines = []
+        for item in values[:12]:
+            text = self._text_field(item)
+            if text:
+                lines.append(f"- {text}")
+        return lines
+
+    def _chart_artifact_html(self, artifact: dict, title: str) -> str:
+        chart_title = escape(str(artifact.get("title") or title))
+        chart_type = escape(str(artifact.get("type") or "bar"))
+        data = artifact.get("data") if isinstance(artifact.get("data"), dict) else {}
+        numeric_items = []
+        for key, value in data.items():
+            try:
+                numeric_items.append((str(key), float(value)))
+            except (TypeError, ValueError):
+                continue
+        max_abs = max((abs(value) for _, value in numeric_items), default=1.0) or 1.0
+        bars = []
+        for label, value in numeric_items:
+            width = max(4, min(100, int(abs(value) / max_abs * 100)))
+            tone = "#0f766e" if value >= 0 else "#b91c1c"
+            bars.append(
+                f'<div class="row"><div class="label">{escape(label)}</div>'
+                f'<div class="track"><div class="bar" style="width:{width}%;background:{tone}"></div></div>'
+                f'<div class="value">{value:g}</div></div>'
+            )
+        if not bars:
+            bars.append('<div class="empty">No numeric data available in this artifact.</div>')
+        raw_json = escape(json.dumps(artifact, ensure_ascii=False, indent=2))
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{chart_title}</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111827; background: #f8fafc; }}
+    main {{ max-width: 960px; margin: 40px auto; padding: 0 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 28px; }}
+    .meta {{ color: #475569; margin-bottom: 28px; }}
+    .panel {{ background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px; box-shadow: 0 8px 30px rgba(15,23,42,.06); }}
+    .row {{ display: grid; grid-template-columns: 160px 1fr 90px; gap: 16px; align-items: center; margin: 14px 0; }}
+    .label {{ color: #334155; overflow-wrap: anywhere; }}
+    .track {{ height: 18px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }}
+    .bar {{ height: 100%; border-radius: 999px; }}
+    .value {{ text-align: right; font-variant-numeric: tabular-nums; }}
+    pre {{ white-space: pre-wrap; overflow-wrap: anywhere; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 18px; margin-top: 24px; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{chart_title}</h1>
+    <div class="meta">二郎神 chart artifact · {chart_type}</div>
+    <section class="panel">
+      {''.join(bars)}
+    </section>
+    <pre>{raw_json}</pre>
+  </main>
+</body>
+</html>
+"""
 
     def model_help_text(self) -> str:
         config = get_config()
         provider, model, ready, key_hint = self._llm_status(config)
         preset = get_provider_preset(provider)
         status = "已配置" if ready else "未配置"
+        primary_action = (
+            "直接输入投资问题，客户端会用本机 Key 调用大模型"
+            if ready
+            else f"/model select 选择供应商和型号，然后 /model key 测试并保存 {key_hint}"
+        )
         lines = [
             "【大模型配置】",
+            f"- 配置状态: {'ready' if ready else 'missing key'}",
+            f"- 首要下一步: {primary_action}",
             f"- 当前 provider: {provider}",
             f"- 当前 model: {model}",
             f"- API key: {status}",
             "- Key 位置: 只保存在本机配置/环境变量；不会发送给二郎神服务端",
             "- 调用方式: 服务端只返回受保护场景映射；最终投资建议由客户端直连大模型生成",
+            "",
+            self._model_agent_flow_panel(provider, model, ready, key_hint),
+            "",
+            self._model_setup_deck(provider, model, ready, key_hint),
             "",
             "OpenAI 提示: GPT-5.5/GPT-5.3 当前主要是 ChatGPT/Codex 侧选择；API 预设仍使用官方 API 模型列表中的 gpt-5.2。",
             "",
@@ -558,6 +3347,17 @@ class CLI:
         else:
             lines.append("- 下一步: 直接输入投资问题，客户端会用本机 Key 调用大模型")
         return "\n".join(lines)
+
+    def _model_agent_flow_panel(self, provider: str, model: str, ready: bool, key_hint: str) -> str:
+        rows = [
+            ("role", "本机大模型负责意图理解、MCP 工具组合、自然投资分析"),
+            ("facts", "super-66 MCP/web_search 提供行情、产品、新闻和网页线索"),
+            ("core", "服务端只做受保护场景映射和 chart artifact，不接收模型 Key"),
+            ("key", "ready" if ready else f"missing {key_hint}"),
+            ("model", f"{provider} / {model}"),
+            ("flow", "/model select -> /model key -> 直接输入投资问题"),
+        ]
+        return _panel("Model Agent Flow", rows)
 
     async def model_select_interactive(self) -> str:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -761,7 +3561,10 @@ class CLI:
             return parsed
         query, payload = parsed
         if self._is_small_talk_query(query):
-            return self._small_talk_response(query)
+            response = self._small_talk_response(query)
+            self._remember_conversation_turn(query, response)
+            return response
+        self._agent_trace = []
         config = get_config()
         provider, model, ready, key_hint = self._llm_status(config)
         if not ready:
@@ -778,34 +3581,92 @@ class CLI:
                 "服务端只接收你的问题用于受保护场景映射，不接收、不存储、不转发你的大模型 API Key。",
             ])
 
+        intent_plan = {}
+        mcp_data = {}
+        mapping_query = query
+        matches: list[dict] = []
+        active_provider = provider
+        active_model = model
         try:
             from src.auth.session import load_auth_session
             from src.client.server_client import ErlangshenAPIError, ErlangshenServerClient
             from src.llm import LLMClient, resolve_llm_settings
 
             settings = resolve_llm_settings(config=get_config())
+            active_provider = settings.display_name or settings.provider
+            active_model = settings.model
             intent_plan = await self._infer_client_intent(query, payload, settings, LLMClient)
             mcp_data = await self._collect_client_mcp_data(query, payload, intent_plan)
-            self._show_progress("正在向服务端确认问题场景")
+            mapping_query = self._server_mapping_query(query, intent_plan)
+            self._show_progress("正在向服务端确认改写后的问题场景" if mapping_query != query else "正在向服务端确认问题场景")
             session = load_auth_session()
             client = ErlangshenServerClient(
                 base_url=session.get("base_url") or config.erlangshen_api_base_url,
                 token=session.get("token"),
             )
-            mapping = await client.cognition_map(query)
+            mapping = await client.cognition_map(mapping_query)
         except ErlangshenAPIError as exc:
-            return "\n".join([
-                f"服务端场景映射失败 ({exc.status_code}): {exc}",
-                "",
-                "注意: 大模型 API Key 没有发送给服务端；这里只是账号/认知映射请求失败。",
-                "可先执行 /login xwab <账号> 或 /service 检查服务端状态。",
-            ])
+            message = f"服务端场景映射失败 ({exc.status_code}): {exc}"
+            self._remember_agent_failure_plan(
+                query=query,
+                intent_plan=intent_plan,
+                mapping_query=mapping_query,
+                mcp_data=mcp_data,
+                matches=[],
+                provider=active_provider,
+                model=active_model,
+                failure_stage="server_mapping",
+                failure_message=message,
+            )
+            return self._format_agent_failure(
+                message,
+                [
+                    "注意: 大模型 API Key 没有发送给服务端；这里只是账号/认知映射请求失败。",
+                    "可先执行 /login xwab <账号> 或 /service 检查服务端状态。",
+                ],
+            )
         except Exception as exc:
-            return f"本机建议生成准备失败: {exc}"
+            message = f"本机建议生成准备失败: {exc}"
+            self._remember_agent_failure_plan(
+                query=query,
+                intent_plan=intent_plan,
+                mapping_query=mapping_query,
+                mcp_data=mcp_data,
+                matches=[],
+                provider=active_provider,
+                model=active_model,
+                failure_stage="client_prepare",
+                failure_message=message,
+            )
+            return self._format_agent_failure(
+                message,
+                [
+                    "可执行 /doctor 检查本机模型、账号、super-66 MCP 和服务端连通性。",
+                    "也可以执行 /plan 查看上一轮已完成的意图和数据链路。",
+                ],
+            )
 
         matches = mapping.get("matches") or []
         if not matches:
-            return "服务端未返回可用场景映射，暂不生成投资建议。"
+            message = "服务端未返回可用场景映射，暂不生成投资建议。"
+            self._remember_agent_failure_plan(
+                query=query,
+                intent_plan=intent_plan,
+                mapping_query=mapping_query,
+                mcp_data=mcp_data,
+                matches=[],
+                provider=active_provider,
+                model=active_model,
+                failure_stage="server_no_match",
+                failure_message=message,
+            )
+            return self._format_agent_failure(
+                message,
+                [
+                    "可以补充市场、标的、时间周期或持仓约束后重新提问。",
+                    "也可以用 /server map <问题> 单独检查服务端如何理解这个问题。",
+                ],
+            )
 
         try:
             self._show_progress(f"正在用本机 {settings.display_name} 生成分析")
@@ -822,26 +3683,360 @@ class CLI:
                 max_tokens=min(int(config.llm_max_tokens or 4096), 1600),
             )
         except Exception as exc:
-            return "\n".join([
-                f"本机大模型调用失败: {exc}",
-                "",
-                "请检查 /model、/model key、网络代理或模型供应商额度。",
-                "二郎神服务端没有收到你的大模型 API Key。",
-            ])
+            message = f"本机大模型调用失败: {exc}"
+            self._remember_agent_failure_plan(
+                query=query,
+                intent_plan=intent_plan,
+                mapping_query=mapping_query,
+                mcp_data=mcp_data,
+                matches=matches,
+                provider=active_provider,
+                model=active_model,
+                failure_stage="local_llm_synthesis",
+                failure_message=message,
+            )
+            return self._format_agent_failure(
+                message,
+                [
+                    "请检查 /model、/model key、网络代理或模型供应商额度。",
+                    "二郎神服务端没有收到你的大模型 API Key。",
+                ],
+            )
 
         synthesis = self._parse_client_llm_advice(raw_text)
-        return self._format_client_advice(
+        synthesis = {
+            **synthesis,
+            "artifact_results": await self._materialize_synthesis_artifacts(synthesis, client, query),
+        }
+        self._remember_agent_plan(
+            query=query,
+            intent_plan=intent_plan,
+            mapping_query=mapping_query,
+            mcp_data=mcp_data,
+            matches=matches,
+            synthesis=synthesis,
+            provider=settings.display_name or settings.provider,
+            model=settings.model,
+        )
+        data_inputs = {
+            "mcp_data": sorted((mcp_data or {}).keys()) if isinstance(mcp_data, dict) else [],
+            "mcp_snapshot": self._mcp_snapshot_lines(mcp_data),
+            "mcp_links": self._mcp_resource_links(mcp_data),
+            "intent_resource_links": intent_plan.get("resource_links") if isinstance(intent_plan.get("resource_links"), list) else [],
+            "agent_trace": self._agent_trace_lines(),
+            "user_data": sorted((payload.get("user_data") or {}).keys()) if isinstance(payload.get("user_data"), dict) else [],
+            "route_source": intent_plan.get("route_source"),
+            "tool_selection_source": intent_plan.get("tool_selection_source"),
+            "tool_selection_note": intent_plan.get("tool_selection_note"),
+        }
+        formatted = self._format_client_advice(
             query=query,
             matches=matches,
             synthesis=synthesis,
             raw_text=raw_text,
             provider=settings.display_name or settings.provider,
             model=settings.model,
-            data_inputs={
-                "mcp_data": sorted((mcp_data or {}).keys()) if isinstance(mcp_data, dict) else [],
-                "user_data": sorted((payload.get("user_data") or {}).keys()) if isinstance(payload.get("user_data"), dict) else [],
-            },
+            data_inputs=data_inputs,
         )
+        report_path = self._save_advice_report(
+            query=query,
+            content=formatted,
+            artifact_results=synthesis.get("artifact_results"),
+            data_inputs=data_inputs,
+        )
+        if report_path:
+            workspace = str(workspace_status().get("path") or "")
+            formatted = "\n".join([
+                formatted,
+                "",
+                f"报告已保存: {self._workspace_file_link(report_path, workspace, label='打开报告')}",
+            ])
+        turn_resource_links = self._collect_turn_resource_links(data_inputs, synthesis, report_path=report_path)
+        self._remember_resource_links(query, turn_resource_links)
+        if isinstance(self._last_agent_plan, dict):
+            self._last_agent_plan["resource_links"] = turn_resource_links
+        self._remember_followup_data(mcp_data, synthesis.get("artifact_results"))
+        self._remember_conversation_turn(query, formatted)
+        return formatted
+
+    def _format_agent_failure(self, headline: str, next_steps: list[str] | None = None) -> str:
+        lines = [headline]
+        trace = self._agent_trace_lines()
+        if trace:
+            lines.extend(["", "本轮执行："])
+            for item in trace[:8]:
+                lines.append(f"- {item}")
+        if next_steps:
+            lines.extend(["", "下一步："])
+            for item in next_steps:
+                clean = self._text_field(item)
+                if clean:
+                    lines.append(f"- {clean}")
+        return "\n".join(lines)
+
+    def _remember_followup_data(self, mcp_data, artifact_results) -> None:
+        if isinstance(mcp_data, dict) and mcp_data:
+            self._last_mcp_data = dict(mcp_data)
+        if isinstance(artifact_results, list):
+            self._last_artifact_results = [
+                item for item in artifact_results
+                if isinstance(item, dict)
+            ][-8:]
+
+    def _collect_turn_resource_links(self, data_inputs: dict, synthesis: dict, report_path: str | None = None) -> list[dict[str, str]]:
+        links: list[dict[str, str]] = []
+
+        def add_many(source: str, values) -> None:
+            for item in self._resource_link_items(values):
+                normalized = self._normalize_resource_link_item(item, source)
+                if normalized:
+                    links.append(normalized)
+
+        add_many("MCP/web_search", data_inputs.get("mcp_links") if isinstance(data_inputs, dict) else [])
+        add_many("intent plan", data_inputs.get("intent_resource_links") if isinstance(data_inputs, dict) else [])
+        add_many("LLM resource", synthesis.get("resource_links") if isinstance(synthesis, dict) else [])
+        add_many("LLM resource", synthesis.get("resource_link") if isinstance(synthesis, dict) else [])
+        add_many("LLM resource", self._resource_links_from_value(synthesis.get("resources"), "分析资源") if isinstance(synthesis, dict) else [])
+        for artifact in (synthesis.get("artifact_results") if isinstance(synthesis, dict) else []) or []:
+            if not isinstance(artifact, dict):
+                continue
+            title = self._text_field(artifact.get("title")) or "图表"
+            add_many("server artifact", artifact.get("resource_links") if isinstance(artifact.get("resource_links"), list) else [])
+            saved = artifact.get("saved") if isinstance(artifact.get("saved"), dict) else {}
+            workspace = str(workspace_status().get("path") or "")
+            if saved.get("html"):
+                links.append({"source": "local artifact", "link": self._workspace_file_link(saved.get("html"), workspace, label=f"{title} HTML")})
+            if saved.get("json"):
+                links.append({"source": "local artifact", "link": self._workspace_file_link(saved.get("json"), workspace, label=f"{title} JSON")})
+        if report_path:
+            workspace = str(workspace_status().get("path") or "")
+            links.append({"source": "local report", "link": self._workspace_file_link(report_path, workspace, label="打开报告")})
+        return links
+
+    def _remember_resource_links(self, query: str, links: list[dict[str, str]]) -> None:
+        if not links:
+            return
+        seen = {
+            self._resource_dedupe_key(item)
+            for item in self._last_resource_links
+            if isinstance(item, dict)
+        }
+        added: list[dict[str, object]] = []
+        for item in links:
+            link = self._text_field(item.get("link"))
+            if not link:
+                continue
+            label, target = self._split_named_link(link)
+            if not target:
+                continue
+            dedupe_key = self._resource_dedupe_key({"link": link, "target": target})
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            entry = {
+                "query": self._truncate_context_text(query, 120),
+                "source": self._text_field(item.get("source")) or "resource",
+                "link": link,
+                "label": label,
+                "target": target,
+                "type": self._resource_type_for_target(target, source=self._text_field(item.get("source"))),
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            self._last_resource_links.append(entry)
+            added.append(entry)
+        self._last_resource_links = self._last_resource_links[-24:]
+        self._persist_resource_links(added)
+
+    def _recent_resource_links(self, limit: int = 12) -> list[dict[str, object]]:
+        combined = [
+            *self._load_persisted_resource_links(limit=limit * 4),
+            *[item for item in self._last_resource_links if isinstance(item, dict)],
+        ]
+        by_link: dict[str, dict[str, object]] = {}
+        for item in combined:
+            link = self._text_field(item.get("link")) if isinstance(item, dict) else ""
+            if not link:
+                continue
+            label, target = self._resource_entry_label_target(item)
+            dedupe_key = self._resource_dedupe_key({"link": link, "target": target})
+            if dedupe_key in by_link:
+                by_link.pop(dedupe_key)
+            by_link[dedupe_key] = {
+                "query": self._truncate_context_text(self._text_field(item.get("query")), 120),
+                "source": self._text_field(item.get("source")) or "resource",
+                "link": link,
+                "label": label,
+                "target": target,
+                "type": self._text_field(item.get("type")) or self._resource_type_for_target(target, source=self._text_field(item.get("source"))),
+                "saved_at": self._text_field(item.get("saved_at")),
+            }
+        return list(by_link.values())[-limit:]
+
+    def _resource_index_path(self, workspace: str | Path | None = None) -> Path:
+        root = resolve_workspace_path(str(workspace) if workspace else None)
+        return ensure_inside_workspace(root / ".erlangshen" / "artifacts" / "resources.json", root)
+
+    def _persist_resource_links(self, entries: list[dict[str, object]]) -> None:
+        if not entries:
+            return
+        status = workspace_status()
+        if not status.get("allowed"):
+            return
+        workspace = str(status.get("path") or "")
+        try:
+            index_path = self._resource_index_path(workspace)
+            existing = self._read_resource_index(index_path)
+            for entry in entries:
+                link = self._text_field(entry.get("link"))
+                if not link:
+                    continue
+                label, resource_target = self._resource_entry_label_target(entry)
+                dedupe_key = self._resource_dedupe_key({"link": link, "target": resource_target})
+                existing = [
+                    item for item in existing
+                    if self._resource_dedupe_key(item) != dedupe_key
+                ]
+                existing.append({
+                    "query": self._truncate_context_text(self._text_field(entry.get("query")), 120),
+                    "source": self._text_field(entry.get("source")) or "resource",
+                    "link": link,
+                    "label": label,
+                    "target": resource_target,
+                    "type": self._text_field(entry.get("type")) or self._resource_type_for_target(resource_target, source=self._text_field(entry.get("source"))),
+                    "saved_at": self._text_field(entry.get("saved_at")) or datetime.now().isoformat(timespec="seconds"),
+                })
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(index_path, "w", encoding="utf-8") as f:
+                json.dump({"resources": existing[-100:]}, f, ensure_ascii=False, indent=2)
+        except (OSError, PermissionError, TypeError, ValueError):
+            return
+
+    def _load_persisted_resource_links(self, limit: int = 24) -> list[dict[str, object]]:
+        status = workspace_status()
+        if not status.get("allowed"):
+            return []
+        try:
+            return self._read_resource_index(self._resource_index_path(str(status.get("path") or "")))[-limit:]
+        except (OSError, PermissionError, TypeError, ValueError):
+            return []
+
+    def _read_resource_index(self, target: Path) -> list[dict[str, object]]:
+        if not target.exists():
+            return []
+        with open(target, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        raw_items = data.get("resources") if isinstance(data, dict) else data
+        if not isinstance(raw_items, list):
+            return []
+        result: list[dict[str, object]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            link = self._text_field(item.get("link"))
+            if not link:
+                continue
+            label, target = self._resource_entry_label_target(item)
+            result.append({
+                "query": self._truncate_context_text(self._text_field(item.get("query")), 120),
+                "source": self._text_field(item.get("source")) or "resource",
+                "link": link,
+                "label": label,
+                "target": target,
+                "type": self._text_field(item.get("type")) or self._resource_type_for_target(target, source=self._text_field(item.get("source"))),
+                "saved_at": self._text_field(item.get("saved_at")),
+            })
+        return result[-100:]
+
+    def _resource_entry_label_target(self, entry: dict[str, object]) -> tuple[str, str]:
+        label = self._text_field(entry.get("label"))
+        target = self._text_field(entry.get("target"))
+        if label and target:
+            return label, self._normalize_open_target(target)
+        parsed_label, parsed_target = self._split_named_link(self._text_field(entry.get("link")))
+        return label or parsed_label, target or parsed_target
+
+    def _resource_dedupe_key(self, entry: dict[str, object]) -> str:
+        _, target = self._resource_entry_label_target(entry)
+        return target or self._text_field(entry.get("link"))
+
+    def _resource_type_for_target(self, target: str, source: str = "") -> str:
+        text = self._text_field(target).lower()
+        source_text = self._text_field(source).lower()
+        path_text = text.split("?", 1)[0].split("#", 1)[0]
+        suffix = Path(path_text).suffix.lower()
+        if "report" in source_text or "报告" in source_text or suffix in {".md", ".markdown"}:
+            return "report"
+        if "artifact" in source_text or "chart" in source_text or "图表" in source_text:
+            if suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}:
+                return "chart_image"
+            return "chart"
+        if suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp"}:
+            return "image"
+        if suffix in {".html", ".htm"}:
+            return "html"
+        if suffix == ".pdf":
+            return "pdf"
+        if suffix == ".json":
+            return "json"
+        if text.startswith("file://") or text.startswith("/"):
+            return "local_file"
+        if re.match(r"^https?://", text, flags=re.I):
+            return "webpage"
+        return "resource"
+
+    def _recent_resource_context(self, limit: int = 8) -> list[dict[str, str]]:
+        context = []
+        for item in self._recent_resource_links(limit=limit):
+            context.append({
+                "query": self._truncate_context_text(self._text_field(item.get("query")), 120),
+                "source": self._text_field(item.get("source")),
+                "link": self._truncate_context_text(self._text_field(item.get("link")), 260),
+            })
+        return context
+
+    def _last_mcp_context_brief(self) -> dict:
+        if not isinstance(self._last_mcp_data, dict) or not self._last_mcp_data:
+            return {"status": "empty", "usable_sources": [], "snapshots": []}
+        return {
+            "status": "available",
+            "usable_sources": [
+                key for key in sorted(str(key) for key in self._last_mcp_data.keys())
+                if key != "note" and "error" not in key.lower()
+            ],
+            "snapshots": self._mcp_snapshot_lines(self._last_mcp_data),
+            "boundary": "仅为本次 CLI 进程内的上一轮工具数据摘要，不写入磁盘，不包含大模型 API Key。",
+        }
+
+    def _recent_artifact_context(self) -> list[dict]:
+        context = []
+        for item in self._last_artifact_results[-6:]:
+            saved = item.get("saved") if isinstance(item.get("saved"), dict) else {}
+            context.append({
+                "title": self._text_field(item.get("title")),
+                "status": self._text_field(item.get("status")),
+                "type": self._text_field(item.get("type")),
+                "data_keys": item.get("data_keys") if isinstance(item.get("data_keys"), list) else [],
+                "html": saved.get("html") if saved else "",
+                "json": saved.get("json") if saved else "",
+            })
+        return context
+
+    def _remember_conversation_turn(self, user_text: str, assistant_text: str) -> None:
+        user = self._truncate_context_text(user_text, 240)
+        assistant = self._truncate_context_text(assistant_text, 420)
+        if not user:
+            return
+        self._conversation_history.append({"user": user, "assistant": assistant})
+        self._conversation_history = self._conversation_history[-6:]
+
+    def _recent_conversation_context(self, limit: int = 4) -> list[dict[str, str]]:
+        return list(self._conversation_history[-limit:])
+
+    def _truncate_context_text(self, text: str, limit: int) -> str:
+        value = self._text_field(text)
+        if len(value) <= limit:
+            return value
+        return value[: max(0, limit - 1)].rstrip() + "…"
 
     def _parse_client_advice_input(self, content: str):
         content = (content or "").strip()
@@ -862,6 +4057,13 @@ class CLI:
             return "建议数据包必须是 JSON 对象"
         return query, payload
 
+    def _server_mapping_query(self, query: str, intent_plan: dict | None) -> str:
+        if isinstance(intent_plan, dict):
+            rewritten = self._text_field(intent_plan.get("rewritten_query"))
+            if rewritten:
+                return rewritten
+        return query
+
     def _client_advice_messages(
         self,
         *,
@@ -877,21 +4079,60 @@ class CLI:
             "不会接收用户的大模型 API Key。你必须基于服务端返回的公开映射、用户数据和 MCP 数据生成投资分析，"
             "不能声称看到了完整服务端认知库或内部案例全文。"
             "你的语气要像一位克制、可靠、会和用户自然沟通的投资分析师，不要机械套模板。"
-            "输出 JSON 对象，字段为 view, suggestions, risk_controls, missing_data；"
-            "suggestions、risk_controls、missing_data 必须是字符串数组，不要返回单个字符串。"
+            "输出 JSON 对象，字段为 view, suggestions, risk_controls, missing_data，可选 followups, next_actions, artifacts；"
+            "suggestions、risk_controls、missing_data、followups、next_actions 优先返回字符串数组；"
+            "如需保留原因、条件、阈值或命令，也可以返回对象数组，例如 {\"action\":\"...\",\"reason\":\"...\",\"condition\":\"...\"}。"
+            "artifacts 如需图表，使用数组: [{\"type\":\"chart\",\"chart_type\":\"bar\",\"title\":\"标题\",\"data\":{\"A股\":1.2}}]。"
         )
         user_payload = {
             "query": query,
+            "as_of_date": datetime.now().strftime("%Y-%m-%d"),
+            "timezone": "Asia/Shanghai",
+            "recent_conversation": self._recent_conversation_context(),
+            "previous_mcp_context": self._last_mcp_context_brief(),
+            "recent_artifacts": self._recent_artifact_context(),
+            "recent_resources": self._recent_resource_context(),
             "client_intent_plan": intent_plan or {},
+            "client_intent_plan_summary": self._intent_plan_summary(intent_plan or {}),
+            "response_contract": {
+                "view": "自然语言综合判断",
+                "suggestions": ["字符串，或包含 action/reason/condition 的对象"],
+                "risk_controls": ["字符串，或包含 risk/threshold/reason 的对象"],
+                "missing_data": ["字符串，或包含 missing/question/reason 的对象"],
+                "followups": ["字符串，或包含 question/reason 的对象"],
+                "next_actions": ["字符串，或包含 command/action/reason 的对象"],
+                "tool_selection_source": "来自 client_intent_plan，用来解释 MCP 工具是本机大模型选择还是客户端兜底补齐",
+                "tool_selection_note": "来自 client_intent_plan，用来解释工具选择边界",
+                "artifacts": [{"type": "chart", "chart_type": "bar", "title": "标题", "data": {"A股": 1.2}}],
+            },
+            "available_capabilities": self._mcp_capability_catalog(query),
+            "agent_playbook": self._agent_playbook(),
+            "tool_result_contract": self._agent_tool_contract(),
+            "server_client_contract": self._server_client_contract(),
+            "agent_orchestration_protocol": self._agent_orchestration_protocol(),
             "server_protected_matches": matches[:3],
             "mcp_data": mcp_data or {},
+            "market_data_brief": self._mcp_data_brief(mcp_data),
             "user_data": user_data or {},
             "current_cognition": current_cognition or {},
             "requirements": [
                 "先用自然语言给综合判断，再给少量可执行建议和风控",
+                "如果 mcp_data 已返回行情或新闻数据，必须优先结合这些数据回答，不要再说没有实时市场数据",
+                "对于“今天行情怎么样/市场怎么看”这类宽泛问题，要把它当成市场概览任务处理，必须先引用 market_data_brief.snapshots 或网页线索，再给方向性解读",
+                "宽泛行情问题已经有 market_data_brief.snapshots 时，missing_data 不要再列具体指数、实时点位、新闻事件等基础行情项；只保留用户持仓、周期、仓位、风险偏好等个性化落地信息，没有就留空",
+                "如果 market_data_brief.status 是 empty 或只有错误，必须明确说“数据通道本轮没有拿到可用行情”，并给出 /login、/doctor、/tools 或安装 web_search 的下一步",
                 "如数据不足必须降低确定性并列出需要补充的数据",
                 "如果用户只是打招呼或问题过于泛泛，要自然追问，不要强行生成投资结论",
+                "如果用户是“做成图表/继续/那它呢/详细说说”这类短追问，必须结合 recent_conversation 判断承接对象",
+                "如果用户是图表、报告或承接上一轮的追问，必须参考 previous_mcp_context 和 recent_artifacts；但不能编造其中不存在的数值",
+                "如果用户提到“刚才那个网页/图片/图/链接/报告”，必须参考 recent_resources 和 recent_artifacts，并用自然语言说明可通过 /links 或 /open 重新打开",
+                "如果 MCP、web_search、服务端或大模型返回网页、图片、HTML、PDF 等非文本资源，必须保留为命名 resource_links，不要试图把富文本或二进制内容直接塞进终端",
+                "优先参考 client_intent_plan 中的 tool_rationale 和 data_strategy，说明你为什么用了这些数据边界",
+                "参考 client_intent_plan.route_summary、data_confidence、chart_opportunity、missing_inputs，把回答做成自然的分析路线，不要像规则模板",
+                "如果 client_intent_plan.artifact_plan.type 是 chart 或 report，要在回答中自然提示可继续生成对应产物；数据足够时可直接在 artifacts 请求图表",
                 "不要暴露或编造服务端内部认知库内容",
+                "followups 用来给用户 2-3 个自然追问选项；next_actions 用来给 1-3 个可直接执行的命令或下一步动作",
+                "当 MCP 数据或用户数据适合可视化时，可在 artifacts 里请求图表；客户端会通过服务端 artifact 通道生成并保存",
             ],
         }
         return [
@@ -899,53 +4140,173 @@ class CLI:
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, indent=2)},
         ]
 
+    def _intent_plan_summary(self, intent_plan: dict) -> dict:
+        plan = intent_plan if isinstance(intent_plan, dict) else {}
+        return {
+            "route_summary": self._text_field(plan.get("route_summary")),
+            "tool_rationale": self._text_field(plan.get("tool_rationale")),
+            "tool_selection_source": self._text_field(plan.get("tool_selection_source")) or "not_yet_available",
+            "tool_selection_note": self._text_field(plan.get("tool_selection_note")),
+            "composition_patterns_used": self._coerce_text_items(plan.get("composition_patterns_used") or plan.get("composition_pattern")),
+            "data_strategy": self._text_field(plan.get("data_strategy")),
+            "data_confidence": self._text_field(plan.get("data_confidence")),
+            "chart_opportunity": bool(plan.get("chart_opportunity")),
+            "artifact_plan": plan.get("artifact_plan") if isinstance(plan.get("artifact_plan"), dict) else {},
+        }
+
+    def _agent_tool_contract(self) -> dict:
+        return {
+            "mcp_data_keys": "每个 key 形如 tool:label，例如 get_index_data:沪深300 或 web_search:最新政策影响。",
+            "market_series": "指数、资产、产品历史通常在 data/result/records/items/history/prices 等字段中，优先使用最近一条可读记录。",
+            "web_search": "web_search 返回 results 数组，优先提取 title、source/site 或 url 域名作为事件线索；不要把搜索结果当成已验证结论。",
+            "chart_artifact": (
+                "当用户要求图表、报告、对比、走势、收益或回撤展示时，可在 artifacts 返回 chart 请求；"
+                "客户端会调用服务端 chart artifact 通道，并在授权工作区保存 JSON/HTML。"
+            ),
+            "resource_links": (
+                "当 MCP、web_search、服务端或大模型返回网页、图片、HTML、PDF、图表预览等非纯文本资源时，"
+                "必须保留为“名称: URL/路径”的可打开链接；客户端会在回答和 /links 中展示，"
+                "用户可用 /links 1、/open 1、/links open 1 或 /open link 1 打开。"
+            ),
+            "safety": "不要输出 token/key/secret/password/authorization 等敏感字段；大模型 API Key 只在客户端本机使用。",
+        }
+
+    def _server_client_contract(self) -> dict:
+        return {
+            "server_role": "核心服务端只负责账号鉴权、受保护场景映射、能力边界说明和 chart artifact 生成。",
+            "client_role": "CLI 客户端负责本机大模型意图理解、super-66 MCP/web_search 数据读取、自然语言综合和资源链接呈现。",
+            "llm_key_boundary": "用户的大模型 API Key 只保存在本机并由客户端直连供应商；不得发送给二郎神服务端。",
+            "mapping_contract": {
+                "request": "rewritten_query 或用户原始问题，加上必要的公开上下文；不要上传模型 API Key。",
+                "response": "scene, confidence, direction, risk_boundary 等受保护信号；不要期待服务端返回内部认知库全文。",
+            },
+            "artifact_contract": {
+                "request": "chart_type, title, data, metadata；data 必须来自 MCP、用户输入或已存在上下文，不能编造。",
+                "response": "artifact JSON/HTML/图片/网页资源；客户端保存到授权工作区，并加入 /links。",
+                "open_commands": ["/open chart", "/artifacts", "/links 1", "/open 1"],
+            },
+            "workspace_contract": "只有用户授权项目文件夹后，客户端才写入 .erlangshen/artifacts；未授权时仍可显示服务端返回的命名链接。",
+            "resource_contract": "网页、图片、HTML、PDF、图表预览和报告统一转为命名 resource_links，CLI 只展示链接入口。",
+        }
+
+    def _agent_orchestration_protocol(self) -> dict:
+        return {
+            "decision_owner": "本机大模型是主要编排者，负责理解上下文、选择 MCP/web_search、决定是否请求服务端映射和 chart artifact。",
+            "client_role": "客户端只做工具白名单、参数归一化、授权沙箱、安全脱敏、连接失败兜底和资源链接落盘。",
+            "do_not": [
+                "不要先写死规则再让模型填空",
+                "不要只按关键词触发固定工具链",
+                "不要在已有 MCP 或 web_search 事实时继续机械追问基础行情",
+                "不要为了图表或报告编造不存在的数值",
+            ],
+            "llm_must_return": [
+                "route_summary: 解释你如何理解真实任务",
+                "tool_rationale: 说明为什么选择或不选择 MCP/web_search",
+                "data_strategy: 说明 MCP、web_search、用户数据、服务端映射如何组合",
+                "composition_patterns_used: 标出采用的组合模式，便于 /plan 复盘",
+                "resource_presentation: 非文本资源如何进入 /links 和 /open",
+                "artifact_plan: 需要图表/报告时说明数据来源、标题和保存边界",
+            ],
+            "client_may_override_only_when": [
+                "本机大模型调用失败",
+                "模型返回的工具不在白名单或参数无法归一化",
+                "模型明确需要事实数据但没有给出工具",
+                "宽泛行情任务没有任何工具计划，客户端才按 data_recipes 补齐默认 MCP/web_search",
+            ],
+            "audit_surface": "所有工具来源、补齐原因、降级和图表计划必须进入 /plan，方便用户检查智能体行为。",
+        }
+
+    def _agent_routing_contract(self) -> dict:
+        return {
+            "primary_router": "local_llm_context_router",
+            "principle": "本机大模型根据完整上下文判断用户真实任务，客户端只做工具白名单、参数归一化和故障兜底。",
+            "orchestration_protocol": self._agent_orchestration_protocol(),
+            "avoid": [
+                "不要只因为出现某个关键词就固定路由",
+                "不要在已有 MCP/web_search 数据时继续机械追问基础行情",
+                "不要为了生成图表而编造不存在的数值字段",
+            ],
+            "use_context": [
+                "query",
+                "recent_conversation",
+                "previous_mcp_context",
+                "recent_resources",
+                "recent_artifacts",
+                "user_data_keys",
+                "provided_mcp_data_keys",
+            ],
+            "flexible_tool_spec": {
+                "accepted_keys": ["mcp_tools", "tools", "tool_calls", "data_tools"],
+                "name_aliases": ["name", "tool", "tool_name", "function.name"],
+                "argument_aliases": ["arguments", "args", "parameters", "input", "function.arguments"],
+                "note": "可以返回 OpenAI tool_calls 风格、普通 tools 数组或 data_tools 对象；客户端会归一化到 {name, arguments}。",
+            },
+            "client_fallback_boundary": (
+                "只有本机大模型失败、没有返回工具但 intent 明确需要事实数据，或用户是宽泛行情问题且无工具计划时，"
+                "客户端才补齐默认 MCP/web_search 组合，并在 /plan 标注 tool_selection_source。"
+            ),
+            "chart_and_resource_rule": (
+                "当数据适合可视化或用户要求图表/报告时，设置 chart_opportunity/artifact_plan；"
+                "网页、图片、HTML、PDF、图表预览统一用 resource_links 命名链接返回。"
+            ),
+        }
+
     async def _infer_client_intent(self, query: str, payload: dict, settings, llm_client_cls) -> dict:
         explicit = payload.get("intent_plan") or payload.get("intent")
         if isinstance(explicit, dict):
+            explicit.setdefault("route_source", "provided_payload")
             return explicit
         self._show_progress("正在本机理解问题意图")
+        capability_catalog = self._mcp_capability_catalog(query)
         intent_payload = {
             "query": query,
+            "as_of_date": datetime.now().strftime("%Y-%m-%d"),
+            "timezone": "Asia/Shanghai",
+            "recent_conversation": self._recent_conversation_context(),
+            "previous_mcp_context": self._last_mcp_context_brief(),
+            "recent_artifacts": self._recent_artifact_context(),
+            "recent_resources": self._recent_resource_context(),
             "user_data_keys": sorted((payload.get("user_data") or {}).keys()) if isinstance(payload.get("user_data"), dict) else [],
             "provided_mcp_data_keys": sorted((payload.get("mcp_data") or {}).keys()) if isinstance(payload.get("mcp_data"), dict) else [],
-            "allowed_mcp_tools": [
-                {
-                    "name": "get_index_data",
-                    "use_when": "用户问 A股、指数、市场整体、沪深300、上证指数等",
-                    "args": {"index_name": "沪深300", "limit": 60},
-                },
-                {
-                    "name": "get_astock_realtime",
-                    "use_when": "用户问具体 A股代码或个股实时情况",
-                    "args": {"code": "600519", "limit": 1},
-                },
-                {
-                    "name": "search_astocks",
-                    "use_when": "用户给了股票简称但没有代码",
-                    "args": {"keyword": "股票简称", "limit": 5},
-                },
-                {
-                    "name": "get_global_asset_data",
-                    "use_when": "用户问美股、黄金、原油、汇率或全球资产",
-                    "args": {"asset_name": "黄金", "limit": 60},
-                },
-                {
-                    "name": "get_future_market_data",
-                    "use_when": "用户问商品、股指、国债期货",
-                    "args": {"contract_code": "AU", "limit": 60},
-                },
-                {
-                    "name": "web_search",
-                    "use_when": "super-66 MCP 不覆盖的新闻、公告、公开网页或最新事件",
-                    "args": {"query": query, "count": 5},
-                },
-            ],
+            "allowed_mcp_tools": capability_catalog["mcp_tools"],
+            "selection_policy": capability_catalog["selection_policy"],
+            "data_recipes": capability_catalog["data_recipes"],
+            "route_plans": capability_catalog["route_plans"],
+            "composition_patterns": capability_catalog["composition_patterns"],
+            "agent_playbook": capability_catalog["agent_playbook"],
+            "artifact_channel": capability_catalog["artifact_channel"],
+            "resource_link_channel": capability_catalog["resource_link_channel"],
+            "local_web_search": capability_catalog["local_web_search"],
+            "server_client_contract": self._server_client_contract(),
+            "routing_contract": self._agent_routing_contract(),
+            "agent_orchestration_protocol": self._agent_orchestration_protocol(),
             "output_schema": {
                 "intent": "smalltalk|market_overview|single_asset|portfolio|data_lookup|macro|risk|general_investment",
                 "needs_server_mapping": True,
                 "needs_mcp": False,
                 "mcp_tools": [{"name": "get_index_data", "arguments": {"index_name": "沪深300", "limit": 60}}],
                 "rewritten_query": query,
+                "is_followup": False,
+                "followup_target": "",
+                "route_summary": "一句话说明你如何理解用户当前真实任务",
+                "tool_rationale": "为什么选择这些 MCP/web_search/图表工具，或为什么暂不需要工具",
+                "tool_selection_source": "local_llm",
+                "tool_selection_note": "说明工具选择来自本机大模型；如果你没有选择工具请说明原因",
+                "composition_patterns_used": ["从 composition_patterns 中选择本轮采用的组合模式名称，例如 market_snapshot_to_narrative"],
+                "data_strategy": "super-66 MCP、web_search、用户数据、服务端映射和 chart_artifact 如何组合",
+                "resource_links": [{"source": "web_search|MCP|server artifact|LLM resource", "link": "名称: URL/路径"}],
+                "resource_presentation": "说明本轮如果出现网页/图片/HTML/PDF/报告/图表，CLI 应如何用名称链接呈现并提示打开",
+                "open_commands": ["/links 1", "/open 1"],
+                "data_confidence": "high|medium|low，说明当前计划拿到足够事实数据的可能性",
+                "chart_opportunity": False,
+                "chart_rationale": "如果适合图表，说明应该画什么；不适合则留空",
+                "artifact_plan": {
+                    "type": "chart|report|none",
+                    "title": "如果这一轮适合沉淀图表或报告，给一个面向用户的标题",
+                    "data_hint": "说明图表/报告应该使用哪些 MCP、web_search 或用户数据字段",
+                    "save_to_workspace": True,
+                },
+                "missing_inputs": ["还需要用户补充的市场、标的、持仓或周期"],
                 "tone": "natural_analyst",
             },
         }
@@ -956,7 +4317,13 @@ class CLI:
                         "role": "system",
                         "content": (
                             "你是二郎神 CLI 的本机意图理解层。请只输出 JSON，不要解释。"
-                            "你要灵活理解用户真正想问什么，并决定是否需要调用 super-66 MCP 数据。"
+                            "你是主路由器，不要把单个关键词命中当成主要判断方式；要结合用户原话、最近对话、"
+                            "用户数据、previous_mcp_context、recent_resources 和 routing_contract 判断真实任务。"
+                            "你是编排决策者，不要先写死规则再让模型填空；必须根据 agent_orchestration_protocol 输出可复盘的 route_summary、tool_rationale、data_strategy 和 artifact_plan。"
+                            "你要灵活理解用户真正想问什么，并依据 selection_policy、data_recipes、route_plans、"
+                            "composition_patterns 和 routing_contract 决定是否需要调用 super-66 MCP/web_search、"
+                            "如何组合工具、是否需要 chart artifact。"
+                            "可以使用 routing_contract.flexible_tool_spec 中的非标准工具写法；客户端会归一化。"
                         ),
                     },
                     {"role": "user", "content": json.dumps(intent_payload, ensure_ascii=False)},
@@ -964,60 +4331,362 @@ class CLI:
                 temperature=0.1,
                 max_tokens=500,
             )
-            parsed = self._parse_json_object(raw_text)
+            parsed = self._parse_json_object(
+                raw_text,
+                preferred_keys={"intent", "needs_mcp", "mcp_tools", "rewritten_query", "route_summary"},
+            )
+            parsed["route_source"] = "local_llm"
             return self._normalize_intent_plan(parsed, query)
         except Exception as exc:
-            return {
+            fallback_plan = {
                 "intent": "general_investment",
                 "needs_server_mapping": True,
                 "needs_mcp": False,
                 "mcp_tools": [],
                 "rewritten_query": query,
+                "route_source": "fallback",
+                "route_warning": "本机大模型意图理解失败，已降级为保守兜底路由",
                 "intent_error": self._sanitize_api_key_error(exc, ""),
             }
+            return self._normalize_intent_plan(fallback_plan, query)
 
-    def _parse_json_object(self, raw_text: str) -> dict:
+    def _parse_json_object(self, raw_text: str, preferred_keys: set[str] | None = None) -> dict:
         text = (raw_text or "").strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
         try:
             data = json.loads(text)
             return data if isinstance(data, dict) else {}
         except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                try:
-                    data = json.loads(text[start:end + 1])
-                    return data if isinstance(data, dict) else {}
-                except json.JSONDecodeError:
-                    return {}
+            candidates = self._json_object_candidates(text)
+            if candidates:
+                return self._choose_json_object_candidate(candidates, preferred_keys)
         return {}
+
+    def _json_object_candidates(self, text: str) -> list[dict]:
+        sources = []
+        for match in re.finditer(r"```(?:json)?\s*(.*?)```", text or "", flags=re.I | re.S):
+            fenced = match.group(1).strip()
+            if fenced:
+                sources.append(fenced)
+        sources.append(text or "")
+        candidates: list[dict] = []
+        seen: set[str] = set()
+        for source in sources:
+            for raw in self._balanced_json_object_strings(source):
+                if raw in seen:
+                    continue
+                seen.add(raw)
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict):
+                    candidates.append(data)
+        return candidates
+
+    def _balanced_json_object_strings(self, text: str) -> list[str]:
+        chunks: list[str] = []
+        start = -1
+        depth = 0
+        in_string = False
+        escape = False
+        for index, char in enumerate(text or ""):
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+                continue
+            if char == "{":
+                if depth == 0:
+                    start = index
+                depth += 1
+            elif char == "}" and depth:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    chunks.append(text[start:index + 1])
+                    start = -1
+        return chunks
+
+    def _choose_json_object_candidate(self, candidates: list[dict], preferred_keys: set[str] | None = None) -> dict:
+        if not candidates:
+            return {}
+        preferred = preferred_keys or set()
+        if not preferred:
+            return candidates[-1]
+        ranked = sorted(
+            enumerate(candidates),
+            key=lambda item: (len(preferred & set(item[1].keys())), item[0]),
+            reverse=True,
+        )
+        return ranked[0][1]
 
     def _normalize_intent_plan(self, plan: dict, query: str) -> dict:
         if not isinstance(plan, dict):
             plan = {}
-        tools = []
-        for item in plan.get("mcp_tools") or []:
-            if not isinstance(item, dict):
-                continue
-            name = self._text_field(item.get("name"))
-            args = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
-            if name in self._allowed_super66_tools():
-                tools.append({"name": name, "arguments": args})
+        tools = self._extract_mcp_tool_specs(plan)
+        original_tools = bool(tools)
+        intent = self._text_field(plan.get("intent")) or "general_investment"
+        needs_mcp = bool(plan.get("needs_mcp")) and bool(tools)
+        route_source = self._normalize_route_source(plan.get("route_source"))
+        tool_selection_source = self._text_field(plan.get("tool_selection_source"))
+        tool_selection_note = self._text_field(plan.get("tool_selection_note"))
+        if not tool_selection_source:
+            if original_tools:
+                tool_selection_source = route_source if route_source in {"local_llm", "provided_payload"} else "local_llm"
+            else:
+                tool_selection_source = "none"
+        default_tools = self._default_tools_for_intent(intent, query)
+        if default_tools and not tools:
+            tools = default_tools
+            needs_mcp = True
+            tool_selection_source = "client_default_by_intent"
+            if not tool_selection_note:
+                tool_selection_note = "本机大模型未给出具体工具，客户端按 intent/data_recipes 补齐默认 MCP 工具，避免无事实数据分析。"
+        if self._is_vague_market_query(query):
+            if not tools:
+                tools = self._default_market_overview_tools()
+                tool_selection_source = "client_market_overview_fallback"
+                if not tool_selection_note:
+                    tool_selection_note = "用户问题是宽泛行情/盘面问题，本机大模型未给出工具时，客户端补齐指数、全球资产和 web_search 默认组合。"
+            needs_mcp = True
+        tool_rationale = self._text_field(plan.get("tool_rationale"))
+        data_strategy = self._text_field(plan.get("data_strategy"))
+        route_summary = self._text_field(plan.get("route_summary"))
+        data_confidence = self._text_field(plan.get("data_confidence")).lower()
+        if data_confidence not in {"high", "medium", "low"}:
+            data_confidence = "medium" if needs_mcp else "low"
+        chart_rationale = self._text_field(plan.get("chart_rationale"))
+        missing_inputs = self._coerce_text_items(plan.get("missing_inputs"))
+        if needs_mcp and not tool_rationale:
+            tool_rationale = "该问题需要先读取行情/事件数据，避免在缺少事实快照时机械追问。"
+        if needs_mcp and not data_strategy:
+            data_strategy = "优先读取 super-66 MCP 行情；如有 web_search 可用，再补充当天公开事件线索；随后结合服务端场景映射交给本机大模型分析。"
+        if not route_summary:
+            route_summary = "先由本机大模型理解上下文，再按需要调用 MCP/web_search 和服务端映射。"
+        chart_opportunity = bool(plan.get("chart_opportunity"))
+        if not chart_opportunity and any(word in query for word in ("图表", "画图", "对比", "走势", "收益", "回撤")):
+            chart_opportunity = True
+            if not chart_rationale:
+                chart_rationale = "用户问题包含可视化或对比意图，适合生成 chart artifact。"
+        if not chart_opportunity and (self._is_vague_market_query(query) or self._text_field(intent).lower() == "market_overview") and needs_mcp:
+            chart_opportunity = True
+            if not chart_rationale:
+                chart_rationale = "市场快照适合做指数、资产或主线对比图。"
+        composition_patterns_used = self._normalize_composition_patterns(
+            plan.get("composition_patterns_used") or plan.get("composition_pattern"),
+            intent=intent,
+            query=query,
+            tools=tools,
+            chart_opportunity=chart_opportunity,
+        )
+        artifact_plan = self._normalize_artifact_plan(
+            plan.get("artifact_plan"),
+            query=query,
+            intent=intent,
+            chart_opportunity=chart_opportunity,
+            chart_rationale=chart_rationale,
+            needs_mcp=needs_mcp,
+        )
+        resource_links = self._coerce_resource_links(plan.get("resource_links"))
+        resource_presentation = self._text_field(plan.get("resource_presentation"))
+        if not resource_presentation:
+            resource_presentation = "CLI 不内嵌富文本或二进制内容；网页、图片、HTML、PDF、报告和图表统一显示为命名链接，可用 /links 1 或 /open 1 打开。"
+        open_commands = self._coerce_text_items(plan.get("open_commands")) or ["/links 1", "/open 1"]
         return {
-            "intent": self._text_field(plan.get("intent")) or "general_investment",
+            "intent": intent,
+            "route_source": route_source,
+            "route_warning": self._text_field(plan.get("route_warning") or plan.get("intent_error")),
             "needs_server_mapping": bool(plan.get("needs_server_mapping", True)),
-            "needs_mcp": bool(plan.get("needs_mcp")) and bool(tools),
-            "mcp_tools": tools[:3],
+            "needs_mcp": needs_mcp,
+            "mcp_tools": self._dedupe_mcp_tools(tools)[:6],
+            "tool_selection_source": tool_selection_source,
+            "tool_selection_note": tool_selection_note,
+            "composition_patterns_used": composition_patterns_used,
             "rewritten_query": self._text_field(plan.get("rewritten_query")) or query,
+            "is_followup": bool(plan.get("is_followup")),
+            "followup_target": self._text_field(plan.get("followup_target")),
+            "route_summary": route_summary,
+            "tool_rationale": tool_rationale,
+            "data_strategy": data_strategy,
+            "data_confidence": data_confidence,
+            "chart_opportunity": chart_opportunity,
+            "chart_rationale": chart_rationale,
+            "artifact_plan": artifact_plan,
+            "resource_links": resource_links,
+            "resource_presentation": resource_presentation,
+            "open_commands": open_commands[:4],
+            "missing_inputs": missing_inputs[:5],
             "tone": self._text_field(plan.get("tone")) or "natural_analyst",
         }
 
-    def _allowed_super66_tools(self) -> set[str]:
+    def _normalize_route_source(self, value) -> str:
+        source = self._text_field(value).lower()
+        if source in {"local_llm", "provided_payload", "fallback"}:
+            return source
+        return "local_llm"
+
+    def _normalize_composition_patterns(self, value, *, intent: str, query: str, tools: list[dict], chart_opportunity: bool) -> list[str]:
+        allowed = {
+            self._text_field(item.get("name"))
+            for item in self._mcp_capability_catalog(query).get("composition_patterns") or []
+            if isinstance(item, dict) and self._text_field(item.get("name"))
+        }
+        items = self._coerce_text_items(value)
+        result = []
+        for item in items:
+            name = self._text_field(item)
+            if name in allowed and name not in result:
+                result.append(name)
+        if result:
+            return result[:4]
+        defaults = self._default_composition_patterns(intent, query, tools, chart_opportunity)
+        return [name for name in defaults if name in allowed][:4]
+
+    def _default_composition_patterns(self, intent: str, query: str, tools: list[dict], chart_opportunity: bool) -> list[str]:
+        text = re.sub(r"\s+", "", (query or "").lower())
+        tool_names = {self._text_field(item.get("name")) for item in tools if isinstance(item, dict)}
+        result = []
+        if self._is_vague_market_query(query) or self._text_field(intent).lower() == "market_overview":
+            result.append("market_snapshot_to_narrative")
+        if any(name in tool_names for name in {"search_astocks", "get_astock_realtime", "search_products", "get_product_detail"}):
+            result.append("name_to_realtime_snapshot")
+        if any(name in tool_names for name in {"get_product_history"}):
+            result.append("product_history_to_risk")
+        if chart_opportunity or any(word in text for word in ("图表", "画图", "走势", "收益", "回撤", "对比", "报告")):
+            result.append("mcp_table_to_chart_artifact")
+        if "网页" in text or "图片" in text or "链接" in text or "报告" in text:
+            result.append("analysis_result_to_resource_links")
+        if not result and tools:
+            result.append("market_snapshot_to_narrative")
+        return list(dict.fromkeys(result))
+
+    def _coerce_resource_links(self, value) -> list[dict[str, str]]:
+        links: list[dict[str, str]] = []
+        for item in self._resource_link_items(value):
+            if isinstance(item, str):
+                for link in self._resource_links_from_text(item, "resource"):
+                    links.append({"source": "resource", "link": link})
+                continue
+            normalized = self._normalize_resource_link_item(item, "resource")
+            if normalized:
+                links.append(normalized)
+        return links[:8]
+
+    def _resource_link_items(self, value) -> list:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        return [value]
+
+    def _normalize_resource_link_item(self, item, default_source: str = "resource") -> dict[str, str] | None:
+        if isinstance(item, dict):
+            source = self._text_field(item.get("source")) or default_source
+            label = self._text_field(
+                item.get("label")
+                or item.get("title")
+                or item.get("name")
+                or item.get("alt")
+                or item.get("description")
+            )
+            target = self._text_field(self._first_resource_target(item))
+            if not target:
+                return None
+            if self._looks_like_resource_target(target) and label and not target.startswith(label):
+                target = f"{label}: {target}"
+            return {"source": source, "link": target}
+        link = self._text_field(item)
+        if not link:
+            return None
+        return {"source": default_source, "link": link}
+
+    def _first_resource_target(self, item: dict):
+        for key in self._resource_target_keys():
+            value = item.get(key)
+            if value:
+                return value
+        return None
+
+    def _resource_target_keys(self) -> tuple[str, ...]:
+        return (
+            "link",
+            "url",
+            "href",
+            "path",
+            "web_url",
+            "source_url",
+            "html_url",
+            "file_url",
+            "download_url",
+            "pdf_url",
+            "image_url",
+            "image",
+            "thumbnail",
+            "thumbnail_url",
+            "preview_url",
+            "png_url",
+            "jpg_url",
+            "jpeg_url",
+            "svg_url",
+        )
+
+    def _looks_like_resource_target(self, target: str) -> bool:
+        text = self._text_field(target)
+        return bool(re.match(r"^(?:https?|file)://", text, flags=re.I) or text.startswith("/"))
+
+    def _normalize_artifact_plan(
+        self,
+        artifact_plan,
+        *,
+        query: str,
+        intent: str,
+        chart_opportunity: bool,
+        chart_rationale: str,
+        needs_mcp: bool,
+    ) -> dict:
+        data = artifact_plan if isinstance(artifact_plan, dict) else {}
+        plan_type = self._text_field(data.get("type")).lower()
+        if plan_type not in {"chart", "report", "none"}:
+            plan_type = ""
+        if not plan_type:
+            if chart_opportunity:
+                plan_type = "chart"
+            elif (self._is_vague_market_query(query) or self._text_field(intent).lower() == "market_overview") and needs_mcp:
+                plan_type = "chart"
+            else:
+                plan_type = "none"
+        title = self._text_field(data.get("title"))
+        data_hint = self._text_field(data.get("data_hint"))
+        if plan_type == "chart":
+            if not title:
+                is_market_overview = self._is_vague_market_query(query) or self._text_field(intent).lower() == "market_overview"
+                title = "市场快照对比" if is_market_overview else "关键指标对比"
+            if not data_hint:
+                data_hint = chart_rationale or "使用本轮 MCP 行情快照中的指数、资产涨跌幅或收益序列"
+        elif plan_type == "report":
+            if not title:
+                title = "本轮投资分析报告"
+            if not data_hint:
+                data_hint = "使用本轮服务端场景映射、MCP 数据和本机大模型分析结论"
+        else:
+            title = ""
+            data_hint = ""
         return {
+            "type": plan_type,
+            "title": title,
+            "data_hint": data_hint,
+            "save_to_workspace": bool(data.get("save_to_workspace", True)) if plan_type != "none" else False,
+        }
+
+    def _allowed_super66_tools(self) -> set[str]:
+        base_tools = {
             "search_astocks",
             "get_astock_realtime",
             "get_astock_history",
@@ -1029,39 +4698,435 @@ class CLI:
             "get_product_history",
             "web_search",
         }
+        registry_tools = {
+            self._text_field(item.get("name"))
+            for item in self._super66_registry_tools()
+            if isinstance(item, dict) and self._text_field(item.get("name"))
+        }
+        return base_tools | registry_tools
+
+    def _agent_playbook(self) -> list[dict[str, object]]:
+        return [
+            {
+                "task": "market_overview",
+                "goal": "回答“今天行情/盘面/市场主线/风险偏好”这类宽泛问题，先给事实快照，再给方向判断。",
+                "trigger": "用户没有给具体标的，但在问今天、当前、盘面、市场、风险偏好或主线。",
+                "preferred_chain": [
+                    "get_index_data: 沪深300/上证指数/创业板指",
+                    "get_global_asset_data: 黄金/恒生科技/美元等风险偏好参照",
+                    "web_search: 当天政策、资金面、产业事件",
+                    "server map: 受保护场景映射",
+                    "local LLM: 自然语言综合",
+                ],
+                "artifact_rule": "如果拿到多个指数/资产涨跌幅，优先建议 bar；如果拿到历史序列，优先建议 line。",
+                "resource_rule": "新闻、政策原文、图片、图表页面必须转成 resource_links，不在终端内嵌富文本。",
+                "fallback": "MCP 失败时不要编造行情；保留 web_search 线索并提示 /doctor、/tools 或重新登录。",
+            },
+            {
+                "task": "single_asset_or_product",
+                "goal": "回答具体股票、指数、基金、私募产品或商品的走势、风险和跟踪信号。",
+                "trigger": "用户给出名称、代码、产品简称、管理人或某个资产。",
+                "preferred_chain": [
+                    "search_astocks/search_products: 名称解析",
+                    "get_astock_realtime/get_product_detail/get_product_history/get_global_asset_data",
+                    "web_search: 公告、新闻、公开页面",
+                    "server map",
+                    "local LLM",
+                ],
+                "artifact_rule": "历史净值/价格适合 line；阶段收益、回撤、涨跌幅对比适合 bar。",
+                "resource_rule": "产品页、公告页、新闻页、图片和报告都进入 /links。",
+                "fallback": "无法解析实体时先请用户确认代码、市场或产品ID，不要编造。",
+            },
+            {
+                "task": "macro_event_cross_asset",
+                "goal": "分析利率、汇率、政策、海外事件对多资产或风格的影响。",
+                "trigger": "用户问美元、利率、政策、通胀、海外市场、商品或跨资产传导。",
+                "preferred_chain": [
+                    "get_global_asset_data: 黄金/美元/原油/港股/美股参照",
+                    "get_index_data: 相关股票指数",
+                    "web_search: 最新事件和政策原文",
+                    "server map",
+                    "local LLM",
+                ],
+                "artifact_rule": "跨资产涨跌幅或情景对比适合 bar；事件前后走势适合 line。",
+                "resource_rule": "政策原文和新闻链接必须保留为命名链接。",
+                "fallback": "事件信息不足时降低确定性，并列出需要补充的日期、地区、资产范围。",
+            },
+            {
+                "task": "visualization_or_report_followup",
+                "goal": "把上一轮分析、MCP 快照或用户数据沉淀成图表/报告。",
+                "trigger": "用户说图表、报告、对比、走势、收益、回撤、配置比例，或“把刚才那个做成图”。",
+                "preferred_chain": [
+                    "recent_conversation/previous_mcp_context",
+                    "current mcp_data or user_data",
+                    "artifacts[].data: 本机 LLM 给结构化数值",
+                    "server chart_artifact",
+                    "workspace save + /links",
+                ],
+                "artifact_rule": "只使用已存在或本轮拿到的数值；缺少数值字段就跳过生成并说明需要什么。",
+                "resource_rule": "生成的 HTML/JSON/图片/报告路径都加入 /links，可用 /open 1 打开。",
+                "fallback": "没有可视化数据时先生成文字摘要，并要求用户提供表格、持仓或数值序列。",
+            },
+        ]
+
+    def _mcp_capability_catalog(self, query: str = "") -> dict:
+        registry_tools = self._super66_registry_tools()
+        return {
+            "registry_tools": registry_tools,
+            "registry_source": "Super66MCP.list_registry_tools",
+            "tool_names": [item.get("name") for item in registry_tools if item.get("name")],
+            "tool_result_hints": self._mcp_tool_result_hints(),
+            "mcp_tools": [
+                {
+                    "name": "get_index_data",
+                    "use_when": "A股、指数、市场整体、沪深300、上证指数、创业板等行情问题",
+                    "args": {"index_name": "沪深300", "limit": 60},
+                },
+                {
+                    "name": "get_astock_realtime",
+                    "use_when": "具体 A股代码、价格、涨跌幅、成交额等实时问题",
+                    "args": {"code": "600519", "limit": 1},
+                },
+                {
+                    "name": "search_astocks",
+                    "use_when": "用户给了股票简称但没有代码，先搜索候选代码再取行情",
+                    "args": {"keyword": "股票简称", "limit": 5},
+                },
+                {
+                    "name": "get_global_asset_data",
+                    "use_when": "美股、港股、黄金、原油、美元、汇率、全球风险资产联动",
+                    "args": {"asset_name": "黄金", "limit": 60},
+                },
+                {
+                    "name": "get_future_market_data",
+                    "use_when": "商品期货、股指期货、国债期货、期货合约走势",
+                    "args": {"contract_code": "AU", "limit": 60},
+                },
+                {
+                    "name": "search_products",
+                    "use_when": "公募基金、私募产品、管理人或产品简称检索",
+                    "args": {"keyword": "产品或管理人", "limit": 5},
+                },
+                {
+                    "name": "get_product_detail",
+                    "use_when": "基金或产品详情、规模、策略、管理人、风险画像",
+                    "args": {"product_id": "产品ID"},
+                },
+                {
+                    "name": "get_product_history",
+                    "use_when": "基金或产品净值、回撤、收益序列、历史表现",
+                    "args": {"product_id": "产品ID", "limit": 120},
+                },
+                {
+                    "name": "web_search",
+                    "use_when": "super-66 MCP 不覆盖的新闻、公告、公开网页或最新事件",
+                    "args": {"query": query, "count": 5},
+                },
+            ],
+            "artifact_channel": {
+                "name": "chart_artifact",
+                "transport": "POST /api/artifacts/chart",
+                "use_when": "需要把行情、收益、回撤、配置比例或对比结果呈现为图表",
+                "supported_types": ["line", "bar", "pie", "gauge", "scatter", "radar"],
+                "client_command": "/chart <标题> :: {\"资产A\":1.2,\"资产B\":-0.3}",
+            },
+            "resource_link_channel": {
+                "name": "resource_links",
+                "transport": "terminal OSC-8 hyperlink when supported, otherwise named URL/path text",
+                "use_when": "网页、图片、HTML、PDF、图表预览、报告文件或服务端返回的非文本资源需要在 CLI 中呈现",
+                "supported_types": ["webpage", "image", "html", "pdf", "json", "local_file", "chart_preview"],
+                "client_commands": ["/links", "/links 1", "/open 1", "/links open 1", "/open link 1"],
+                "boundary": "CLI 不内嵌富文本或二进制内容，只显示名称链接；可通过系统 opener 打开。",
+            },
+            "local_web_search": {
+                "name": "local_chrome_web_search",
+                "use_when": "super-66 MCP 不覆盖的新闻、公告、公开网页、政策原文、图片或图表页面入口",
+                "install": "python3 -m pip install playwright && python3 -m playwright install chrome",
+                "result_shape": "web_search:<query> -> {results:[{title,url,source}], total, provider}",
+                "resource_behavior": "results 中的 url/title 会被提取成命名链接；用户可用 /links 1 或 /open 1 打开。",
+                "boundary": "只在客户端本机调用 Chrome/Chromium；不读取浏览器隐私数据，不把模型 API Key 发送给二郎神服务端。",
+            },
+            "selection_policy": [
+                "优先让大模型根据上下文选择工具组合，不用硬编码关键词替代理解",
+                "行情和产品数据优先 super-66 MCP；新闻和公开网页补充 web_search",
+                "需要可视化时让服务端生成 chart artifact，再由客户端展示或保存",
+                "网页、图片、HTML、PDF 等非文本结果必须以命名 resource_links 返回，便于 /links open 1 或 /open link 1 打开",
+            ],
+            "agent_playbook": self._agent_playbook(),
+            "composition_patterns": [
+                {
+                    "name": "name_to_realtime_snapshot",
+                    "when": "用户给股票/基金/产品简称但缺少代码或 product_id",
+                    "tools": ["search_astocks/search_products", "get_astock_realtime/get_product_detail", "web_search(optional)", "server map"],
+                    "read_fields": ["code", "name", "price/latest/close", "change_pct/pct_chg", "amount/volume", "title/url"],
+                    "fallback": "搜索不到实体时先向用户确认标的；不要编造代码或产品ID",
+                    "artifact": "通常不直接画图；若用户要求对比或走势，再请求 chart artifact",
+                },
+                {
+                    "name": "market_snapshot_to_narrative",
+                    "when": "用户问今天行情、盘面、市场主线或风险偏好",
+                    "tools": ["get_index_data", "get_global_asset_data", "web_search", "server map"],
+                    "read_fields": ["index_name/asset_name", "date", "close/latest", "change_pct/pct_chg", "title/source/url"],
+                    "fallback": "指数数据失败时保留 web_search 事件线索，并明确数据通道缺口和 /doctor 修复路径",
+                    "artifact": "可把指数/资产涨跌幅整理为 bar，或把历史序列整理为 line",
+                },
+                {
+                    "name": "product_history_to_risk",
+                    "when": "用户问基金、私募产品、净值、回撤、收益稳定性",
+                    "tools": ["search_products", "get_product_detail", "get_product_history", "server map"],
+                    "read_fields": ["product_id", "name", "nav/date", "return/drawdown", "strategy/manager/scale"],
+                    "fallback": "缺少产品历史时只做框架判断，并要求用户提供产品ID或净值序列",
+                    "artifact": "净值或收益序列适合 line；回撤/阶段收益适合 bar",
+                },
+                {
+                    "name": "analysis_result_to_resource_links",
+                    "when": "MCP、web_search、服务端或大模型返回网页、图片、HTML、PDF、图表预览",
+                    "tools": ["resource_links", "/links", "/open 1"],
+                    "read_fields": ["title/name/label", "url/html_url/image_url/pdf_url/file_url", "source"],
+                    "fallback": "如果终端不支持 OSC-8，退化为“名称: URL/路径”文本",
+                    "artifact": "非文本资源进入 /links；图表 artifact 同时可保存到授权工作区",
+                },
+                {
+                    "name": "mcp_table_to_chart_artifact",
+                    "when": "用户要求图表、报告、走势、对比、收益、回撤或配置比例",
+                    "tools": ["previous_mcp_context/current mcp_data", "artifacts[].data", "server chart_artifact", "/open chart"],
+                    "read_fields": ["label/name/asset/index_name", "value/change_pct/return_pct/close/y", "series/date"],
+                    "fallback": "缺少数值字段时跳过图表生成，并说明需要哪些数值",
+                    "artifact": "客户端调用服务端 chart artifact，保存 JSON/HTML，并把链接加入 /links",
+                },
+            ],
+            "data_recipes": [
+                {
+                    "name": "market_overview",
+                    "use_when": "用户问今天行情、市场怎么样、盘面怎么看但没有给具体标的",
+                    "steps": [
+                        "get_index_data: 沪深300 / 上证指数 / 创业板指",
+                        "get_global_asset_data: 黄金 / 恒生科技 等风险偏好参照",
+                        "web_search: 补充当天政策、资金面、产业新闻线索",
+                        "server map: 获取受保护场景映射后再由本机大模型综合",
+                    ],
+                    "examples": [
+                        "今天行情怎么样？先帮我看盘面主线和风险。",
+                        "A股今天哪些方向值得跟踪？",
+                        "今天市场是风险偏好修复还是防御占优？",
+                    ],
+                },
+                {
+                    "name": "single_asset",
+                    "use_when": "用户问具体股票、指数、商品、基金或产品",
+                    "steps": [
+                        "先用 search_astocks/search_products 解析名称到代码或产品ID",
+                        "再用 get_astock_realtime/get_product_detail/get_product_history 拉取事实数据",
+                        "必要时用 web_search 补公告或新闻",
+                    ],
+                    "examples": [
+                        "帮我看一下贵州茅台今天怎么走。",
+                        "黄金最近的趋势和风险信号是什么？",
+                        "这个基金近期回撤为什么扩大？",
+                    ],
+                },
+                {
+                    "name": "macro_event",
+                    "use_when": "用户问利率、汇率、政策、海外市场或宏观事件影响",
+                    "steps": [
+                        "get_global_asset_data: 美元指数 / 黄金 / 原油 / 港股或美股风险资产",
+                        "web_search: 查找最新公开事件线索",
+                        "server map: 映射到服务端受保护宏观/市场场景",
+                    ],
+                    "examples": [
+                        "如果美元指数继续走强，对港股和黄金有什么影响？",
+                        "利率下行时，红利和成长谁更占优？",
+                        "最新政策信号对风险资产意味着什么？",
+                    ],
+                },
+                {
+                    "name": "visualization_followup",
+                    "use_when": "用户说做成图表、报告、对比收益、回撤、走势或配置比例",
+                    "steps": [
+                        "复用 recent_conversation 与上一轮 mcp_data 语境",
+                        "在 artifacts 中返回 chart 请求，data 使用可读资产名到数值的映射",
+                        "客户端会调用服务端 chart artifact 并保存到授权工作区",
+                    ],
+                    "examples": [
+                        "把刚才的资产表现做成图表。",
+                        "把这几个方向的涨跌幅做个对比。",
+                        "生成一份带图表的简短报告。",
+                    ],
+                },
+            ],
+            "route_plans": [
+                {
+                    "name": "market_overview_to_analysis",
+                    "trigger": "宽泛行情、盘面、今天市场、风险偏好方向判断",
+                    "sequence": [
+                        "本机 LLM 改写 query，补全市场范围和真实任务",
+                        "super-66 MCP: get_index_data 读取沪深300/上证/创业板等主指数",
+                        "super-66 MCP: get_global_asset_data 读取黄金/恒生科技等风险偏好参照",
+                        "web_search: 补当天政策、资金面、产业新闻线索",
+                        "server map: 使用 rewritten_query 做受保护场景映射",
+                        "local LLM: 综合 mcp_data + server map，输出自然分析和追问",
+                    ],
+                    "output": "自然语言市场判断；必要时建议 chart/report follow-up",
+                },
+                {
+                    "name": "named_asset_to_fact_check",
+                    "trigger": "用户给出股票、基金、产品、商品或指数名称，需要先核实实体和事实数据",
+                    "sequence": [
+                        "本机 LLM 判断实体类型和是否需要 disambiguation",
+                        "名称不完整时先 search_astocks/search_products",
+                        "再调用 get_astock_realtime/get_product_detail/get_product_history 或 global/future 数据",
+                        "web_search 补公告、新闻或未覆盖公开信息",
+                        "server map: 用改写后的完整问题映射场景",
+                    ],
+                    "output": "事实快照 + 风险解释 + 可执行跟踪信号",
+                },
+                {
+                    "name": "analysis_to_chart_artifact",
+                    "trigger": "用户要求图表、报告、对比、走势、收益、回撤或配置比例",
+                    "sequence": [
+                        "复用 recent_conversation、上一轮 mcp_data 和当前 query",
+                        "本机 LLM 选择可视化字段并在 artifacts 返回 chart 请求",
+                        "client 调用服务端 chart artifact 通道",
+                        "授权工作区后保存 JSON/HTML 到 .erlangshen/artifacts",
+                        "终端返回轻量预览，并提示 /open 和 /artifacts",
+                    ],
+                    "output": "服务端生成的 chart artifact + 本地报告/HTML 路径",
+                },
+            ],
+        }
+
+    def _super66_registry_tools(self) -> list[dict[str, str]]:
+        try:
+            from src.mcp.super66 import Super66MCP
+
+            tools = Super66MCP().list_registry_tools()
+        except Exception:
+            tools = []
+        normalized = []
+        for item in tools:
+            if not isinstance(item, dict):
+                continue
+            name = self._text_field(item.get("name"))
+            description = self._text_field(item.get("description"))
+            if name:
+                normalized.append({"name": name, "description": description})
+        if normalized:
+            return normalized
+        return [
+            {"name": "search_astocks", "description": "搜索 A股标的"},
+            {"name": "get_astock_realtime", "description": "获取 A股实时/最新行情"},
+            {"name": "get_astock_history", "description": "获取 A股历史行情"},
+            {"name": "get_index_data", "description": "获取国内指数历史数据"},
+            {"name": "get_global_asset_data", "description": "获取全球资产历史数据"},
+            {"name": "get_future_market_data", "description": "获取期货行情"},
+            {"name": "search_products", "description": "搜索 ETF、公募、私募等产品"},
+            {"name": "get_product_detail", "description": "获取产品详情"},
+            {"name": "get_product_history", "description": "获取产品历史净值或行情"},
+        ]
+
+    def _mcp_tool_result_hints(self) -> dict[str, dict[str, object]]:
+        return {
+            "get_index_data": {
+                "result_shape": "指数历史或最近行情序列",
+                "use_fields": ["index_name", "date", "close", "change_pct", "volume", "amount"],
+                "chart_fit": "line 用于走势，bar 用于当日/近期涨跌幅对比",
+            },
+            "get_astock_realtime": {
+                "result_shape": "单只 A 股实时或最近行情快照",
+                "use_fields": ["code", "name", "price", "change_pct", "volume", "amount"],
+                "chart_fit": "bar 用于多标的涨跌幅/成交额对比",
+            },
+            "get_astock_history": {
+                "result_shape": "单只 A 股历史行情序列",
+                "use_fields": ["date", "open", "high", "low", "close", "change_pct", "volume"],
+                "chart_fit": "line 用于价格或涨跌幅走势",
+            },
+            "get_global_asset_data": {
+                "result_shape": "黄金、美元、港美股、原油等全球资产历史序列",
+                "use_fields": ["asset_name", "date", "close", "change_pct"],
+                "chart_fit": "line 用于趋势，bar 用于多资产涨跌幅对比",
+            },
+            "get_product_history": {
+                "result_shape": "基金/产品净值、收益、回撤或历史表现序列",
+                "use_fields": ["date", "nav", "return_pct", "drawdown", "close"],
+                "chart_fit": "line 用于净值/回撤走势，bar 用于收益对比",
+            },
+            "web_search": {
+                "result_shape": "公开网页、新闻、公告、标题、摘要和 URL",
+                "use_fields": ["title", "url", "source", "snippet", "published_at"],
+                "chart_fit": "不直接画图；保留 resource_links，并用作事件解释线索",
+            },
+        }
 
     async def _collect_client_mcp_data(self, query: str, payload: dict, intent_plan: dict) -> dict:
         provided = payload.get("mcp_data")
         if isinstance(provided, dict) and provided:
             return provided
         tools = intent_plan.get("mcp_tools") if isinstance(intent_plan, dict) else []
-        if self._is_vague_market_query(query) and not tools:
-            tools = self._default_market_overview_tools()
-            intent_plan = {**intent_plan, "needs_mcp": True, "mcp_tools": tools}
+        tools = self._dedupe_mcp_tools(tools) if isinstance(tools, list) else []
+        if isinstance(intent_plan, dict) and tools:
+            intent_plan["mcp_tools"] = tools
+            intent_plan.setdefault("tool_selection_source", intent_plan.get("route_source") or "local_llm")
+            intent_plan.setdefault("tool_selection_note", "MCP 工具来自本轮意图计划。")
+        if isinstance(intent_plan, dict) and not tools:
+            tools = self._default_tools_for_intent(intent_plan.get("intent") or "", query)
+            if tools:
+                intent_plan["needs_mcp"] = True
+                intent_plan["mcp_tools"] = tools
+                intent_plan["tool_selection_source"] = "client_default_by_intent"
+                intent_plan["tool_selection_note"] = "传入的意图计划没有具体工具，客户端按 intent/data_recipes 补齐默认 MCP 工具。"
+        if self._is_vague_market_query(query):
+            if not tools:
+                tools = self._default_market_overview_tools()
+                if isinstance(intent_plan, dict):
+                    intent_plan["tool_selection_source"] = "client_market_overview_fallback"
+                    intent_plan["tool_selection_note"] = "宽泛行情/盘面问题没有工具计划，客户端补齐指数、全球资产和 web_search 默认组合。"
+            if isinstance(intent_plan, dict):
+                intent_plan["needs_mcp"] = True
+                intent_plan["mcp_tools"] = tools
+        if self._should_reuse_previous_mcp_data(query, intent_plan):
+            reused = dict(self._last_mcp_data or {})
+            reused.setdefault("note", "复用上一轮 MCP 数据用于承接式图表/报告/追问；仅保存在本次 CLI 进程内。")
+            if isinstance(intent_plan, dict) and not intent_plan.get("mcp_tools"):
+                intent_plan["mcp_tools"] = self._infer_tools_from_mcp_keys(reused)
+                intent_plan["needs_mcp"] = bool(intent_plan["mcp_tools"])
+            if isinstance(intent_plan, dict):
+                intent_plan["tool_selection_source"] = "previous_mcp_context"
+                intent_plan["tool_selection_note"] = "承接式追问复用上一轮 MCP 数据；仅保存在当前 CLI 进程内。"
+            return reused
         if not intent_plan.get("needs_mcp") or not tools:
             return {}
-        self._show_progress("正在读取 super-66 MCP 市场数据")
-        try:
-            from src.mcp.super66 import Super66MCP
+        self._show_progress("正在读取 super-66 MCP / 本地网页线索")
+        collected = {}
+        mcp = None
+        mcp_init_error = ""
+        if any(isinstance(item, dict) and item.get("name") != "web_search" for item in tools):
+            try:
+                from src.mcp.super66 import Super66MCP
 
-            mcp = Super66MCP()
-            collected = {}
-            for item in tools[:3]:
-                name = item.get("name")
-                arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
-                if name not in self._allowed_super66_tools():
-                    continue
-                key = self._mcp_result_key(name, arguments, len(collected))
+                mcp = Super66MCP()
+            except Exception as exc:
+                mcp_init_error = self._sanitize_api_key_error(exc, "")
+                collected["super66_error"] = mcp_init_error
+        for item in self._dedupe_mcp_tools(tools)[:6]:
+            name = item.get("name")
+            arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+            if name not in self._allowed_super66_tools():
+                continue
+            key = self._mcp_result_key(name, arguments, len(collected))
+            self._show_progress(f"正在读取数据工具: {self._mcp_tool_label(name, arguments)}")
+            try:
                 if name == "web_search":
                     collected[key] = await self._run_local_chrome_search(arguments.get("query") or query, arguments)
+                elif mcp is None:
+                    collected[f"{key}:error"] = mcp_init_error or "super-66 MCP 未初始化"
                 else:
                     collected[key] = await mcp.call_tool(name, arguments, use_cache=True)
-            return collected
-        except Exception as exc:
-            return {
-                "super66_error": self._sanitize_api_key_error(exc, ""),
-                "note": "super-66 MCP 数据暂不可用，本次仅使用用户问题和服务端场景映射。",
-            }
+            except Exception as exc:
+                collected[f"{key}:error"] = self._sanitize_api_key_error(exc, "")
+        if not collected:
+            collected["note"] = "super-66 MCP / 本地网页线索暂不可用，本次仅使用用户问题和服务端场景映射。"
+        return collected
 
     def _is_vague_market_query(self, query: str) -> bool:
         text = re.sub(r"\s+", "", (query or "").lower())
@@ -1072,11 +5137,546 @@ class CLI:
         return any(word in text for word in market_words) and any(form in text for form in vague_forms)
 
     def _default_market_overview_tools(self) -> list[dict]:
+        search_query = self._today_market_search_query()
         return [
-            {"name": "get_index_data", "arguments": {"index_name": "沪深300", "limit": 60}},
-            {"name": "get_index_data", "arguments": {"index_name": "上证指数", "limit": 60}},
+            {"name": "get_index_data", "arguments": {"index_name": "沪深300", "limit": 120}},
+            {"name": "get_index_data", "arguments": {"index_name": "上证指数", "limit": 120}},
+            {"name": "get_index_data", "arguments": {"index_name": "创业板指", "limit": 120}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": "恒生科技", "limit": 60}},
             {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", "limit": 60}},
+            {"name": "web_search", "arguments": {"query": search_query, "count": 5}},
         ]
+
+    def _today_market_search_query(self) -> str:
+        today = datetime.now().strftime("%Y-%m-%d")
+        return f"{today} 今日市场行情 重要新闻 政策 资金面"
+
+    def _default_tools_for_intent(self, intent: str, query: str = "") -> list[dict]:
+        normalized = self._text_field(intent).lower()
+        if normalized in {"market_overview", "data_lookup"}:
+            return self._default_market_overview_tools()
+        if normalized == "macro":
+            return [
+                {"name": "get_global_asset_data", "arguments": {"asset_name": "美元指数", "limit": 60}},
+                {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", "limit": 60}},
+                {"name": "web_search", "arguments": {"query": query or "最新宏观政策 市场影响", "count": 5}},
+            ]
+        return []
+
+    def _should_reuse_previous_mcp_data(self, query: str, intent_plan: dict) -> bool:
+        if not isinstance(self._last_mcp_data, dict) or not self._last_mcp_data:
+            return False
+        if not isinstance(intent_plan, dict):
+            intent_plan = {}
+        tools = intent_plan.get("mcp_tools") if isinstance(intent_plan.get("mcp_tools"), list) else []
+        if tools:
+            return False
+        artifact_plan = intent_plan.get("artifact_plan") if isinstance(intent_plan.get("artifact_plan"), dict) else {}
+        if self._text_field(artifact_plan.get("type")).lower() in {"chart", "report"}:
+            return True
+        if intent_plan.get("chart_opportunity") or intent_plan.get("is_followup"):
+            return True
+        text = re.sub(r"\s+", "", (query or "").lower())
+        followup_markers = ("刚才", "上面", "这个", "它", "继续", "做成图表", "画图", "报告", "对比")
+        return any(marker in text for marker in followup_markers)
+
+    def _infer_tools_from_mcp_keys(self, mcp_data: dict) -> list[dict]:
+        tools = []
+        for key in sorted(str(item) for item in mcp_data.keys()):
+            if ":" not in key or key == "note" or "error" in key.lower():
+                continue
+            name, label = key.split(":", 1)
+            if name not in self._allowed_super66_tools():
+                continue
+            tools.append({
+                "name": name,
+                "arguments": self._arguments_from_mcp_key(name, label),
+            })
+        return self._dedupe_mcp_tools(tools)[:6]
+
+    def _arguments_from_mcp_key(self, name: str, label: str) -> dict:
+        label = self._text_field(label)
+        if name == "get_index_data":
+            return {"index_name": label}
+        if name == "get_global_asset_data":
+            return {"asset_name": label}
+        if name == "web_search":
+            return {"query": label}
+        if name == "get_astock_realtime":
+            return {"code": label}
+        if name in {"search_astocks", "search_products"}:
+            return {"keyword": label}
+        if name in {"get_product_detail", "get_product_history"}:
+            return {"product_id": label}
+        if name == "get_future_market_data":
+            return {"contract_code": label}
+        return {"label": label}
+
+    def _extract_mcp_tool_specs(self, plan: dict) -> list[dict]:
+        if not isinstance(plan, dict):
+            return []
+        candidates = []
+        for key in ("mcp_tools", "tools", "tool_calls", "data_tools"):
+            value = plan.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        candidates.extend(self._expand_mcp_tool_string_items(item))
+                    else:
+                        candidates.append(item)
+            elif isinstance(value, dict):
+                candidates.extend(self._expand_mcp_tool_mapping(value))
+            elif isinstance(value, str):
+                candidates.extend(self._expand_mcp_tool_string_items(value))
+        return self._dedupe_mcp_tools(candidates)
+
+    def _expand_mcp_tool_string_items(self, value: str) -> list[str]:
+        text = value.strip() if isinstance(value, str) else self._text_field(value)
+        if not text:
+            return []
+        tool_names = sorted(self._allowed_super66_tools(), key=len, reverse=True)
+        tool_pattern = "|".join(re.escape(name) for name in tool_names)
+        parts = [
+            item.strip()
+            for item in re.split(rf"\n+|[;；]+(?=\s*(?:{tool_pattern})\b)", text)
+            if item.strip()
+        ]
+        expanded = []
+        for part in parts or [text]:
+            expanded.extend(self._split_mcp_tool_string_by_tool_names(self._clean_mcp_tool_string(part), tool_names))
+        return expanded
+
+    def _split_mcp_tool_string_by_tool_names(self, value: str, tool_names: list[str] | None = None) -> list[str]:
+        text = self._clean_mcp_tool_string(value)
+        if not text:
+            return []
+        tool_names = tool_names or sorted(self._allowed_super66_tools(), key=len, reverse=True)
+        tool_pattern = "|".join(re.escape(name) for name in tool_names)
+        matches = list(re.finditer(rf"\b(?:{tool_pattern})\b(?=\s*(?::|/|\(|\s|$))", text))
+        starts = []
+        for match in matches:
+            prefix = text[: match.start()]
+            if match.start() == 0 or prefix.endswith((" ", "\t", "\r", "\n", ";", "；")):
+                starts.append(match.start())
+        if len(starts) <= 1:
+            return [text]
+        chunks = []
+        for index, start in enumerate(starts):
+            end = starts[index + 1] if index + 1 < len(starts) else len(text)
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+        return chunks or [text]
+
+    def _clean_mcp_tool_string(self, value: str) -> str:
+        text = self._text_field(value)
+        if not text:
+            return ""
+        text = text.strip().strip("`")
+        text = re.sub(r"^(?:[-*+•]\s+|\d+[.)、]\s+)", "", text)
+        text = re.sub(r"^\[(?: |x|X)\]\s+", "", text)
+        text = text.strip().strip("`")
+        if text.lower().startswith("tool:"):
+            text = text[5:].strip()
+        return text
+
+    def _expand_mcp_tool_mapping(self, value: dict) -> list[dict]:
+        if not isinstance(value, dict):
+            return []
+        if self._looks_like_single_tool_item(value):
+            return [value]
+        expanded = []
+        allowed = self._allowed_super66_tools()
+        for key, raw_args in value.items():
+            name = self._text_field(key)
+            if name not in allowed:
+                continue
+            if isinstance(raw_args, dict):
+                if any(alias in raw_args for alias in ("arguments", "args", "parameters", "input", "params")):
+                    expanded.append({"name": name, **raw_args})
+                else:
+                    expanded.append({"name": name, "arguments": raw_args})
+            elif isinstance(raw_args, str):
+                expanded.append({"name": name, "arguments": raw_args})
+            elif raw_args is True:
+                expanded.append({"name": name, "arguments": {}})
+        return expanded or [value]
+
+    def _looks_like_single_tool_item(self, value: dict) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if any(key in value for key in ("name", "tool", "tool_name", "arguments", "args", "parameters", "input", "params")):
+            return True
+        return isinstance(value.get("function"), dict)
+
+    def _normalize_mcp_tool_item(self, item) -> dict | None:
+        if isinstance(item, str):
+            return self._normalize_mcp_tool_string(item)
+        if not isinstance(item, dict):
+            return None
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        name = (
+            self._text_field(item.get("name"))
+            or self._text_field(item.get("tool"))
+            or self._text_field(item.get("tool_name"))
+            or self._text_field(function.get("name"))
+        )
+        if name not in self._allowed_super66_tools():
+            return None
+        raw_args = (
+            item.get("arguments")
+            if "arguments" in item
+            else item.get("args")
+            if "args" in item
+            else item.get("parameters")
+            if "parameters" in item
+            else item.get("input")
+            if "input" in item
+            else item.get("params")
+            if "params" in item
+            else function.get("arguments")
+        )
+        arguments = self._coerce_mcp_arguments(raw_args)
+        if not arguments:
+            arguments = {
+                key: value
+                for key, value in item.items()
+                if key not in {"name", "tool", "tool_name", "function", "type", "id", "reason", "rationale"}
+                and isinstance(key, str)
+                and self._is_safe_mcp_argument_value(value)
+            }
+        return {"name": name, "arguments": arguments}
+
+    def _normalize_mcp_tool_string(self, item: str) -> dict | None:
+        text = self._clean_mcp_tool_string(item)
+        if not text:
+            return None
+        allowed = self._allowed_super66_tools()
+        if text in allowed:
+            return {"name": text, "arguments": {}}
+        match = re.match(r"^([A-Za-z_][\w]*)\s*(?::|/|\s+|\()\s*(.+?)\)?$", text)
+        if not match:
+            return None
+        name, label = match.groups()
+        if name not in allowed:
+            return None
+        label = label.strip()
+        parsed_args = self._coerce_mcp_arguments(label)
+        arguments = parsed_args if parsed_args else self._arguments_from_mcp_key(name, label)
+        return {"name": name, "arguments": arguments}
+
+    def _coerce_mcp_arguments(self, value) -> dict:
+        if isinstance(value, dict):
+            return {
+                str(key): item
+                for key, item in value.items()
+                if self._is_safe_mcp_argument_value(item)
+            }
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return {}
+            return self._coerce_mcp_arguments(parsed)
+        return {}
+
+    def _is_safe_mcp_argument_value(self, value) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, (bool, int, float, str)):
+            return True
+        if isinstance(value, list):
+            return all(self._is_safe_mcp_argument_value(item) for item in value[:20])
+        if isinstance(value, dict):
+            return all(isinstance(key, str) and self._is_safe_mcp_argument_value(item) for key, item in value.items())
+        return False
+
+    def _dedupe_mcp_tools(self, tools: list[dict]) -> list[dict]:
+        seen = set()
+        result = []
+        for item in tools or []:
+            normalized = self._normalize_mcp_tool_item(item)
+            if not normalized:
+                continue
+            name = normalized.get("name")
+            arguments = normalized.get("arguments") if isinstance(normalized.get("arguments"), dict) else {}
+            signature = (name, json.dumps(arguments, ensure_ascii=False, sort_keys=True))
+            if name and signature not in seen:
+                seen.add(signature)
+                result.append({"name": name, "arguments": arguments})
+        return result
+
+    def _mcp_data_brief(self, mcp_data) -> dict:
+        if not isinstance(mcp_data, dict) or not mcp_data:
+            return {
+                "status": "empty",
+                "instruction": "没有 MCP 数据时不要伪造实时行情；可以要求用户补充市场范围。",
+            }
+        keys = sorted(str(key) for key in mcp_data.keys())
+        error_keys = [key for key in keys if "error" in key.lower()]
+        usable_keys = [key for key in keys if key not in error_keys and key != "note"]
+        return {
+            "status": "partial" if error_keys else "available",
+            "usable_sources": usable_keys,
+            "snapshots": self._mcp_snapshot_lines(mcp_data),
+            "warnings": error_keys,
+            "instruction": "可用数据源必须进入综合判断；字段不标准时先概括数据源和方向，避免声称没有实时数据。",
+        }
+
+    def _mcp_snapshot_lines(self, mcp_data, limit: int = 6) -> list[str]:
+        if not isinstance(mcp_data, dict) or not mcp_data:
+            return []
+        lines = []
+        for key in sorted(mcp_data.keys(), key=str):
+            if len(lines) >= limit:
+                break
+            key_text = str(key)
+            if key_text == "note":
+                continue
+            value = mcp_data.get(key)
+            if self._mcp_value_has_error(value) or "error" in key_text.lower():
+                continue
+            highlights = self._extract_mcp_highlights(value)
+            if highlights:
+                lines.append(f"{key_text}: " + "，".join(highlights[:5]))
+            else:
+                lines.append(f"{key_text}: 已返回数据")
+        return lines
+
+    def _resource_links_from_value(self, value, fallback_label: str = "资源", limit: int = 8) -> list[str]:
+        if isinstance(value, str):
+            return self._resource_links_from_text(value, fallback_label, limit=limit)
+        if not isinstance(value, (dict, list)):
+            return []
+        links: list[str] = []
+        seen: set[str] = set()
+
+        def add_link(label: str, target) -> None:
+            target_text = self._text_field(target)
+            if (
+                not target_text
+                or target_text in seen
+                or not self._looks_like_resource_target(target_text)
+                or len(links) >= limit
+            ):
+                return
+            seen.add(target_text)
+            links.append(self._resource_link(label, target_text))
+
+        def visit(value, fallback_label: str) -> None:
+            if len(links) >= limit:
+                return
+            if isinstance(value, dict):
+                label = self._text_field(
+                    value.get("title")
+                    or value.get("name")
+                    or value.get("alt")
+                    or value.get("label")
+                    or value.get("description")
+                    or fallback_label
+                )
+                for key in ("url", "link", "href", "web_url", "source_url", "html_url", "file_url", "download_url", "pdf_url"):
+                    add_link(label, value.get(key))
+                for key in ("image_url", "image", "thumbnail", "thumbnail_url", "preview_url", "png_url", "jpg_url", "jpeg_url", "svg_url"):
+                    add_link(f"{label} 图片", value.get(key))
+                for child_key, child_value in value.items():
+                    if str(child_key).lower() in {"token", "key", "secret", "password", "authorization", "api_key"}:
+                        continue
+                    visit(child_value, label or fallback_label)
+                    if len(links) >= limit:
+                        return
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item, fallback_label)
+                    if len(links) >= limit:
+                        return
+            elif isinstance(value, str):
+                for link in self._resource_links_from_text(value, fallback_label, limit=limit - len(links)):
+                    _, target = self._split_named_link(link)
+                    if target in seen:
+                        continue
+                    seen.add(target)
+                    links.append(link)
+                    if len(links) >= limit:
+                        return
+
+        visit(value, fallback_label)
+        return links[:limit]
+
+    def _resource_links_from_text(self, value: str, fallback_label: str = "资源", limit: int = 8) -> list[str]:
+        text = value.strip() if isinstance(value, str) else self._text_field(value)
+        if not text:
+            return []
+        links: list[str] = []
+        seen: set[str] = set()
+
+        def add(label: str, target: str) -> None:
+            target_text = self._clean_resource_target(target)
+            if not target_text or target_text in seen or len(links) >= limit:
+                return
+            if not self._looks_like_resource_target(target_text):
+                return
+            seen.add(target_text)
+            links.append(self._resource_link(self._clean_resource_label(label) or fallback_label, target_text))
+
+        for alt, target in re.findall(r"!\[([^\]]*)\]\(([^)\s]+(?:\s+\"[^\"]*\")?)\)", text):
+            add(f"{alt or fallback_label} 图片", target)
+        for label, target in re.findall(r"(?<!!)\[([^\]]+)\]\(([^)\s]+(?:\s+\"[^\"]*\")?)\)", text):
+            add(label, target)
+        for tag in re.findall(r"<img\b[^>]*>", text, flags=re.I):
+            src = self._html_attr(tag, "src")
+            label = self._html_attr(tag, "alt") or self._html_attr(tag, "title") or f"{fallback_label} 图片"
+            add(label, src)
+        for attrs, body in re.findall(r"<a\b([^>]*)>(.*?)</a>", text, flags=re.I | re.S):
+            href = self._html_attr(attrs, "href")
+            label = re.sub(r"<[^>]+>", "", body).strip() or self._html_attr(attrs, "title") or fallback_label
+            add(label, href)
+        for label, target in re.findall(r"([^\n\r。；;<>]{1,48}?)[：:]\s*((?:https?|file)://[^\s<>)\]\x1b\"']+)", text, flags=re.I):
+            add(label, target)
+        for target in re.findall(r"(?:https?|file)://[^\s<>)\]\x1b\"']+", text, flags=re.I):
+            add(fallback_label, target)
+        for target in re.findall(r"(?<![:/])/[^\s<>)\]\x1b\"']+\.(?:html?|pdf|png|jpe?g|gif|svg|json|md)\b", text, flags=re.I):
+            add(fallback_label, target)
+        return links[:limit]
+
+    def _html_attr(self, text: str, name: str) -> str:
+        match = re.search(rf"\b{re.escape(name)}\s*=\s*([\"'])(.*?)\1", text or "", flags=re.I | re.S)
+        return self._text_field(match.group(2)) if match else ""
+
+    def _clean_resource_target(self, target: str) -> str:
+        text = self._text_field(target)
+        if " " in text and not text.startswith("/"):
+            text = text.split(" ", 1)[0]
+        return text.strip("()[]<>\"'.,;，。；")
+
+    def _clean_resource_label(self, label: str) -> str:
+        text = re.sub(r"<[^>]+>", "", label or "")
+        return self._text_field(text).strip(":-—()[]")
+
+    def _mcp_resource_links(self, mcp_data, limit: int = 8) -> list[str]:
+        if not isinstance(mcp_data, dict) or not mcp_data:
+            return []
+        links: list[str] = []
+        seen: set[str] = set()
+        for key, value in mcp_data.items():
+            if "error" in str(key).lower():
+                continue
+            for link in self._resource_links_from_value(value, str(key), limit=limit):
+                target = link.rsplit(": ", 1)[-1] if ": " in link else link
+                if target in seen:
+                    continue
+                seen.add(target)
+                links.append(link)
+                if len(links) >= limit:
+                    return links
+            if len(links) >= limit:
+                break
+        return links
+
+    def _mcp_value_has_error(self, value) -> bool:
+        if isinstance(value, dict):
+            return any(str(key).lower() in {"error", "auth"} for key in value.keys())
+        return False
+
+    def _extract_mcp_highlights(self, value) -> list[str]:
+        web_highlights = self._extract_web_search_highlights(value)
+        if web_highlights:
+            return web_highlights
+        row = self._find_mcp_market_row(value)
+        if not isinstance(row, dict):
+            return []
+        field_groups = [
+            ("名称", ("name", "index_name", "asset_name", "symbol", "code", "名称", "简称", "代码")),
+            ("日期", ("date", "trade_date", "datetime", "time", "日期", "交易日期", "时间")),
+            ("最新", ("price", "latest", "last", "close", "收盘", "收盘价", "最新价", "现价")),
+            ("涨跌幅", ("change_pct", "pct_chg", "percent", "changePercent", "涨跌幅", "涨幅")),
+            ("涨跌", ("change", "change_amount", "涨跌", "涨跌额")),
+            ("成交额", ("amount", "turnover", "成交额")),
+            ("成交量", ("volume", "vol", "成交量")),
+        ]
+        used_keys = set()
+        highlights = []
+        for label, aliases in field_groups:
+            for alias in aliases:
+                if alias in row and self._is_safe_mcp_scalar(alias, row.get(alias)):
+                    highlights.append(f"{label} {self._format_mcp_scalar(row.get(alias))}")
+                    used_keys.add(alias)
+                    break
+        if highlights:
+            return highlights
+        for key, item in row.items():
+            if key in used_keys or not self._is_safe_mcp_scalar(key, item):
+                continue
+            highlights.append(f"{key} {self._format_mcp_scalar(item)}")
+            if len(highlights) >= 4:
+                break
+        return highlights
+
+    def _extract_web_search_highlights(self, value) -> list[str]:
+        if not isinstance(value, dict):
+            return []
+        results = value.get("results")
+        if not isinstance(results, list):
+            return []
+        highlights = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            title = self._text_field(item.get("title") or item.get("name"))
+            if not title:
+                continue
+            source = self._text_field(item.get("source") or item.get("site"))
+            if not source:
+                parsed = urlparse(self._text_field(item.get("url")))
+                source = parsed.netloc.replace("www.", "") if parsed.netloc else ""
+            title = title[:60]
+            suffix = f" ({source[:32]})" if source else ""
+            url = self._text_field(item.get("url"))
+            link = f" {url}" if re.match(r"^https?://", url, flags=re.I) else ""
+            highlights.append(f"网页线索 {title}{suffix}{link}")
+            if len(highlights) >= 3:
+                break
+        return highlights
+
+    def _find_mcp_market_row(self, value):
+        if isinstance(value, list):
+            rows = [item for item in value if isinstance(item, dict)]
+            return rows[-1] if rows else None
+        if not isinstance(value, dict):
+            return None
+        for key in ("data", "result", "records", "items", "rows", "list", "values", "history", "prices"):
+            nested = value.get(key)
+            if isinstance(nested, list):
+                rows = [item for item in nested if isinstance(item, dict)]
+                if rows:
+                    return rows[-1]
+            if isinstance(nested, dict):
+                found = self._find_mcp_market_row(nested)
+                if found:
+                    return found
+        primitive_count = sum(1 for item in value.values() if isinstance(item, (str, int, float, bool)) or item is None)
+        return value if primitive_count else None
+
+    def _is_safe_mcp_scalar(self, key, value) -> bool:
+        key_text = str(key).lower()
+        if any(word in key_text for word in ("token", "key", "secret", "password", "authorization")):
+            return False
+        if value is None or isinstance(value, bool):
+            return False
+        if isinstance(value, (int, float)):
+            return True
+        if isinstance(value, str):
+            text = value.strip()
+            return bool(text) and len(text) <= 80
+        return False
+
+    def _format_mcp_scalar(self, value) -> str:
+        if isinstance(value, float):
+            return f"{value:.4g}"
+        return str(value).strip()
 
     def _mcp_result_key(self, name: str, arguments: dict, index: int) -> str:
         label = (
@@ -1090,6 +5690,19 @@ class CLI:
         )
         label = re.sub(r"\s+", "", str(label))[:24]
         return f"{name}:{label}"
+
+    def _mcp_tool_label(self, name: str, arguments: dict) -> str:
+        label = (
+            arguments.get("index_name")
+            or arguments.get("asset_name")
+            or arguments.get("code")
+            or arguments.get("keyword")
+            or arguments.get("contract_code")
+            or arguments.get("product_id")
+            or arguments.get("query")
+            or "default"
+        )
+        return f"{name} / {str(label).strip()[:32]}"
 
     async def _run_local_chrome_search(self, query: str, arguments: dict) -> dict:
         try:
@@ -1105,23 +5718,178 @@ class CLI:
 
     def _parse_client_llm_advice(self, raw_text: str) -> dict:
         text = (raw_text or "").strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
-        try:
-            data = json.loads(text)
-            return data if isinstance(data, dict) else {"view": text}
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                try:
-                    data = json.loads(text[start:end + 1])
-                    return data if isinstance(data, dict) else {"view": text}
-                except json.JSONDecodeError:
-                    pass
+        data = self._parse_json_object(
+            text,
+            preferred_keys={"view", "suggestions", "risk_controls", "missing_data", "artifacts"},
+        )
+        if data:
+            return data
         return {"view": text, "suggestions": [], "risk_controls": [], "missing_data": []}
+
+    async def _materialize_synthesis_artifacts(self, synthesis: dict, client, query: str) -> list[dict]:
+        requests = self._extract_synthesis_artifact_requests(synthesis, query)
+        results = []
+        for request in requests[:5]:
+            title = self._text_field(request.get("title")) or f"{query} 图表"
+            data = request.get("data") if isinstance(request.get("data"), dict) else {}
+            if not data:
+                results.append({"title": title, "status": "skipped", "reason": "缺少图表数据"})
+                continue
+            chart_type = self._text_field(request.get("chart_type")) or "bar"
+            try:
+                self._show_progress(f"正在生成图表 artifact: {title}")
+                response = await client.chart_artifact(
+                    chart_type=chart_type,
+                    title=title,
+                    data=data,
+                    metadata={"workspace": workspace_status().get("path"), "source": "llm_synthesis"},
+                )
+                artifact = self._chart_artifact_from_response(response)
+                if not isinstance(artifact, dict):
+                    results.append({"title": title, "status": "returned", "artifact": artifact})
+                    continue
+                saved = self._save_chart_artifact(artifact, title)
+                resource_links = self._resource_links_from_value(artifact, title)
+                results.append({
+                    "title": artifact.get("title") or title,
+                    "type": artifact.get("type") or chart_type,
+                    "status": "success",
+                    "data_keys": list((artifact.get("data") or data).keys()),
+                    "preview": self._chart_terminal_preview(artifact.get("data") or data),
+                    "saved": saved,
+                    "resource_links": resource_links,
+                })
+            except Exception as exc:
+                results.append({
+                    "title": title,
+                    "status": "failed",
+                    "error": self._sanitize_api_key_error(exc, ""),
+                })
+        return results
+
+    def _extract_synthesis_artifact_requests(self, synthesis: dict, query: str) -> list[dict]:
+        if not isinstance(synthesis, dict):
+            return []
+        candidates = []
+        for key in ("artifacts", "charts", "visualizations", "chart_requests", "artifact_requests"):
+            value = synthesis.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+            elif isinstance(value, dict):
+                candidates.append(value)
+        requests = []
+        for item in candidates:
+            normalized = self._normalize_chart_artifact_request(item, query)
+            if normalized:
+                requests.append(normalized)
+        return requests
+
+    def _normalize_chart_artifact_request(self, item, query: str) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        request_type = self._text_field(item.get("type") or item.get("artifact_type") or item.get("kind")).lower()
+        chart_type = self._text_field(item.get("chart_type") or item.get("chart") or item.get("mark") or item.get("visualization_type")).lower()
+        known_chart_types = {"line", "bar", "pie", "gauge", "scatter", "radar"}
+        if request_type in known_chart_types and not chart_type:
+            chart_type = request_type
+            request_type = "chart"
+        if request_type and request_type not in {"chart", "chart_artifact", "visualization", "plot"}:
+            return None
+        if chart_type and chart_type not in known_chart_types:
+            chart_type = "bar"
+        title = (
+            self._text_field(item.get("title"))
+            or self._text_field(item.get("name"))
+            or self._text_field(item.get("label"))
+            or f"{query} 图表"
+        )
+        data = self._coerce_chart_artifact_data(
+            item.get("data")
+            if "data" in item
+            else item.get("values")
+            if "values" in item
+            else item.get("series")
+            if "series" in item
+            else item.get("dataset")
+            if "dataset" in item
+            else item.get("points")
+        )
+        return {
+            "type": "chart",
+            "chart_type": chart_type or "bar",
+            "title": title,
+            "data": data,
+        }
+
+    def _coerce_chart_artifact_data(self, value) -> dict:
+        if isinstance(value, dict):
+            for nested_key in ("data", "rows", "records", "items", "history", "prices", "points", "series", "dataset"):
+                if isinstance(value.get(nested_key), (dict, list)):
+                    nested = self._coerce_chart_artifact_data(value.get(nested_key))
+                    if nested:
+                        return nested
+            labels = value.get("labels")
+            values = value.get("values")
+            if isinstance(labels, list) and isinstance(values, list):
+                return {
+                    self._text_field(label) or f"item{index + 1}": values[index]
+                    for index, label in enumerate(labels[:len(values)])
+                    if self._numeric_chart_value(values[index]) is not None
+                }
+            return {
+                self._text_field(key): self._chart_row_numeric_source(item)
+                for key, item in value.items()
+                if self._text_field(key) and self._chart_row_numeric_source(item) is not None
+            }
+        if isinstance(value, list):
+            data = {}
+            for index, row in enumerate(value[:24], 1):
+                if isinstance(row, dict):
+                    label = self._chart_row_label(row, index)
+                    raw_value = self._chart_row_numeric_source(row)
+                    if self._numeric_chart_value(raw_value) is not None:
+                        data[label] = raw_value
+                elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                    label = self._text_field(row[0]) or f"item{index}"
+                    if self._numeric_chart_value(row[1]) is not None:
+                        data[label] = row[1]
+            return data
+        return {}
+
+    def _chart_row_label(self, row: dict, index: int) -> str:
+        return (
+            self._text_field(row.get("asset"))
+            or self._text_field(row.get("name"))
+            or self._text_field(row.get("label"))
+            or self._text_field(row.get("symbol"))
+            or self._text_field(row.get("index_name"))
+            or self._text_field(row.get("product_name"))
+            or self._text_field(row.get("date"))
+            or self._text_field(row.get("time"))
+            or f"item{index}"
+        )
+
+    def _chart_row_numeric_source(self, row):
+        if self._numeric_chart_value(row) is not None:
+            return row
+        if not isinstance(row, dict):
+            return None
+        for key in (
+            "value",
+            "change_pct",
+            "return_pct",
+            "pct",
+            "percent",
+            "change",
+            "return",
+            "close",
+            "price",
+            "nav",
+            "y",
+        ):
+            if key in row and self._numeric_chart_value(row.get(key)) is not None:
+                return row.get(key)
+        return None
 
     def _format_client_advice(
         self,
@@ -1138,14 +5906,42 @@ class CLI:
         suggestions = self._coerce_text_items(synthesis.get("suggestions"))
         risks = self._coerce_text_items(synthesis.get("risk_controls"))
         missing = self._coerce_text_items(synthesis.get("missing_data"))
+        missing = self._filter_missing_items_for_display(query, missing, data_inputs)
+        followups = self._coerce_text_items(synthesis.get("followups"))
+        next_actions = self._coerce_text_items(synthesis.get("next_actions"))
+        artifact_results = synthesis.get("artifact_results") if isinstance(synthesis.get("artifact_results"), list) else []
         view = self._text_field(synthesis.get("view")) or raw_text
         scene = self._text_field(top.get("scene")) or "未命中明确场景"
         confidence = top.get("confidence")
         lines = [
             f"我先按“{query}”来理解。",
-            "",
-            view,
         ]
+        source_line = self._mcp_source_line(data_inputs)
+        if source_line:
+            lines.extend(["", source_line])
+        snapshot_lines = data_inputs.get("mcp_snapshot") if isinstance(data_inputs, dict) else []
+        if snapshot_lines:
+            lines.extend(["", "市场快照："])
+            for item in snapshot_lines[:6]:
+                lines.append(f"- {item}")
+        mcp_links = data_inputs.get("mcp_links") if isinstance(data_inputs, dict) else []
+        if not isinstance(mcp_links, list):
+            mcp_links = []
+        synthesis_links = self._resource_links_from_value(synthesis.get("resources"), "分析资源")
+        synthesis_direct_links = [
+            item["link"]
+            for item in self._coerce_resource_links(synthesis.get("resource_links"))
+            if item.get("link")
+        ]
+        for item in self._coerce_resource_links(synthesis.get("resource_link")):
+            if item.get("link"):
+                synthesis_direct_links.append(item["link"])
+        if mcp_links or synthesis_links or synthesis_direct_links:
+            lines.extend(["", "可打开资源："])
+            for item in [*mcp_links, *synthesis_links, *synthesis_direct_links][:8]:
+                lines.append(f"- {item}")
+        view = self._align_view_with_data_availability(query, view, snapshot_lines, data_inputs)
+        lines.extend(["", view])
         if suggestions:
             lines.extend(["", "可以先这样做："])
             for item in suggestions[:5]:
@@ -1158,8 +5954,72 @@ class CLI:
         if not risks:
             lines.append("- 注意仓位、期限、流动性与最大回撤约束。")
         if missing:
-            lines.extend(["", "我还需要你补充："])
+            lines.extend(["", self._missing_inputs_heading(query, data_inputs)])
             for item in missing[:5]:
+                lines.append(f"- {item}")
+        if artifact_results:
+            lines.extend(["", "图表与分析产物："])
+            for item in artifact_results:
+                title = self._text_field(item.get("title")) or "图表"
+                status = self._text_field(item.get("status"))
+                if status == "success":
+                    saved = item.get("saved") if isinstance(item.get("saved"), dict) else {}
+                    if saved:
+                        workspace = str(workspace_status().get("path") or "")
+                        json_link = self._workspace_file_link(saved.get("json"), workspace, label=f"{title} JSON") if saved.get("json") else ""
+                        html_link = self._workspace_file_link(saved.get("html"), workspace, label=f"{title} HTML") if saved.get("html") else ""
+                        lines.append(f"- {title}: 已生成")
+                        if json_link:
+                            lines.append(f"  JSON: {json_link}")
+                        if html_link:
+                            lines.append(f"  HTML: {html_link}")
+                    else:
+                        lines.append(f"- {title}: 已生成，工作区未授权，未写入本地文件")
+                        lines.append("  下一步: /workspace browse 选择项目文件夹，或 /workspace path <路径> 手动指定，然后 /workspace allow 授权保存。")
+                    resource_links = item.get("resource_links") if isinstance(item.get("resource_links"), list) else []
+                    for link in resource_links[:4]:
+                        lines.append(f"  资源: {link}")
+                    preview = item.get("preview") if isinstance(item.get("preview"), list) else []
+                    if preview:
+                        lines.append("  终端预览:")
+                        for row in preview[:6]:
+                            lines.append(f"  {row}")
+                elif status == "skipped":
+                    lines.append(f"- {title}: 已跳过，{item.get('reason')}")
+                else:
+                    lines.append(f"- {title}: 生成失败，{item.get('error') or status or '未知原因'}")
+            lines.extend([
+                "",
+                "产物收件箱：",
+                "- /open chart 打开最近图表，/open report 打开最近报告。",
+                "- /artifacts 查看项目文件夹里的全部图表和报告。",
+                "- /links 1 或 /open 1 打开本轮网页、图片、图表和报告链接。",
+            ])
+        trace_lines = data_inputs.get("agent_trace") if isinstance(data_inputs, dict) else []
+        if trace_lines:
+            lines.extend(["", "本轮执行："])
+            for item in trace_lines[:6]:
+                lines.append(f"- {item}")
+        trail_lines = self._agent_trail_lines(
+            query=query,
+            scene=scene,
+            confidence=confidence,
+            provider=provider,
+            model=model,
+            data_inputs=data_inputs,
+            artifact_results=artifact_results,
+        )
+        if trail_lines:
+            lines.extend(["", "Agent Trail："])
+            lines.extend(trail_lines)
+        command_bar = self._answer_command_bar(
+            mcp_links=[*mcp_links, *synthesis_links, *synthesis_direct_links],
+            artifact_results=artifact_results,
+            data_inputs=data_inputs,
+        )
+        if command_bar:
+            lines.extend(["", "快捷操作："])
+            for item in command_bar:
                 lines.append(f"- {item}")
         meta = f"服务端场景：{scene}"
         if confidence is not None:
@@ -1169,7 +6029,277 @@ class CLI:
             "—",
             f"{meta}；本机模型：{provider} / {model}。大模型 API Key 只在本机直连供应商，未发送给二郎神服务端。",
         ])
+        lines.extend(["", "下一步："])
+        repair_action = self._mcp_repair_action(data_inputs)
+        if next_actions:
+            for item in next_actions[:4]:
+                lines.append(f"- {item}")
+            if repair_action and all(repair_action not in item for item in next_actions):
+                lines.append(f"- {repair_action}")
+        else:
+            lines.append("- 输入 /plan 查看本次意图、MCP 工具和服务端映射过程。")
+            if repair_action:
+                lines.append(f"- {repair_action}")
+            if artifact_results:
+                lines.append("- 输入 /open 打开最近生成的图表或报告，/artifacts 查看全部产物。")
+            else:
+                lines.append("- 如果需要图表或报告，可以继续说“把这个做成图表/报告”。")
+        default_followups: list[str] = []
+        if followups:
+            lines.extend(["", "你也可以继续问："])
+            for item in followups[:3]:
+                lines.append(f"- {item}")
+        else:
+            default_followups = self._default_followups(query, missing, artifact_results, data_inputs)
+        if default_followups:
+            lines.extend(["", "你也可以继续问："])
+            for item in default_followups[:3]:
+                lines.append(f"- {item}")
         return "\n".join(lines)
+
+    def _answer_command_bar(self, *, mcp_links: list, artifact_results: list[dict], data_inputs: dict) -> list[str]:
+        actions = ["/plan 复盘本轮意图、MCP 数据、服务端映射和产物计划"]
+        if mcp_links:
+            actions.append("/links 1 打开本轮网页、图片、图表或报告资源")
+        success_artifacts = [
+            item for item in artifact_results
+            if isinstance(item, dict) and self._text_field(item.get("status")) == "success"
+        ]
+        if success_artifacts:
+            actions.append("/open chart 打开最近生成的图表；/artifacts 查看全部产物")
+            if any(not isinstance(item.get("saved"), dict) or not item.get("saved") for item in success_artifacts):
+                actions.append("/workspace browse 授权项目文件夹，后续图表和报告会自动保存")
+        elif artifact_results:
+            actions.append("/workspace browse 授权项目文件夹；也可以补充数值后重新要求生成图表")
+        if self._mcp_repair_action(data_inputs):
+            actions.append("/doctor 检查登录态、super-66 MCP、web_search 和服务端连通性")
+        return actions[:4]
+
+    def _agent_trail_lines(
+        self,
+        *,
+        query: str,
+        scene: str,
+        confidence,
+        provider: str,
+        model: str,
+        data_inputs: dict,
+        artifact_results: list[dict],
+    ) -> list[str]:
+        if not isinstance(data_inputs, dict):
+            data_inputs = {}
+        lines = [
+            f"- 意图: 本机大模型按“{self._truncate_context_text(query, 42)}”理解，并决定是否取数/映射/制图",
+        ]
+        orchestration = self._answer_orchestration_line(data_inputs)
+        if orchestration:
+            lines.append(orchestration)
+        mcp_keys = data_inputs.get("mcp_data") if isinstance(data_inputs.get("mcp_data"), list) else []
+        if mcp_keys:
+            lines.append(f"- 数据: 已接入 {', '.join(str(item) for item in mcp_keys[:4])}")
+        else:
+            lines.append("- 数据: 本轮没有可用 MCP 快照；结论会降低确定性")
+        scene_line = f"- 服务端: {scene}"
+        if confidence is not None:
+            scene_line += f" · 置信度 {confidence}"
+        lines.append(scene_line)
+        resource_count = 0
+        for key in ("mcp_links", "intent_resource_links"):
+            value = data_inputs.get(key)
+            if isinstance(value, list):
+                resource_count += len(value)
+        if artifact_results:
+            success_count = sum(1 for item in artifact_results if isinstance(item, dict) and item.get("status") == "success")
+            lines.append(f"- 产物: {success_count}/{len(artifact_results)} 个图表/报告请求已完成；/artifacts 或 /open 查看")
+        elif resource_count:
+            lines.append(f"- 资源: {resource_count} 个网页/图片/报告链接已进入 /links，可用 /links 1 打开")
+        else:
+            lines.append("- 资源: 本轮暂无可打开资源；需要图表/网页时可继续说明")
+        lines.append(f"- 模型: {provider} / {model}，API Key 仅在本机直连供应商")
+        return lines
+
+    def _answer_orchestration_line(self, data_inputs: dict) -> str:
+        route_source = self._text_field(data_inputs.get("route_source"))
+        tool_source = self._text_field(data_inputs.get("tool_selection_source"))
+        note = self._text_field(data_inputs.get("tool_selection_note"))
+        fallback_sources = {"client_default_by_intent", "client_market_overview_fallback", "previous_mcp_context"}
+        if tool_source == "local_llm" or route_source == "local_llm":
+            owner = "本机大模型主导"
+        elif tool_source in fallback_sources:
+            owner = "客户端兜底补齐"
+        elif route_source == "provided_payload":
+            owner = "调用方提供 intent_plan"
+        elif route_source == "fallback":
+            owner = "保守兜底路由"
+        else:
+            return ""
+        detail = f" · {note}" if note else ""
+        return f"- 编排: {owner}{detail}"
+
+    def _filter_missing_items_for_display(self, query: str, missing: list[str], data_inputs: dict) -> list[str]:
+        if not missing:
+            return []
+        snapshot_lines = data_inputs.get("mcp_snapshot") if isinstance(data_inputs, dict) else []
+        if not (self._is_vague_market_query(query) and snapshot_lines):
+            return missing[:5]
+        personal_keywords = (
+            "持仓",
+            "仓位",
+            "组合",
+            "账户",
+            "成本",
+            "买入",
+            "卖出",
+            "期限",
+            "周期",
+            "风险偏好",
+            "回撤",
+            "目标",
+            "约束",
+            "流动性",
+        )
+        market_data_keywords = (
+            "实时",
+            "行情",
+            "市场数据",
+            "指数",
+            "点位",
+            "涨跌",
+            "成交",
+            "新闻",
+            "事件",
+            "宏观",
+            "cpi",
+            "pmi",
+            "政策",
+            "公开信息",
+        )
+        filtered = []
+        for item in missing:
+            text = self._text_field(item)
+            lowered = text.lower()
+            if any(keyword in text for keyword in personal_keywords):
+                filtered.append(text)
+                continue
+            if any(keyword in lowered or keyword in text for keyword in market_data_keywords):
+                continue
+            filtered.append(text)
+        return filtered[:3]
+
+    def _missing_inputs_heading(self, query: str, data_inputs: dict) -> str:
+        snapshot_lines = data_inputs.get("mcp_snapshot") if isinstance(data_inputs, dict) else []
+        if self._is_vague_market_query(query) and snapshot_lines:
+            return "如果要落到你的账户，我还需要知道："
+        return "我还需要你补充："
+
+    def _default_followups(self, query: str, missing: list[str], artifact_results: list[dict], data_inputs: dict) -> list[str]:
+        suggestions = []
+        snapshot_lines = data_inputs.get("mcp_snapshot") if isinstance(data_inputs, dict) else []
+        if snapshot_lines:
+            suggestions.append("把这些市场快照进一步拆成“主线、风险、可跟踪指标”。")
+        if artifact_results:
+            suggestions.append("基于刚才的图表，帮我写一段可以保存到报告里的解读。")
+        else:
+            suggestions.append("把这个分析做成图表，对比关键资产或指标。")
+        if missing:
+            first_missing = self._text_field(missing[0])
+            if first_missing:
+                suggestions.append(f"如果我补充{first_missing}，结论会怎么变化？")
+        elif self._is_vague_market_query(query):
+            suggestions.append("如果只看 A股、港股、美股分别应该关注什么？")
+        else:
+            suggestions.append("给我一个更偏执行的版本：仓位、观察信号和失效条件。")
+        deduped = []
+        for item in suggestions:
+            if item and item not in deduped:
+                deduped.append(item)
+        return deduped
+
+    def _align_view_with_data_availability(self, query: str, view: str, snapshot_lines, data_inputs: dict) -> str:
+        cleaned = self._text_field(view)
+        has_snapshot = bool(snapshot_lines)
+        if has_snapshot:
+            empty_data_patterns = (
+                r"[^。！？\n]*(?:没有|暂无|缺少|缺乏)[^。！？\n]*(?:实时|行情|市场数据)[^。！？\n]*[。！？]?",
+                r"[^。！？\n]*无法准确描述[^。！？\n]*(?:行情|市场)[^。！？\n]*[。！？]?",
+                r"[^。！？\n]*不能准确描述[^。！？\n]*(?:行情|市场)[^。！？\n]*[。！？]?",
+            )
+            for pattern in empty_data_patterns:
+                cleaned = re.sub(pattern, "", cleaned).strip()
+            if not cleaned:
+                cleaned = "结合本轮已读取的行情快照和网页线索，我先给一个方向性判断；具体交易结论还需要看你关注的市场、周期和仓位。"
+            if self._is_vague_market_query(query) and "方向性" not in cleaned[:80] and "先" not in cleaned[:30]:
+                cleaned = "我先根据本轮拿到的数据给一个方向性盘面判断。\n\n" + cleaned
+            return cleaned
+        keys = data_inputs.get("mcp_data") if isinstance(data_inputs, dict) else []
+        has_data_error = any("error" in str(key).lower() or str(key) == "super66_error" for key in (keys or []))
+        if self._is_vague_market_query(query) and has_data_error:
+            prefix = (
+                "我尝试读取 super-66 MCP 行情和本地网页线索，但本轮数据通道没有拿到可用行情，"
+                "所以下面的判断只能作为低确定性的框架。"
+            )
+            if prefix not in cleaned:
+                cleaned = prefix + ("\n\n" + cleaned if cleaned else "")
+        return cleaned
+
+    def _mcp_source_line(self, data_inputs: dict) -> str:
+        keys = data_inputs.get("mcp_data") if isinstance(data_inputs, dict) else []
+        if not keys:
+            return ""
+        error_keys = [key for key in keys if "error" in str(key).lower()]
+        usable = [str(key) for key in keys if key not in error_keys and str(key) != "note"]
+        if usable:
+            line = "我已先读取 super-66 MCP 行情快照：" + "、".join(usable[:6]) + "。"
+            if error_keys:
+                line += f" 另有 {len(error_keys)} 个数据通道未成功，后面会降低确定性；可用 /plan 查看细节。"
+            return line
+        if error_keys:
+            return "这次 super-66 MCP 暂时没有成功返回行情数据，我会降低确定性。"
+        return ""
+
+    def _mcp_repair_action(self, data_inputs: dict) -> str:
+        keys = data_inputs.get("mcp_data") if isinstance(data_inputs, dict) else []
+        if not any("error" in str(key).lower() for key in (keys or [])):
+            return ""
+        if any(str(key).startswith("web_search:") for key in keys or []):
+            return "如果需要新闻线索，执行 /doctor 检查本地 Chrome web_search；必要时安装 Playwright。"
+        return "执行 /doctor 检查登录态、super-66 MCP 和服务端连通性，再重新提问。"
+
+    def _chart_terminal_preview(self, data) -> list[str]:
+        if not isinstance(data, dict) or not data:
+            return []
+        points = []
+        for raw_label, raw_value in data.items():
+            label = self._text_field(raw_label)[:18] or "未命名"
+            value = self._numeric_chart_value(raw_value)
+            if value is None:
+                continue
+            points.append((label, value))
+        if not points:
+            return []
+        max_abs = max(abs(value) for _, value in points) or 1.0
+        rows = []
+        for label, value in points[:6]:
+            bar_len = max(1, int(round(abs(value) / max_abs * 18)))
+            bar = "█" * bar_len
+            sign = "+" if value > 0 else ""
+            rows.append(f"{label:<18} {sign}{value:.4g} | {bar}")
+        return rows
+
+    def _numeric_chart_value(self, value) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.strip().replace(",", "")
+            if cleaned.endswith("%"):
+                cleaned = cleaned[:-1]
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        return None
 
     def _coerce_text_items(self, value) -> list[str]:
         if value is None:
@@ -1177,10 +6307,13 @@ class CLI:
         if isinstance(value, list):
             result = []
             for item in value:
-                text = self._text_field(item)
+                text = self._coerce_text_item(item)
                 if text:
                     result.append(text)
             return result
+        if isinstance(value, dict):
+            text = self._coerce_text_item(value)
+            return [text] if text else []
         text = self._text_field(value)
         if not text:
             return []
@@ -1188,6 +6321,75 @@ class CLI:
         parts = re.split(r"(?:\n+|(?:^|\s)(?:\d+|[一二三四五六七八九十]+)[\.、]\s+|(?:^|\s)[\-*]\s+)", text)
         result = [part.strip(" \t\r\n-：:") for part in parts if part and part.strip(" \t\r\n-：:")]
         return result or [text]
+
+    def _coerce_text_item(self, value) -> str:
+        if isinstance(value, dict):
+            main = self._first_text_value(
+                value,
+                (
+                    "text",
+                    "content",
+                    "message",
+                    "action",
+                    "suggestion",
+                    "recommendation",
+                    "risk",
+                    "risk_control",
+                    "missing",
+                    "question",
+                    "name",
+                    "title",
+                    "label",
+                    "command",
+                    "next",
+                ),
+            )
+            if not main:
+                main = self._safe_dict_text_summary(value)
+            details = []
+            for label, keys in (
+                ("原因", ("reason", "why", "rationale")),
+                ("条件", ("condition", "when", "trigger")),
+                ("信号", ("signal", "indicator")),
+                ("阈值", ("threshold", "limit")),
+                ("周期", ("timeframe", "horizon")),
+            ):
+                detail = self._first_text_value(value, keys)
+                if detail and detail != main:
+                    details.append(f"{label}: {detail}")
+            return f"{main}；{'；'.join(details)}" if main and details else main
+        if isinstance(value, list):
+            items = [self._coerce_text_item(item) for item in value[:6]]
+            return "；".join(item for item in items if item)
+        return self._text_field(value)
+
+    def _first_text_value(self, data: dict, keys: tuple[str, ...]) -> str:
+        for key in keys:
+            if self._is_sensitive_field(key):
+                continue
+            text = self._text_field(data.get(key))
+            if text:
+                return text
+        return ""
+
+    def _safe_dict_text_summary(self, data: dict) -> str:
+        parts = []
+        for key, value in data.items():
+            key_text = self._text_field(key)
+            if not key_text or self._is_sensitive_field(key_text):
+                continue
+            if isinstance(value, (dict, list)):
+                continue
+            text = self._text_field(value)
+            if text:
+                parts.append(f"{key_text}: {text}")
+            if len(parts) >= 3:
+                break
+        return "；".join(parts)
+
+    def _is_sensitive_field(self, key: str) -> bool:
+        key_text = self._text_field(key).lower()
+        return any(word in key_text for word in ("token", "key", "secret", "password", "authorization", "api_key"))
 
     def _text_field(self, value) -> str:
         if value is None:
@@ -1210,8 +6412,21 @@ class CLI:
         ])
 
     def _show_progress(self, message: str) -> None:
+        if self._agent_trace is not None:
+            clean = self._format_progress_trace_item(message)
+            if clean and clean not in self._agent_trace:
+                self._agent_trace.append(clean)
         if sys.stdout.isatty():
             print(_color(f"· {message}...", "2"), flush=True)
+
+    def _agent_trace_lines(self) -> list[str]:
+        return list(self._agent_trace or [])
+
+    def _format_progress_trace_item(self, message: str) -> str:
+        text = self._text_field(message)
+        text = re.sub(r"^正在", "", text)
+        text = re.sub(r"\.{3,}$", "", text).strip(" .。")
+        return text
 
     async def _select_list(self, title: str, items: list[tuple[str, str, str]]) -> str | None:
         try:
@@ -1238,8 +6453,11 @@ class CLI:
             for index, (_, label, description) in enumerate(items):
                 style = "class:current" if index == selected else "class:item"
                 marker = "❯" if index == selected else " "
-                line = f"{marker} {label:<24} {description}"
-                result.append((style, line[:width] + "\n"))
+                line = f"{marker} {_pad_display(label, 28)} {description}"
+                result.append((style, _clip_display(line, width) + "\n"))
+            result.append(("class:border", "─" * width + "\n"))
+            for detail in self._model_picker_detail_lines(title, items, selected):
+                result.append(("class:hint", _clip_display(detail, width) + "\n"))
             result.append(("class:border", "─" * width))
             return result
 
@@ -1328,27 +6546,73 @@ class CLI:
     def _render_model_picker(self, title: str, items: list[tuple[str, str, str]], selected: int) -> None:
         width = min(max(76, _terminal_width() - 4), 120)
         lines = [
-            _color("╭─ " + title + " " + "─" * max(0, width - len(title) - 5) + "╮", "36"),
-            "│ " + "↑↓/jk 选择  Enter 确认  q/Esc 取消".ljust(width - 3) + "│",
+            _color("╭─ " + title + " " + "─" * max(0, width - _display_width(title) - 5) + "╮", "36"),
+            self._browser_line("↑↓/jk 选择  Enter 确认  q/Esc 取消", width),
             "├" + "─" * (width - 2) + "┤",
         ]
         for index, (_, label, description) in enumerate(items):
             marker = "›" if index == selected else " "
-            line = "│ " + f"{marker} {label:<24} {description}"[: width - 3].ljust(width - 3) + "│"
+            line = self._browser_line(f"{marker} {_pad_display(label, 28)} {description}", width)
             if index == selected:
                 line = _color(line, self._ansi_selected_style())
             lines.append(line)
+        detail_lines = self._model_picker_detail_lines(title, items, selected)
+        if detail_lines:
+            lines.append("├" + "─" * (width - 2) + "┤")
+            for detail in detail_lines:
+                lines.append(self._browser_line(detail, width))
         lines.append(_color("╰" + "─" * (width - 2) + "╯", "36"))
         sys.stdout.write("\n".join(lines) + "\n")
+
+    def _model_picker_detail_lines(self, title: str, items: list[tuple[str, str, str]], selected: int) -> list[str]:
+        if not items:
+            return []
+        selected = max(0, min(selected, len(items) - 1))
+        item_id, label, description = items[selected]
+        provider = get_provider_preset(item_id)
+        if item_id == provider.id:
+            return [
+                f"选中: {label} ({provider.id})",
+                f"Key: {provider.key_env} · Model: {provider.model_env} · 默认 {provider.default_model}",
+                "边界: API Key 只保存在本机，服务端只接收问题做受保护映射",
+                "下一步: Enter 选择供应商，再选择模型，随后 /model key 本机测试保存",
+            ]
+        model_provider = self._provider_for_model(item_id)
+        if model_provider:
+            preset = get_provider_preset(model_provider)
+            marker = "默认模型" if item_id == preset.default_model else "可选模型"
+            return [
+                f"选中: {label} ({item_id})",
+                f"Provider: {preset.display_name} · {marker}",
+                f"用途: {description}",
+                f"Key: {preset.key_env} 只在本机；下一步 /model key 测试连接后保存",
+            ]
+        return [
+            f"选中: {label} ({item_id})",
+            f"用途: {description}",
+            "下一步: Enter 确认；API Key 只保存在本机，不发送服务端",
+        ]
+
+    def _provider_for_model(self, model_id: str) -> str:
+        target = self._text_field(model_id)
+        for provider in MODEL_PRESETS:
+            if any(model.id == target for model in provider.models):
+                return provider.id
+        return ""
         sys.stdout.write(f"\033[{len(lines)}A")
         sys.stdout.flush()
 
     def _next_steps(self, session: dict, llm_ready: bool) -> list[tuple[str, str]]:
         steps = []
+        workspace_ready = bool(workspace_status().get("allowed"))
+        if not workspace_ready or not session.get("token") or not llm_ready:
+            steps.append(("setup", "/setup 初始化工作区、账号、大模型和产物"))
+        if not workspace_ready:
+            steps.append(("workspace", "/workspace browse 或 /workspace path <路径> 选择项目文件夹，然后 /workspace allow"))
         if not session.get("token"):
-            steps.append(("1 login", "/login xwab <账号>"))
+            steps.append(("login", "/login xwab <账号>"))
         if not llm_ready:
-            steps.append(("2 model", "/model 查看 API key 配置方式"))
+            steps.append(("model", "/model select 然后 /model key"))
         if not steps:
             steps.append(("ready", "直接输入投资问题，或执行 /service"))
         return steps
@@ -1443,19 +6707,35 @@ class CLI:
             matches = slash_matches()
             selected = clamp_selected(matches)
             width = min(max(72, _terminal_width()), 150)
-            max_visible = 8
+            max_visible = 9
             start = max(0, selected - max_visible + 1)
             visible = matches[start:start + max_visible]
-            fragments = [("class:menu.border", "─" * width + "\n")]
+            query = text[1:].lower()
+            fragments = [
+                ("class:menu.border", "─" * width + "\n"),
+                ("class:menu.muted", _clip_display(self._slash_context_hint(query, len(matches)), width) + "\n"),
+            ]
+            for context_line in self._slash_picker_context_lines(query):
+                fragments.append(("class:menu.muted", _clip_display(context_line, width) + "\n"))
             if not visible:
                 fragments.append(("class:menu.muted", "没有匹配命令\n"))
-            for idx, (_, shortcut, description) in enumerate(visible):
-                actual = start + idx
+            for row_type, payload, actual in cli._grouped_palette_rows(visible, start):
+                if row_type == "group":
+                    fragments.append(("class:menu.group", _clip_display(str(payload), width) + "\n"))
+                    continue
+                _, shortcut, description = payload
                 style = "class:menu.current" if actual == selected else "class:menu"
-                line = f"{shortcut:<30} {description}"
-                fragments.append((style, line[:width] + "\n"))
+                marker = "❯" if actual == selected else " "
+                line = f"{marker} {_pad_display(shortcut, 29)} {description}"
+                fragments.append((style, _clip_display(line, width) + "\n"))
+            for detail in cli._slash_selection_detail_lines(matches, selected):
+                fragments.append(("class:menu.muted", _clip_display(detail, width) + "\n"))
             fragments.append(("class:menu.border", "─" * width))
             return fragments
+
+        def input_rule_fragments():
+            width = min(max(72, _terminal_width()), 150)
+            return [("class:input.border", "─" * width)]
 
         def invalidate(_=None):
             app = get_app_or_none()
@@ -1532,12 +6812,18 @@ class CLI:
         menu = ConditionalContainer(
             Window(
                 FormattedTextControl(slash_menu_fragments),
-                height=Dimension(max=10),
+                height=Dimension(max=14),
                 dont_extend_height=True,
             ),
             filter=Condition(slash_active),
         )
-        root = HSplit([text_area, menu])
+        root = HSplit([
+            Window(FormattedTextControl(input_rule_fragments), height=1, dont_extend_height=True),
+            text_area,
+            Window(FormattedTextControl(input_rule_fragments), height=1, dont_extend_height=True),
+            menu,
+            Window(FormattedTextControl(cli._prompt_status_bar_fragments), height=1, dont_extend_height=True),
+        ])
         app = Application(
             layout=Layout(root, focused_element=text_area),
             key_bindings=bindings,
@@ -1545,9 +6831,12 @@ class CLI:
             erase_when_done=True,
             style=Style.from_dict({
                 "prompt": "ansicyan bold",
+                "input.border": "#666666",
+                "status": "#8a8a8a",
                 "menu": "#d0d0d0",
                 "menu.current": cli._select_style_current(),
                 "menu.border": "#888888",
+                "menu.group": "ansicyan bold",
                 "menu.muted": "#888888",
             }),
         )
@@ -1780,43 +7069,221 @@ class CLI:
                 continue
 
     def _filter_palette(self, query: str) -> list[tuple[str, str, str]]:
+        palette = self._ordered_palette_items()
         if not query:
-            return COMMAND_PALETTE
+            return palette
         lowered = query.lower()
+        contextual = self._contextual_palette_items(lowered, palette)
+        if contextual is not None:
+            return contextual
         return [
-            item for item in COMMAND_PALETTE
+            item for item in palette
             if lowered in item[0].lower()
             or lowered in item[1].lower()
             or lowered in item[2].lower()
         ]
 
+    def _contextual_palette_items(
+        self,
+        lowered_query: str,
+        palette: list[tuple[str, str, str]],
+    ) -> list[tuple[str, str, str]] | None:
+        if " " not in lowered_query:
+            return None
+        root, tail = lowered_query.split(" ", 1)
+        root = root.lstrip("/")
+        command_ids = SLASH_SUBCOMMAND_ROOTS.get(root)
+        if not command_ids:
+            return None
+        tail = tail.strip()
+        matches = [item for item in palette if item[0] in command_ids]
+        matches = self._sort_contextual_palette(root, matches)
+        if not tail:
+            return matches
+        filtered = [
+            item for item in matches
+            if tail in item[0].lower()
+            or tail in item[1].lower()
+            or tail in item[2].lower()
+        ]
+        preferred_prefix = f"/{root} {tail}"
+        return sorted(
+            filtered,
+            key=lambda item: (
+                0 if item[1].lower().startswith(preferred_prefix) else 1,
+                0 if item[1].lower().startswith(f"/{root} ") else 1,
+                self._contextual_palette_rank(root, item[0]),
+            ),
+        )
+
+    def _sort_contextual_palette(
+        self,
+        root: str,
+        matches: list[tuple[str, str, str]],
+    ) -> list[tuple[str, str, str]]:
+        return sorted(matches, key=lambda item: self._contextual_palette_rank(root, item[0]))
+
+    def _contextual_palette_rank(self, root: str, command_id: str) -> int:
+        order = SLASH_SUBCOMMAND_ORDER.get(root) or []
+        try:
+            return order.index(command_id)
+        except ValueError:
+            return len(order) + 100
+
+    def _ordered_palette_items(self) -> list[tuple[str, str, str]]:
+        ordered = []
+        seen: set[str] = set()
+        for _, command_ids in COMMAND_GROUPS:
+            for item in COMMAND_PALETTE:
+                if item[0] in command_ids and item[0] not in seen:
+                    ordered.append(item)
+                    seen.add(item[0])
+        ordered.extend(item for item in COMMAND_PALETTE if item[0] not in seen)
+        return ordered
+
+    def _palette_group_title(self, command_id: str) -> str:
+        for title, command_ids in COMMAND_GROUPS:
+            if command_id in command_ids:
+                return title
+        return "More"
+
+    def _grouped_palette_rows(
+        self,
+        matches: list[tuple[str, str, str]],
+        start_index: int = 0,
+    ) -> list[tuple[str, object, int | None]]:
+        rows: list[tuple[str, object, int | None]] = []
+        current_group = None
+        for offset, item in enumerate(matches):
+            group = self._palette_group_title(item[0])
+            if group != current_group:
+                rows.append(("group", group, None))
+                current_group = group
+            rows.append(("item", item, start_index + offset))
+        return rows
+
     def _render_slash_picker(self, matches: list[tuple[str, str, str]], selected: int, query: str) -> None:
         width = min(max(72, _terminal_width() - 4), 110)
         term_lines = shutil.get_terminal_size((100, 24)).lines
-        max_visible = min(14, max(6, term_lines - 8))
+        max_visible = min(10, max(4, term_lines - 10))
         start = max(0, selected - max_visible + 1)
         visible = matches[start:start + max_visible]
+        title = self._slash_picker_title(query)
         lines = [
-            _color("╭─ Slash Commands " + "─" * max(0, width - 20) + "╮", "36"),
-            "│ " + f"filter: /{query}".ljust(width - 3) + "│",
-            "│ " + "↑↓ 选择  Enter 确认  输入字母过滤  Backspace 删除  Esc/q 取消".ljust(width - 3) + "│",
-            "├" + "─" * (width - 2) + "┤",
+            _color(f"╭─ {title} " + "─" * max(0, width - _display_width(title) - 5) + "╮", "36"),
+            self._browser_line(self._slash_context_hint(query, len(matches)), width),
+            self._browser_line("↑↓ 选择  Enter 确认  输入字母过滤  Backspace 删除  Esc/q 取消", width),
         ]
+        for context_line in self._slash_picker_context_lines(query):
+            lines.append(self._browser_line(context_line, width))
+        lines.append("├" + "─" * (width - 2) + "┤")
         if not visible:
-            lines.append("│ " + "没有匹配命令".ljust(width - 3) + "│")
-        for idx, (_, shortcut, description) in enumerate(visible):
-            marker = "›" if start + idx == selected else " "
-            text = f"{marker} {shortcut:<24} {description}"
-            line = "│ " + text[: width - 3].ljust(width - 3) + "│"
-            if start + idx == selected:
+            lines.append(self._browser_line("没有匹配命令", width))
+        for row_type, payload, actual in self._grouped_palette_rows(visible, start):
+            if row_type == "group":
+                text = f"  {payload}"
+                lines.append(_color(self._browser_line(text, width), "36;1"))
+                continue
+            _, shortcut, description = payload
+            marker = "❯" if actual == selected else " "
+            text = f"{marker} {_pad_display(shortcut, 24)} {description}"
+            line = self._browser_line(text, width)
+            if actual == selected:
                 line = _color(line, self._ansi_selected_style())
             lines.append(line)
         hidden_before = start
         hidden_after = max(0, len(matches) - start - len(visible))
         if hidden_before or hidden_after:
-            lines.append("│ " + f"... 上方 {hidden_before} 条，下方 {hidden_after} 条".ljust(width - 3) + "│")
+            lines.append(self._browser_line(f"... 上方 {hidden_before} 条，下方 {hidden_after} 条", width))
+        detail = self._slash_selection_detail(matches, selected)
+        if detail:
+            lines.append("├" + "─" * (width - 2) + "┤")
+            for detail_line in self._slash_selection_detail_lines(matches, selected):
+                lines.append(self._browser_line(detail_line, width))
         lines.append(_color("╰" + "─" * (width - 2) + "╯", "36"))
         self._render_dropdown_below("/" + query, lines)
+
+    def _slash_picker_title(self, query: str) -> str:
+        root = (query or "").strip().split(maxsplit=1)[0] if (query or "").strip() else ""
+        if root == "server":
+            return "Server Commands"
+        if root == "workspace":
+            return "Workspace Sandbox"
+        if root == "setup":
+            return "Setup Wizard"
+        return "Slash Commands"
+
+    def _slash_context_hint(self, query: str, match_count: int) -> str:
+        query = query or ""
+        stripped = query.strip()
+        root = stripped.split()[0] if stripped else ""
+        if root in SLASH_CONTEXT_HINTS and (" " in query or query.endswith(" ")):
+            return f"{SLASH_CONTEXT_HINTS[root]} · {match_count} 个匹配"
+        if query.endswith(" ") and stripped:
+            return f"子命令: /{root} · {match_count} 个匹配"
+        return f"filter: /{query} · {match_count} 个匹配"
+
+    def _slash_picker_context_lines(self, query: str) -> list[str]:
+        stripped = (query or "").strip()
+        root = stripped.split()[0] if stripped else ""
+        if root == "server":
+            return [
+                "目标导航: status 查健康/鉴权 · me 查账号 · map 只看映射 · flow 看协作链路",
+                "智能体路径: 直接输入问题由本机 LLM 选 MCP/web_search，再请求服务端受保护映射",
+                "产物导航: artifact/chart 生成图表 · capabilities 看边界 · actions 获取下一步",
+                "资源出口: 服务端返回网页/图片/HTML/PDF/图表时，用 /links 1 或 /open 1 打开",
+            ]
+        if root == "workspace":
+            return [
+                "沙箱导航: browse 方向键选路径 · path 粘贴路径 · allow 授权写入 · artifacts 看产物",
+                "写入边界: 只在授权项目 .erlangshen/artifacts 保存图表、报告、resources.json",
+                "隐私边界: 大模型 API Key、账号 token 和服务端内部认知库不会写入项目目录",
+            ]
+        if root == "setup":
+            return [
+                "初始化顺序: workspace 选择项目文件夹 · login 登录账号 · model key 保存本机大模型 Key",
+                "推荐入口: /setup run 一次检查；/setup workspace 只重选项目沙箱",
+            ]
+        if root == "model":
+            return [
+                "模型边界: /model select 选供应商和型号；/model key 本机测试成功后才保存",
+                "安全边界: Key 只在本机直连供应商，不发送给二郎神服务端",
+            ]
+        if root in {"links", "open"}:
+            return [
+                "资源入口: 网页、图片、HTML、PDF、图表和报告都显示为名称链接",
+                "打开方式: /links 1、/open 1、/links open 1 或 /open link 1",
+            ]
+        return []
+
+    def _slash_selection_detail(self, matches: list[tuple[str, str, str]], selected: int) -> str:
+        detail_lines = self._slash_selection_detail_lines(matches, selected)
+        return " | ".join(detail_lines)
+
+    def _slash_selection_detail_lines(self, matches: list[tuple[str, str, str]], selected: int) -> list[str]:
+        if not matches:
+            return []
+        selected = max(0, min(selected, len(matches) - 1))
+        command_id, shortcut, description = matches[selected]
+        group = self._palette_group_title(command_id)
+        detail = SERVER_COMMAND_DETAILS.get(shortcut)
+        if detail:
+            parts = [part.strip() for part in detail.split("|") if part.strip()]
+            if not parts:
+                return [f"选中: {shortcut}", f"阶段: {group}"]
+            if not any(part.startswith("下一步:") for part in parts):
+                next_hint = self._slash_next_hint(shortcut, group)
+                if next_hint:
+                    parts.append(f"下一步: {next_hint}")
+            return [f"选中: {shortcut}", f"阶段: {group}", *parts]
+        next_hint = self._slash_next_hint(shortcut, group)
+        lines = [f"选中: {shortcut}", f"阶段: {group}", f"用途: {description}"]
+        if next_hint:
+            lines.append(f"下一步: {next_hint}")
+        return lines
+
+    def _slash_next_hint(self, shortcut: str, group: str) -> str:
+        return COMMAND_NEXT_HINTS.get(shortcut) or COMMAND_GROUP_NEXT_HINTS.get(group, "直接输入问题或 /help")
 
     def _input_from_shortcut(self, shortcut: str) -> tuple[str, bool]:
         parts = shortcut.split()

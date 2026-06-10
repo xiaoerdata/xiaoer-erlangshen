@@ -19,7 +19,10 @@ def workspace_store_path() -> Path:
 
 
 def resolve_workspace_path(path: str | None = None) -> Path:
-    raw = path or os.getenv("ERLANGSHEN_WORKSPACE") or os.getcwd()
+    raw = path or os.getenv("ERLANGSHEN_WORKSPACE")
+    if not raw:
+        store = load_workspace_store()
+        raw = store.get("active_workspace") or os.getcwd()
     return Path(raw).expanduser().resolve()
 
 
@@ -58,9 +61,35 @@ def workspace_status(path: str | Path | None = None) -> dict[str, Any]:
     }
 
 
+def recent_workspaces(limit: int = 5) -> list[dict[str, Any]]:
+    store = load_workspace_store()
+    workspaces = store.get("workspaces") or {}
+    active = str(store.get("active_workspace") or "")
+    paths = sorted(
+        [path for path in workspaces.keys() if path and path != active],
+        key=lambda path: str((workspaces.get(path) or {}).get("approved_at") or ""),
+        reverse=True,
+    )
+    result = []
+    seen = set()
+    for raw_path in [active, *paths]:
+        if not raw_path or raw_path in seen:
+            continue
+        seen.add(raw_path)
+        path = Path(raw_path).expanduser()
+        if not path.exists() or not path.is_dir():
+            continue
+        status = workspace_status(path)
+        result.append(status)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def approve_workspace(path: str | Path | None = None, mode: str = "read_write") -> dict[str, Any]:
     workspace = resolve_workspace_path(str(path) if path else None)
     store = load_workspace_store()
+    store["active_workspace"] = str(workspace)
     workspaces = store.setdefault("workspaces", {})
     workspaces[str(workspace)] = {
         "allowed": True,
@@ -71,9 +100,19 @@ def approve_workspace(path: str | Path | None = None, mode: str = "read_write") 
     return workspace_status(workspace)
 
 
+def select_workspace(path: str | Path | None = None) -> dict[str, Any]:
+    workspace = resolve_workspace_path(str(path) if path else None)
+    store = load_workspace_store()
+    store["active_workspace"] = str(workspace)
+    store.setdefault("workspaces", {})
+    save_workspace_store(store)
+    return workspace_status(workspace)
+
+
 def revoke_workspace(path: str | Path | None = None) -> dict[str, Any]:
     workspace = resolve_workspace_path(str(path) if path else None)
     store = load_workspace_store()
+    store["active_workspace"] = str(workspace)
     workspaces = store.setdefault("workspaces", {})
     workspaces[str(workspace)] = {
         "allowed": False,
