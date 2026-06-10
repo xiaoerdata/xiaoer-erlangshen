@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any, Optional
 
@@ -91,7 +92,7 @@ class Super66MCP:
                     "error": f"HTTP {response.status_code}",
                     "detail": payload,
                 }
-            result = self._extract_result(payload)
+            result = self._extract_result(payload, tool_name, arguments)
             if use_cache:
                 self._cache[cache_key] = (result, time.time() + self.cache_ttl)
             return result
@@ -134,19 +135,237 @@ class Super66MCP:
         except ValueError:
             return response.text
 
-    def _extract_result(self, payload: Any) -> dict[str, Any]:
+    def _extract_result(
+        self,
+        payload: Any,
+        tool_name: str = "",
+        arguments: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        arguments = arguments or {}
         if not isinstance(payload, dict):
-            return {"result": payload}
+            return self._normalize_supabase_result(payload, tool_name, arguments)
+        if payload.get("success") is False:
+            return {
+                "error": payload.get("message") or payload.get("error") or "super-66 MCP 调用失败",
+                "code": payload.get("code"),
+            }
         if payload.get("code") not in {None, 0, 200}:
             return {
                 "error": payload.get("message") or payload.get("error") or "super-66 MCP 调用失败",
                 "code": payload.get("code"),
             }
-        data = payload.get("data")
-        if isinstance(data, dict):
-            result = data.get("result", data)
-            return result if isinstance(result, dict) else {"result": result}
-        return payload
+        result = self._unwrap_payload(payload)
+        return self._normalize_supabase_result(result, tool_name, arguments)
+
+    def _unwrap_payload(self, payload: Any) -> Any:
+        current = payload
+        for _ in range(6):
+            if not isinstance(current, dict):
+                return current
+            if isinstance(current.get("result"), (dict, list)):
+                current = current["result"]
+                continue
+            if isinstance(current.get("data"), (dict, list)):
+                current = current["data"]
+                continue
+            if isinstance(current.get("payload"), (dict, list)):
+                current = current["payload"]
+                continue
+            break
+        return current
+
+    def _normalize_supabase_result(
+        self,
+        result: Any,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        rows = self._extract_rows(result)
+        if rows:
+            normalized_rows = [self._normalize_market_row(row, arguments) for row in rows if isinstance(row, dict)]
+            latest = normalized_rows[-1] if normalized_rows else {}
+            return {
+                "tool": tool_name,
+                "arguments": self._safe_arguments(arguments),
+                "rows": normalized_rows[-120:],
+                "latest": latest,
+                "count": self._result_count(result, len(normalized_rows)),
+                "source_format": "supabase_rows",
+            }
+        if isinstance(result, dict):
+            normalized = self._normalize_market_row(result, arguments)
+            if self._looks_like_market_row(normalized):
+                output = dict(result)
+                output["latest"] = normalized
+                output["source_format"] = "supabase_object"
+                output.setdefault("tool", tool_name)
+                output.setdefault("arguments", self._safe_arguments(arguments))
+                return output
+            return result
+        return {"result": result}
+
+    def _extract_rows(self, value: Any, depth: int = 0) -> list[dict[str, Any]]:
+        if depth > 6:
+            return []
+        if isinstance(value, list):
+            rows = []
+            for item in value:
+                if isinstance(item, dict):
+                    rows.append(item)
+                elif isinstance(item, list):
+                    rows.extend(self._extract_rows(item, depth + 1))
+            return rows
+        if not isinstance(value, dict):
+            return []
+        row_keys = (
+            "rows",
+            "records",
+            "items",
+            "data",
+            "result",
+            "list",
+            "values",
+            "history",
+            "prices",
+            "payload",
+        )
+        for key in row_keys:
+            nested = value.get(key)
+            rows = self._extract_rows(nested, depth + 1)
+            if rows:
+                return rows
+        nested_rows = []
+        for nested in value.values():
+            rows = self._extract_rows(nested, depth + 1)
+            if rows:
+                nested_rows.extend(rows)
+        if nested_rows:
+            return nested_rows
+        if self._looks_like_market_row(value):
+            return [value]
+        return []
+
+    def _normalize_market_row(self, row: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(row)
+        aliases = {
+            "index_name": (
+                "index_name",
+                "asset_name",
+                "name",
+                "product_name",
+                "security_name",
+                "fund_name",
+                "symbol_name",
+                "指数名称",
+                "资产名称",
+                "名称",
+                "简称",
+                "股票简称",
+            ),
+            "code": ("code", "symbol", "ts_code", "ticker", "代码", "证券代码"),
+            "date": ("date", "trade_date", "tradedate", "trading_date", "datetime", "timestamp", "time", "日期", "交易日期", "时间"),
+            "close": ("close", "close_price", "latest", "latest_price", "current_price", "last", "last_price", "price", "收盘", "收盘价", "最新价", "现价"),
+            "change_pct": ("change_pct", "pct_chg", "change_percent", "changeRate", "percent", "涨跌幅", "涨幅", "涨跌幅(%)", "日涨跌幅"),
+            "change": ("change", "change_amount", "price_change", "涨跌", "涨跌额"),
+            "amount": ("amount", "turnover", "turnover_amount", "成交额", "成交额(元)"),
+            "volume": ("volume", "vol", "成交量", "成交量(手)"),
+            "nav": ("nav", "unit_nav", "acc_nav", "净值", "单位净值", "累计净值"),
+        }
+        for target, keys in aliases.items():
+            value = self._first_present(row, keys)
+            if value is None:
+                continue
+            current = normalized.get(target)
+            if target not in normalized or current is None or current == "":
+                normalized[target] = self._coerce_market_value(value, percent=target == "change_pct")
+        label = (
+            arguments.get("index_name")
+            or arguments.get("asset_name")
+            or arguments.get("keyword")
+            or arguments.get("code")
+            or arguments.get("contract_code")
+            or arguments.get("product_id")
+        )
+        if label and not any(normalized.get(key) for key in ("name", "index_name", "asset_name", "product_name")):
+            normalized["index_name"] = str(label)
+        return normalized
+
+    def _first_present(self, row: dict[str, Any], keys: tuple[str, ...]) -> Any:
+        lowered = {str(key).lower(): key for key in row.keys()}
+        for key in keys:
+            if key in row:
+                value = row.get(key)
+                if value is not None and value != "":
+                    return value
+            actual = lowered.get(key.lower())
+            if actual is not None:
+                value = row.get(actual)
+                if value is not None and value != "":
+                    return value
+        return None
+
+    def _coerce_market_value(self, value: Any, *, percent: bool = False) -> Any:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+        if value is None:
+            return value
+        text = str(value).strip()
+        if not text:
+            return value
+        numeric = text.replace(",", "").replace("，", "")
+        if percent:
+            numeric = numeric.rstrip("%％")
+        if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", numeric):
+            try:
+                return float(numeric) if "." in numeric else int(numeric)
+            except ValueError:
+                return value
+        return value
+
+    def _looks_like_market_row(self, value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        keys = {str(key).lower() for key in value.keys()}
+        marker_keys = {
+            "date",
+            "trade_date",
+            "tradedate",
+            "trading_date",
+            "close",
+            "close_price",
+            "latest",
+            "latest_price",
+            "price",
+            "pct_chg",
+            "change_pct",
+            "change_percent",
+            "amount",
+            "turnover",
+            "volume",
+            "vol",
+            "nav",
+            "unit_nav",
+        }
+        chinese_markers = {"日期", "交易日期", "收盘", "收盘价", "最新价", "涨跌幅", "成交额", "成交量", "净值"}
+        return bool(keys & marker_keys or set(value.keys()) & chinese_markers)
+
+    def _result_count(self, result: Any, fallback: int) -> int:
+        if isinstance(result, dict):
+            for key in ("count", "total", "row_count", "total_count"):
+                value = result.get(key)
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str) and value.isdigit():
+                    return int(value)
+        return fallback
+
+    def _safe_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        safe = {}
+        for key, value in arguments.items():
+            if any(word in str(key).lower() for word in ("token", "key", "secret", "password", "authorization")):
+                continue
+            safe[str(key)] = value
+        return safe
 
 
 super66_mcp = Super66MCP()

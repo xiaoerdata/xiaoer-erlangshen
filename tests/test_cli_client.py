@@ -6,8 +6,10 @@ from pathlib import Path
 from src.cli import CLI, _display_width, _logo, _panel, _text_panel, main
 from src.commands.server import ServerCommand
 from src.client.server_client import _normalize_login_payload
+from src.client.chrome_search import build_search_url, _is_noise_search_result
 from src.config import get_config, reset_config, update_config
 from src.llm.providers import resolve_llm_settings
+from src.mcp.super66 import Super66MCP
 from src.workspace import approve_workspace, recent_workspaces, workspace_status
 
 
@@ -1365,7 +1367,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.28"
+    assert capsys.readouterr().out.strip() == "0.1.29"
 
 
 @pytest.mark.asyncio
@@ -3640,6 +3642,52 @@ def test_mcp_snapshot_lines_extracts_readable_market_fields():
         "get_index_data:沪深300: 日期 2026-06-10，最新 4100，涨跌幅 1.2，成交量 123456"
     ]
     assert "should-not-render" not in "\n".join(lines)
+
+
+def test_super66_normalizes_supabase_rows_for_market_snapshot():
+    payload = {
+        "code": 200,
+        "data": {
+            "result": {
+                "data": [
+                    {
+                        "指数名称": "沪深300",
+                        "trade_date": "2026-06-10",
+                        "close_price": "4100.5",
+                        "pct_chg": "1.2%",
+                        "turnover_amount": "123,456",
+                    }
+                ],
+                "count": 1,
+            }
+        },
+    }
+
+    result = Super66MCP()._extract_result(payload, "get_index_data", {"index_name": "沪深300"})
+    latest = result["latest"]
+    lines = CLI()._mcp_snapshot_lines({"get_index_data:沪深300": result})
+
+    assert result["source_format"] == "supabase_rows"
+    assert result["count"] == 1
+    assert latest["index_name"] == "沪深300"
+    assert latest["date"] == "2026-06-10"
+    assert latest["close"] == 4100.5
+    assert latest["change_pct"] == 1.2
+    assert lines == [
+        "get_index_data:沪深300: 名称 沪深300，日期 2026-06-10，最新 4100，涨跌幅 1.2，成交额 123456"
+    ]
+
+
+def test_chrome_search_defaults_to_bing_and_filters_block_pages(monkeypatch):
+    monkeypatch.delenv("ERLANGSHEN_SEARCH_ENGINE", raising=False)
+
+    url = build_search_url("今天行情")
+
+    assert "bing.com/search" in url
+    assert "mkt=zh-CN" in url
+    assert _is_noise_search_result("Why did this happen?", "https://www.google.com/sorry/index")
+    assert _is_noise_search_result("Terms of Service", "https://policies.google.com/terms")
+    assert not _is_noise_search_result("央行释放流动性信号", "https://finance.example.com/news")
 
 
 def test_mcp_snapshot_lines_extracts_web_search_titles_without_secret_fields():

@@ -4845,9 +4845,9 @@ class CLI:
             },
             "local_web_search": {
                 "name": "local_chrome_web_search",
-                "use_when": "super-66 MCP 不覆盖的新闻、公告、公开网页、政策原文、图片或图表页面入口",
+                "use_when": "super-66 MCP 不覆盖的新闻、公告、公开网页、政策原文、图片或图表页面入口；中国大陆网络默认使用 Bing",
                 "install": "python3 -m pip install playwright && python3 -m playwright install chrome",
-                "result_shape": "web_search:<query> -> {results:[{title,url,source}], total, provider}",
+                "result_shape": "web_search:<query> -> {results:[{title,url,source}], total, provider} + engine=bing",
                 "resource_behavior": "results 中的 url/title 会被提取成命名链接；用户可用 /links 1 或 /open 1 打开。",
                 "boundary": "只在客户端本机调用 Chrome/Chromium；不读取浏览器隐私数据，不把模型 API Key 发送给二郎神服务端。",
             },
@@ -5594,13 +5594,13 @@ class CLI:
         if not isinstance(row, dict):
             return []
         field_groups = [
-            ("名称", ("name", "index_name", "asset_name", "symbol", "code", "名称", "简称", "代码")),
-            ("日期", ("date", "trade_date", "datetime", "time", "日期", "交易日期", "时间")),
-            ("最新", ("price", "latest", "last", "close", "收盘", "收盘价", "最新价", "现价")),
-            ("涨跌幅", ("change_pct", "pct_chg", "percent", "changePercent", "涨跌幅", "涨幅")),
-            ("涨跌", ("change", "change_amount", "涨跌", "涨跌额")),
-            ("成交额", ("amount", "turnover", "成交额")),
-            ("成交量", ("volume", "vol", "成交量")),
+            ("名称", ("name", "index_name", "asset_name", "product_name", "security_name", "fund_name", "symbol_name", "symbol", "code", "名称", "简称", "代码", "指数名称", "资产名称", "股票简称")),
+            ("日期", ("date", "trade_date", "tradedate", "trading_date", "datetime", "timestamp", "time", "日期", "交易日期", "时间")),
+            ("最新", ("price", "latest", "last", "close", "close_price", "latest_price", "current_price", "last_price", "nav", "unit_nav", "收盘", "收盘价", "最新价", "现价", "净值", "单位净值")),
+            ("涨跌幅", ("change_pct", "pct_chg", "percent", "changePercent", "change_percent", "changeRate", "涨跌幅", "涨幅", "涨跌幅(%)", "日涨跌幅")),
+            ("涨跌", ("change", "change_amount", "price_change", "涨跌", "涨跌额")),
+            ("成交额", ("amount", "turnover", "turnover_amount", "成交额", "成交额(元)")),
+            ("成交量", ("volume", "vol", "成交量", "成交量(手)")),
         ]
         used_keys = set()
         highlights = []
@@ -5652,7 +5652,10 @@ class CLI:
             return rows[-1] if rows else None
         if not isinstance(value, dict):
             return None
-        for key in ("data", "result", "records", "items", "rows", "list", "values", "history", "prices"):
+        latest = value.get("latest")
+        if isinstance(latest, dict):
+            return latest
+        for key in ("data", "result", "payload", "body", "records", "items", "rows", "list", "values", "history", "prices"):
             nested = value.get(key)
             if isinstance(nested, list):
                 rows = [item for item in nested if isinstance(item, dict)]
