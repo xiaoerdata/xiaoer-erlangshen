@@ -1367,7 +1367,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.33"
+    assert capsys.readouterr().out.strip() == "0.1.34"
 
 
 @pytest.mark.asyncio
@@ -3306,6 +3306,47 @@ def test_intent_plan_accepts_string_mcp_tool_shortcuts():
     assert {"name": "get_index_data", "arguments": {"index_name": "恒生科技指数"}} in plan["mcp_tools"]
 
 
+def test_hk_index_aliases_are_routed_to_index_tool():
+    plan = CLI()._normalize_intent_plan(
+        {
+            "intent": "data_lookup",
+            "needs_mcp": True,
+            "tools": [
+                {
+                    "name": "get_global_asset_data",
+                    "arguments": {
+                        "assetName": "HSTECH",
+                        "sourceTable": "恒生科技指数",
+                        "start_date": "2026-05-01",
+                        "end_date": "2026-06-10",
+                        "limit": 60,
+                    },
+                },
+                "get_global_asset_data 恒生指数",
+                {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", "limit": 60}},
+            ],
+        },
+        "看一下港股科技和黄金风险",
+    )
+
+    assert {
+        "name": "get_index_data",
+        "arguments": {
+            "index_name": "恒生科技指数",
+            "start_date": "2026-05-01",
+            "end_date": "2026-06-10",
+            "limit": 60,
+        },
+    } in plan["mcp_tools"]
+    assert {"name": "get_index_data", "arguments": {"index_name": "恒生指数"}} in plan["mcp_tools"]
+    assert {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", "limit": 60}} in plan["mcp_tools"]
+    assert not any(
+        item["name"] == "get_global_asset_data"
+        and item["arguments"].get("asset_name") in {"恒生科技指数", "恒生指数"}
+        for item in plan["mcp_tools"]
+    )
+
+
 def test_display_json_fragments_are_stripped_from_view():
     cli = CLI()
     text = '市场偏弱，先控制仓位。 ```json { "view": "内部结构", "suggestions": []'
@@ -3695,12 +3736,12 @@ def test_super66_maps_mcp_arguments_to_production_schema():
 
     assert mcp._normalize_tool_arguments(
         "get_index_data",
-        {"index_name": "沪深300", "limit": 3},
-    ) == {"indexName": "沪深300", "limit": 3}
+        {"index_name": "恒生科技指数", "start_date": "2026-05-01", "end_date": "2026-06-10", "limit": 3},
+    ) == {"indexName": "恒生科技指数", "startDate": "2026-05-01", "endDate": "2026-06-10", "limit": 3}
     assert mcp._normalize_tool_arguments(
         "get_global_asset_data",
-        {"asset_name": "黄金", "limit": 3},
-    ) == {"assetName": "黄金", "limit": 3}
+        {"asset_name": "黄金", "source_table": "黄金", "start_date": "2026-05-01", "limit": 3},
+    ) == {"assetName": "黄金", "sourceTable": "黄金", "startDate": "2026-05-01", "limit": 3}
 
 
 def test_super66_normalizes_columnar_market_series():

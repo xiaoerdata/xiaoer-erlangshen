@@ -5288,20 +5288,19 @@ class CLI:
         return {"label": label}
 
     def _is_index_market_asset_label(self, label: str) -> bool:
+        return bool(self._canonical_index_market_label(label))
+
+    def _canonical_index_market_label(self, label: str) -> str:
         text = re.sub(r"\s+", "", self._text_field(label).lower())
         if not text:
-            return False
-        aliases = (
-            "恒生科技",
-            "恒生科技指数",
-            "恒生指数",
-            "香港恒生指数",
-            "国企指数",
-            "恒生中国企业指数",
-            "hstech",
-            "hsi",
-        )
-        return any(alias.lower() in text for alias in aliases)
+            return ""
+        if "hstech" in text or "恒生科技" in text:
+            return "恒生科技指数"
+        if "国企指数" in text or "恒生中国企业" in text:
+            return "恒生中国企业指数"
+        if "hsi" in text or "恒生指数" in text or "香港恒生指数" in text:
+            return "恒生指数"
+        return ""
 
     def _normalize_mcp_tool_route(self, name: str, arguments: dict) -> tuple[str, dict]:
         args = dict(arguments or {})
@@ -5312,13 +5311,11 @@ class CLI:
                 or self._text_field(args.get("source_table"))
                 or self._text_field(args.get("sourceTable"))
             )
-            if self._is_index_market_asset_label(label):
-                if "asset_name" in args and "index_name" not in args:
-                    args["index_name"] = args.pop("asset_name")
-                elif "assetName" in args and "index_name" not in args:
-                    args["index_name"] = args.pop("assetName")
-                elif label and "index_name" not in args:
-                    args["index_name"] = label
+            canonical_label = self._canonical_index_market_label(label)
+            if canonical_label:
+                args.pop("asset_name", None)
+                args.pop("assetName", None)
+                args["index_name"] = canonical_label
                 args.pop("asset_code", None)
                 args.pop("assetCode", None)
                 args.pop("source_table", None)
