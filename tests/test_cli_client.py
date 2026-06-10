@@ -1367,7 +1367,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.31"
+    assert capsys.readouterr().out.strip() == "0.1.32"
 
 
 @pytest.mark.asyncio

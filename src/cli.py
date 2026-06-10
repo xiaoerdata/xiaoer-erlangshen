@@ -3688,25 +3688,51 @@ class CLI:
                 max_tokens=min(int(config.llm_max_tokens or 4096), 1600),
             )
         except Exception as exc:
-            message = f"本机大模型调用失败: {exc}"
-            self._remember_agent_failure_plan(
+            message = f"本机大模型调用失败: {type(exc).__name__}: {exc}".rstrip()
+            snapshot_lines = self._mcp_snapshot_lines(mcp_data)
+            synthesis = self._fallback_synthesis_from_snapshots(query, matches, snapshot_lines, message)
+            self._remember_agent_plan(
                 query=query,
                 intent_plan=intent_plan,
                 mapping_query=mapping_query,
                 mcp_data=mcp_data,
                 matches=matches,
+                synthesis=synthesis,
                 provider=active_provider,
                 model=active_model,
-                failure_stage="local_llm_synthesis",
-                failure_message=message,
             )
-            return self._format_agent_failure(
-                message,
-                [
-                    "请检查 /model、/model key、网络代理或模型供应商额度。",
-                    "二郎神服务端没有收到你的大模型 API Key。",
-                ],
+            data_inputs = {
+                "mcp_data": sorted((mcp_data or {}).keys()) if isinstance(mcp_data, dict) else [],
+                "mcp_snapshot": snapshot_lines,
+                "mcp_links": self._mcp_resource_links(mcp_data),
+                "intent_resource_links": intent_plan.get("resource_links") if isinstance(intent_plan.get("resource_links"), list) else [],
+                "agent_trace": self._agent_trace_lines(),
+                "user_data": sorted((payload.get("user_data") or {}).keys()) if isinstance(payload.get("user_data"), dict) else [],
+                "route_source": intent_plan.get("route_source"),
+                "tool_selection_source": intent_plan.get("tool_selection_source"),
+                "tool_selection_note": intent_plan.get("tool_selection_note"),
+            }
+            formatted = self._format_client_advice(
+                query=query,
+                matches=matches,
+                synthesis=synthesis,
+                raw_text="",
+                provider=active_provider,
+                model=active_model,
+                data_inputs=data_inputs,
             )
+            turn_resource_links = self._collect_turn_resource_links(data_inputs, synthesis)
+            self._remember_resource_links(query, turn_resource_links)
+            if isinstance(self._last_agent_plan, dict):
+                self._last_agent_plan.update({
+                    "status": "fallback",
+                    "failure_stage": "local_llm_synthesis",
+                    "failure_message": message,
+                    "resource_links": turn_resource_links,
+                })
+            self._remember_followup_data(mcp_data, synthesis.get("artifact_results"))
+            self._remember_conversation_turn(query, formatted)
+            return formatted
 
         synthesis = self._parse_client_llm_advice(raw_text)
         synthesis = {
@@ -3778,6 +3804,43 @@ class CLI:
                 if clean:
                     lines.append(f"- {clean}")
         return "\n".join(lines)
+
+    def _fallback_synthesis_from_snapshots(self, query: str, matches: list[dict], snapshot_lines: list[str], message: str) -> dict:
+        scene = self._text_field((matches or [{}])[0].get("scene")) if matches else "服务端场景映射"
+        view_lines = [
+            f"本机大模型生成阶段没有稳定返回内容（{message}），我先不让你空等。",
+            "下面是基于本轮已经拿到的 super-66 MCP 行情快照、Bing 网页线索和服务端场景映射做的临时判断；确定性低于完整模型分析。",
+        ]
+        if snapshot_lines:
+            view_lines.append("本轮可用快照包括：" + "；".join(snapshot_lines[:5]) + "。")
+        suggestions = [
+            "先把宽基指数、成长指数和避险/风险偏好资产分开看，不要只用一个指数概括全市场。",
+            "如果指数数据同向走弱，优先降低追高和高弹性仓位；如果只是结构分化，重点看成交额和主线持续性。",
+            "继续追问具体板块、持仓或周期，我可以在已有 MCP 快照基础上再收窄分析。",
+        ]
+        risk_controls = [
+            "模型生成失败时，不把临时框架当作正式投资结论；需要结合实时行情软件复核点位和成交额。",
+            "关注流动性、政策预期、外部风险偏好和成交额变化，这些会影响服务端映射到的场景强度。",
+            "如果你的持仓集中在成长、港股科技或高波动资产，要额外设置回撤和止损/减仓触发线。",
+        ]
+        return {
+            "view": "\n\n".join(view_lines),
+            "suggestions": suggestions,
+            "risk_controls": risk_controls,
+            "missing_data": ["你的关注市场/板块", "持仓和仓位", "分析周期与最大可承受回撤"],
+            "next_actions": [
+                "/model key 重新测试本机模型供应商连接",
+                "/plan 查看本轮 MCP 数据和服务端映射",
+                "补充具体标的或持仓后继续追问",
+            ],
+            "followups": [
+                "把今天 A股快照拆成主线、风险和观察指标。",
+                "只看沪深300、创业板、黄金这几个指标，怎么判断风险偏好？",
+            ],
+            "artifact_results": [],
+            "fallback_reason": message,
+            "scene": scene,
+        }
 
     def _remember_followup_data(self, mcp_data, artifact_results) -> None:
         if isinstance(mcp_data, dict) and mcp_data:
