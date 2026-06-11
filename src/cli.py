@@ -683,7 +683,7 @@ class CLI:
             "MCP-first · local LLM",
         ]
         right_lines = [
-            f"Claude-style CLI workspace · v{__version__}",
+            f"Erlangshen agent workspace · v{__version__}",
             "",
             f"account   {account_state} · {auth_text}",
             f"model     {model_state} · {provider} / {model}",

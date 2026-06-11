@@ -458,8 +458,8 @@ def test_header_shows_agent_workspace_and_tool_channels(monkeypatch, tmp_path, c
     assert "Erlangshen" in output
     assert "███████╗██████╗" in output
     assert "二郎神 ERLANGSHEN" in output
-    assert "Claude-style CLI workspace" in output
-    assert "v0.1.35" in output
+    assert "Erlangshen agent workspace" in output
+    assert "v0.1.36" in output
     assert "core      ready" in output
     assert "account   login · 未登录" in output
     assert "model     need key" in output
@@ -1302,7 +1302,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.35"
+    assert capsys.readouterr().out.strip() == "0.1.36"
 
 
 @pytest.mark.asyncio
