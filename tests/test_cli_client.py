@@ -2435,6 +2435,84 @@ def test_escape_sequence_waits_long_enough_for_arrow_keys(monkeypatch):
     assert all(timeout >= 0.2 for timeout in timeouts)
 
 
+def test_workspace_browser_ignores_bare_escape_instead_of_canceling(monkeypatch, tmp_path):
+    class FakeStdin:
+        def __init__(self, text):
+            self.chars = list(text)
+
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return 0
+
+        def read(self, size=1):
+            return self.chars.pop(0) if self.chars else ""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    fake_stdin = FakeStdin("\x1b\r")
+    monkeypatch.setattr("sys.stdin", fake_stdin)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr("termios.tcgetattr", lambda fd: [])
+    monkeypatch.setattr("termios.tcsetattr", lambda *args, **kwargs: None)
+    monkeypatch.setattr("tty.setcbreak", lambda fd: None)
+    monkeypatch.setattr("select.select", lambda *args, **kwargs: ([], [], []))
+    monkeypatch.setattr(CLI, "_render_workspace_browser", lambda self, current, items, selected: 1)
+    monkeypatch.setattr(CLI, "_clear_terminal_block", lambda self, height: None)
+
+    selected = CLI()._browse_workspace_directory(project)
+
+    assert selected == str(project.resolve())
+
+
+def test_workspace_browser_handles_delayed_arrow_tail(monkeypatch, tmp_path):
+    class FakeStdin:
+        def __init__(self, text):
+            self.chars = list(text)
+
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return 0
+
+        def read(self, size=1):
+            return self.chars.pop(0) if self.chars else ""
+
+    project = tmp_path / "project"
+    child = tmp_path / "child"
+    project.mkdir()
+    child.mkdir()
+    fake_stdin = FakeStdin("\x1b[B\r")
+
+    def fake_select(reads, writes, errors, timeout):
+        if fake_stdin.chars and fake_stdin.chars[0] == "[":
+            return ([], [], [])
+        return (reads, writes, errors) if fake_stdin.chars else ([], [], [])
+
+    monkeypatch.setattr("sys.stdin", fake_stdin)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr("termios.tcgetattr", lambda fd: [])
+    monkeypatch.setattr("termios.tcsetattr", lambda *args, **kwargs: None)
+    monkeypatch.setattr("tty.setcbreak", lambda fd: None)
+    monkeypatch.setattr("select.select", fake_select)
+    monkeypatch.setattr(CLI, "_render_workspace_browser", lambda self, current, items, selected: 1)
+    monkeypatch.setattr(CLI, "_clear_terminal_block", lambda self, height: None)
+    monkeypatch.setattr(
+        CLI,
+        "_workspace_directory_items",
+        lambda self, current: [
+            ("use", project.resolve(), "使用当前目录作为项目沙箱"),
+            ("choose", child.resolve(), "子目录"),
+        ],
+    )
+
+    selected = CLI()._browse_workspace_directory(project)
+
+    assert selected == str(child.resolve())
+
+
 def test_startup_workspace_prompt_can_select_and_authorize_path(monkeypatch, tmp_path, capsys):
     workspace_file = tmp_path / "workspaces.json"
     default_dir = tmp_path / "default"

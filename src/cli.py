@@ -1193,7 +1193,14 @@ class CLI:
                 if ch == "\x1b":
                     action = self._read_escape_sequence()
                     if action == "escape":
-                        return "n"
+                        continue
+                    if action == "up":
+                        selected = (selected - 1) % len(items)
+                    elif action == "down":
+                        selected = (selected + 1) % len(items)
+                    continue
+                if ch == "[":
+                    action = self._read_bracket_escape_tail()
                     if action == "up":
                         selected = (selected - 1) % len(items)
                     elif action == "down":
@@ -1280,7 +1287,7 @@ class CLI:
             self._browser_line(self._workspace_browser_resource_hint(current), width),
             self._browser_line("授权后: 仅在该目录内保存图表、报告、工作记忆和可打开资源索引", width),
             self._browser_line("不会写入: 大模型 API Key、账号 token、服务端内部认知库", width),
-            self._browser_line("↑↓/jk 选择  Enter 打开/确认  p 粘贴路径  q/Esc 跳过", width),
+            self._browser_line("↑↓/jk 选择  Enter 打开/确认  p 粘贴路径  q 跳过", width),
             "├" + "─" * (width - 2) + "┤",
         ]
         for row_index in range(max_rows):
@@ -7752,6 +7759,20 @@ class CLI:
                 "8~": "end",
             }.get(sequence, "escape")
         return "escape"
+
+    def _read_bracket_escape_tail(self, timeout: float = 0.2) -> str:
+        import select
+
+        if not select.select([sys.stdin], [], [], timeout)[0]:
+            return "literal"
+        return {
+            "A": "up",
+            "B": "down",
+            "C": "right",
+            "D": "left",
+            "H": "home",
+            "F": "end",
+        }.get(sys.stdin.read(1), "literal")
 
     def _slash_command_picker(self) -> tuple[str, str, str] | None:
         """Interactive slash-command picker used inside cbreak mode."""
