@@ -459,7 +459,7 @@ def test_header_shows_agent_workspace_and_tool_channels(monkeypatch, tmp_path, c
     assert "███████╗██████╗" in output
     assert "二郎神 ERLANGSHEN" in output
     assert "Erlangshen agent workspace" in output
-    assert "v0.1.36" in output
+    assert "v0.1.37" in output
     assert "core      ready" in output
     assert "account   login · 未登录" in output
     assert "model     need key" in output
@@ -1302,7 +1302,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.36"
+    assert capsys.readouterr().out.strip() == "0.1.37"
 
 
 @pytest.mark.asyncio
@@ -3169,6 +3169,46 @@ async def test_vague_market_query_fetches_default_market_data(monkeypatch):
     assert data[search_key]["query"].startswith(cli._today_market_search_query()[:10])
     assert plan["tool_selection_source"] == "client_market_overview_fallback"
     assert "宽泛行情/盘面问题" in plan["tool_selection_note"]
+
+
+@pytest.mark.asyncio
+async def test_yesterday_market_query_fetches_default_market_data(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments))
+            return {"tool": tool_name, **(arguments or {})}
+
+    async def fake_search(self, query, arguments):
+        return {"query": query, "provider": "local_chrome", "results": [{"title": "昨日市场新闻"}]}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+    monkeypatch.setattr(CLI, "_run_local_chrome_search", fake_search)
+
+    cli = CLI()
+    plan = {"needs_mcp": False, "mcp_tools": []}
+    yesterday_query = "A股 昨日行情 资金面 政策 重要新闻"
+    search_key = cli._mcp_result_key("web_search", {"query": yesterday_query}, 5)
+    data = await cli._collect_client_mcp_data(
+        "分析一下昨天的市场",
+        {},
+        plan,
+    )
+
+    assert [item[0] for item in calls] == [
+        "get_index_data",
+        "get_index_data",
+        "get_index_data",
+        "get_index_data",
+        "get_global_asset_data",
+    ]
+    assert "get_index_data:沪深300" in data
+    assert "get_index_data:恒生科技指数" in data
+    assert "get_global_asset_data:黄金" in data
+    assert data[search_key]["query"] == yesterday_query
+    assert plan["needs_mcp"] is True
+    assert plan["tool_selection_source"] == "client_market_overview_fallback"
 
 
 @pytest.mark.asyncio

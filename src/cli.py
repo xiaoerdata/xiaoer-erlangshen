@@ -4612,7 +4612,7 @@ class CLI:
                 tool_selection_note = "本机大模型未给出具体工具，客户端按 intent/data_recipes 补齐默认 MCP 工具，避免无事实数据分析。"
         if self._is_vague_market_query(query):
             if not tools:
-                tools = self._default_market_overview_tools()
+                tools = self._default_market_overview_tools(query)
                 tool_selection_source = "client_market_overview_fallback"
                 if not tool_selection_note:
                     tool_selection_note = "用户问题是宽泛行情/盘面问题，本机大模型未给出工具时，客户端补齐指数、全球资产和 web_search 默认组合。"
@@ -5246,7 +5246,7 @@ class CLI:
                 intent_plan["tool_selection_note"] = "传入的意图计划没有具体工具，客户端按 intent/data_recipes 补齐默认 MCP 工具。"
         if self._is_vague_market_query(query):
             if not tools:
-                tools = self._default_market_overview_tools()
+                tools = self._default_market_overview_tools(query)
                 if isinstance(intent_plan, dict):
                     intent_plan["tool_selection_source"] = "client_market_overview_fallback"
                     intent_plan["tool_selection_note"] = "宽泛行情/盘面问题没有工具计划，客户端补齐指数、全球资产和 web_search 默认组合。"
@@ -5301,12 +5301,12 @@ class CLI:
         text = re.sub(r"\s+", "", (query or "").lower())
         if not text:
             return False
-        market_words = ("行情", "市场", "盘面", "大盘", "今天", "今日", "现在", "走势")
-        vague_forms = ("怎么样", "如何", "咋样", "怎么看", "什么情况", "情况")
+        market_words = ("行情", "市场", "盘面", "大盘", "今天", "今日", "昨天", "昨日", "现在", "近期", "最近", "走势")
+        vague_forms = ("怎么样", "如何", "咋样", "怎么看", "什么情况", "情况", "分析", "复盘", "回顾", "过一遍", "看一下", "看看")
         return any(word in text for word in market_words) and any(form in text for form in vague_forms)
 
-    def _default_market_overview_tools(self) -> list[dict]:
-        search_query = self._today_market_search_query()
+    def _default_market_overview_tools(self, query: str = "") -> list[dict]:
+        search_query = self._market_overview_search_query(query)
         window = self._recent_market_window_args(days=45)
         return [
             {"name": "get_index_data", "arguments": {"index_name": "沪深300", **window}},
@@ -5324,6 +5324,14 @@ class CLI:
 
     def _today_market_search_query(self) -> str:
         return "A股 今日行情 资金面 政策 重要新闻"
+
+    def _market_overview_search_query(self, query: str = "") -> str:
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        if "昨天" in text or "昨日" in text:
+            return "A股 昨日行情 资金面 政策 重要新闻"
+        if "最近" in text or "近期" in text:
+            return "A股 近期行情 资金面 政策 重要新闻"
+        return self._today_market_search_query()
 
     def _is_event_market_query(self, query: str) -> bool:
         text = re.sub(r"\s+", "", self._text_field(query).lower())
@@ -5409,7 +5417,7 @@ class CLI:
         if normalized in {"risk", "general_investment"} and (specific_tools or event_tools):
             return self._dedupe_mcp_tools(specific_tools + event_tools)
         if normalized in {"market_overview", "data_lookup"}:
-            return self._default_market_overview_tools()
+            return self._default_market_overview_tools(query)
         if normalized == "macro":
             return self._dedupe_mcp_tools(specific_tools + (event_tools or self._event_market_default_tools(query)))
         return []
