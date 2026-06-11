@@ -3692,6 +3692,75 @@ def test_specific_single_asset_query_adds_precise_mcp_tool_when_llm_omits_tools(
     assert "get_global_asset_data" not in {item["name"] for item in plan["mcp_tools"]}
 
 
+def test_astock_query_defaults_to_search_realtime_and_history_tools():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "single_asset", "needs_mcp": False, "mcp_tools": []},
+        "分析一下贵州茅台的表现",
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    assert plan["needs_mcp"] is True
+    assert plan["tool_selection_source"] == "client_default_by_intent"
+    assert "search_astocks" in tool_names
+    assert {"name": "get_astock_realtime", "arguments": {"code": "600519"}} in plan["mcp_tools"]
+    assert any(
+        item["name"] == "get_astock_history"
+        and item["arguments"].get("code") == "600519"
+        and item["arguments"].get("startDate")
+        for item in plan["mcp_tools"]
+    )
+
+
+def test_astock_grounding_removes_ungrounded_prices_and_artifacts():
+    cli = CLI()
+    plan = cli._normalize_intent_plan(
+        {"intent": "single_asset", "needs_mcp": False, "mcp_tools": []},
+        "分析一下贵州茅台的表现",
+    )
+    synthesis = cli._enforce_market_fact_grounding(
+        "分析一下贵州茅台的表现",
+        {
+            "view": "贵州茅台在1688元附近，关注1650元支撑。",
+            "suggestions": ["跌破1650元止损"],
+            "artifacts": [{"type": "chart", "data": {"2026-06-11": 1688}}],
+        },
+        {"search_astocks:贵州茅台": {"rows": [{"code": "600519", "name": "贵州茅台"}]}},
+        plan,
+    )
+
+    text = json.dumps(synthesis, ensure_ascii=False)
+    assert "1688" not in text
+    assert "1650" not in text
+    assert synthesis["artifacts"] == []
+    assert "没有拿到 Super66 MCP 返回的可核验股票行情" in synthesis["view"]
+
+
+@pytest.mark.asyncio
+async def test_collect_astock_data_follows_search_result_with_realtime_and_history(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments))
+            if tool_name == "search_astocks":
+                return {"rows": [{"code": "600519", "name": "贵州茅台"}]}
+            return {"latest": {"code": arguments["code"], "date": "2026-06-11", "close": 1450.0}}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    cli = CLI()
+    data = await cli._collect_client_mcp_data(
+        "贵州茅台表现",
+        {},
+        {"intent": "single_asset", "needs_mcp": True, "mcp_tools": [{"name": "search_astocks", "arguments": {"keyword": "贵州茅台"}}]},
+    )
+
+    assert calls[0] == ("search_astocks", {"keyword": "贵州茅台"})
+    assert ("get_astock_realtime", {"code": "600519"}) in calls
+    assert any(call[0] == "get_astock_history" and call[1]["code"] == "600519" for call in calls)
+    assert cli._market_fact_grounding("贵州茅台表现", data, {"mcp_tools": [{"name": "search_astocks"}]})["status"] == "grounded"
+
+
 def test_global_index_daily_table_name_does_not_trigger_ai_event_defaults():
     plan = CLI()._normalize_intent_plan(
         {"intent": "data_lookup", "needs_mcp": False, "mcp_tools": []},

@@ -3790,6 +3790,7 @@ class CLI:
             message = f"本机大模型调用失败: {type(exc).__name__}: {exc}".rstrip()
             snapshot_lines = self._mcp_snapshot_lines(mcp_data)
             synthesis = self._fallback_synthesis_from_snapshots(query, matches, snapshot_lines, message)
+            synthesis = self._enforce_market_fact_grounding(query, synthesis, mcp_data, intent_plan)
             self._remember_agent_plan(
                 query=query,
                 intent_plan=intent_plan,
@@ -3810,6 +3811,7 @@ class CLI:
                 "route_source": intent_plan.get("route_source"),
                 "tool_selection_source": intent_plan.get("tool_selection_source"),
                 "tool_selection_note": intent_plan.get("tool_selection_note"),
+                "fact_grounding": self._market_fact_grounding(query, mcp_data, intent_plan),
             }
             formatted = self._format_client_advice(
                 query=query,
@@ -3834,6 +3836,7 @@ class CLI:
             return formatted
 
         synthesis = self._parse_client_llm_advice(raw_text)
+        synthesis = self._enforce_market_fact_grounding(query, synthesis, mcp_data, intent_plan)
         synthesis = {
             **synthesis,
             "artifact_results": await self._materialize_synthesis_artifacts(synthesis, client, query),
@@ -3858,6 +3861,7 @@ class CLI:
             "route_source": intent_plan.get("route_source"),
             "tool_selection_source": intent_plan.get("tool_selection_source"),
             "tool_selection_note": intent_plan.get("tool_selection_note"),
+            "fact_grounding": self._market_fact_grounding(query, mcp_data, intent_plan),
         }
         formatted = self._format_client_advice(
             query=query,
@@ -4287,6 +4291,7 @@ class CLI:
             "recent_resources": self._recent_resource_context(),
             "client_intent_plan": intent_plan or {},
             "client_intent_plan_summary": self._intent_plan_summary(intent_plan or {}),
+            "fact_grounding": self._market_fact_grounding(query, mcp_data or {}, intent_plan or {}),
             "response_contract": {
                 "view": "自然语言综合判断",
                 "suggestions": ["字符串，或包含 action/reason/condition 的对象"],
@@ -4311,6 +4316,9 @@ class CLI:
             "requirements": [
                 "先用自然语言给综合判断，再给少量可执行建议和风控",
                 "如果 mcp_data 已返回行情或新闻数据，必须优先结合这些数据回答，不要再说没有实时市场数据",
+                "严格事实边界：股票价格、指数点位、涨跌幅、支撑位、压力位、区间收益和图表数值只能来自 mcp_data 或用户显式提供的数据；不能用模型记忆、历史印象或估算补数",
+                "如果是具体股票问题但 mcp_data 没有 get_astock_realtime/get_astock_history 的真实价格或收盘价，必须明确说本轮没有拿到可核验行情；禁止输出任何具体股价、支撑位、压力位或走势图 artifacts",
+                "如需给支撑/压力，只能基于 MCP 历史 high/low/close 明确推导，并说明是观察位而不是凭经验判断",
                 "凡涉及区间收益率、资产表现对比、图表收益值，优先使用起始收盘价和结束收盘价按 end_close / start_close - 1 计算；不要把单日涨跌幅字段当作区间收益",
                 "对于“今天行情怎么样/市场怎么看”这类宽泛问题，要把它当成市场概览任务处理，必须先引用 market_data_brief.snapshots 或网页线索，再给方向性解读",
                 "宽泛行情问题已经有 market_data_brief.snapshots 时，missing_data 不要再列具体指数、实时点位、新闻事件等基础行情项；只保留用户持仓、周期、仓位、风险偏好等个性化落地信息，没有就留空",
@@ -4366,6 +4374,7 @@ class CLI:
                 "用户可用 /links 1、/open 1、/links open 1 或 /open link 1 打开。"
             ),
             "safety": "不要输出 token/key/secret/password/authorization 等敏感字段；大模型 API Key 只在客户端本机使用。",
+            "grounding_rule": "所有行情数值必须可追溯到 MCP/用户数据；没有真实行情时宁可缺数，也不要让大模型凭记忆补价格。",
         }
 
     def _server_client_contract(self) -> dict:
@@ -4395,6 +4404,7 @@ class CLI:
                 "不要只按关键词触发固定工具链",
                 "不要在已有 MCP 或 web_search 事实时继续机械追问基础行情",
                 "不要为了图表或报告编造不存在的数值",
+                "不要在具体股票问题中用模型记忆生成股价、技术支撑位、压力位或走势图",
             ],
             "llm_must_return": [
                 "route_summary: 解释你如何理解真实任务",
@@ -5327,9 +5337,73 @@ class CLI:
                     collected[key] = await mcp.call_tool(name, arguments, use_cache=True)
             except Exception as exc:
                 collected[f"{key}:error"] = self._sanitize_api_key_error(exc, "")
+        await self._collect_astock_followup_data(collected, tools, mcp)
         if not collected:
             collected["note"] = "super-66 MCP / 本地网页线索暂不可用，本次仅使用用户问题和服务端场景映射。"
         return collected
+
+    async def _collect_astock_followup_data(self, collected: dict, tools: list[dict], mcp) -> None:
+        if not isinstance(collected, dict) or mcp is None:
+            return
+        if not any(isinstance(item, dict) and item.get("name") == "search_astocks" for item in tools or []):
+            return
+        existing_codes = {
+            self._text_field((item.get("arguments") or {}).get("code"))
+            for item in tools or []
+            if isinstance(item, dict) and item.get("name") in {"get_astock_realtime", "get_astock_history"} and isinstance(item.get("arguments"), dict)
+        }
+        window = self._recent_market_window_args(days=120)
+        for key, value in list(collected.items()):
+            if not str(key).startswith("search_astocks:") or self._mcp_value_has_error(value):
+                continue
+            for code in self._extract_astock_codes_from_value(value):
+                if code in existing_codes:
+                    continue
+                existing_codes.add(code)
+                for tool_name, args in (
+                    ("get_astock_realtime", {"code": code}),
+                    ("get_astock_history", {"code": code, **window}),
+                ):
+                    result_key = self._mcp_result_key(tool_name, args, len(collected))
+                    if result_key in collected:
+                        continue
+                    self._show_progress(f"正在补充股票真实行情: {self._mcp_tool_label(tool_name, args)}")
+                    try:
+                        collected[result_key] = await mcp.call_tool(tool_name, args, use_cache=True)
+                    except Exception as exc:
+                        collected[f"{result_key}:error"] = self._sanitize_api_key_error(exc, "")
+                break
+
+    def _extract_astock_codes_from_value(self, value) -> list[str]:
+        codes: list[str] = []
+        for row in self._flatten_mcp_dict_rows(value):
+            for key in ("code", "symbol", "ts_code", "ticker", "证券代码", "股票代码", "代码"):
+                raw = row.get(key)
+                text = self._text_field(raw)
+                match = re.search(r"(?<!\d)([036]\d{5})(?:\.[A-Z]{2})?(?!\d)", text, flags=re.I)
+                if match and match.group(1) not in codes:
+                    codes.append(match.group(1))
+                    break
+            if len(codes) >= 3:
+                break
+        return codes
+
+    def _flatten_mcp_dict_rows(self, value, depth: int = 0) -> list[dict]:
+        if depth > 6:
+            return []
+        if isinstance(value, list):
+            rows: list[dict] = []
+            for item in value:
+                rows.extend(self._flatten_mcp_dict_rows(item, depth + 1))
+            return rows
+        if not isinstance(value, dict):
+            return []
+        rows = [value] if any(isinstance(item, (str, int, float)) for item in value.values()) else []
+        for key in ("latest", "data", "result", "payload", "body", "records", "items", "rows", "list", "values", "history", "prices", "content"):
+            nested = value.get(key)
+            if isinstance(nested, (dict, list)):
+                rows.extend(self._flatten_mcp_dict_rows(nested, depth + 1))
+        return rows
 
     def _is_vague_market_query(self, query: str) -> bool:
         text = re.sub(r"\s+", "", (query or "").lower())
@@ -5454,10 +5528,58 @@ class CLI:
             tools.append({"name": "web_search", "arguments": {"query": query, "count": 5}})
         return tools
 
+    def _specific_astock_tools_from_query(self, query: str) -> list[dict]:
+        text = self._text_field(query)
+        compact = re.sub(r"\s+", "", text.lower())
+        if not compact or self._canonical_index_market_label(compact):
+            return []
+        code_match = re.search(r"(?<!\d)(?:sh|sz)?([036]\d{5})(?!\d)", compact, flags=re.I)
+        keyword = ""
+        code = code_match.group(1) if code_match else ""
+        known_astocks = {
+            "贵州茅台": ("600519", "贵州茅台"),
+            "茅台": ("600519", "贵州茅台"),
+        }
+        for alias, (known_code, known_name) in known_astocks.items():
+            if alias in text or alias.lower() in compact:
+                code = code or known_code
+                keyword = known_name
+                break
+        if not keyword and code:
+            keyword = code
+        if not keyword:
+            astock_context_words = (
+                "股票", "个股", "股价", "财报", "公司",
+            )
+            if not any(word in compact for word in astock_context_words):
+                return []
+            cleaned = re.sub(
+                r"(分析一下|帮我|看一下|看看|今天|昨日|昨天|最近|近期|的|表现|走势|股价|怎么样|如何|怎么走|A股|a股|股票|个股)",
+                "",
+                text,
+                flags=re.I,
+            ).strip(" ，。！？?;；")
+            generic_assets = {"资产", "市场", "行情", "大盘", "股市", "股票", "个股", "公司"}
+            if cleaned and 2 <= len(cleaned) <= 12 and cleaned not in generic_assets:
+                keyword = cleaned
+        if not keyword:
+            return []
+        window = self._recent_market_window_args(days=120)
+        tools: list[dict] = [{"name": "search_astocks", "arguments": {"keyword": keyword, "limit": 5}}]
+        if code:
+            tools.extend([
+                {"name": "get_astock_realtime", "arguments": {"code": code}},
+                {"name": "get_astock_history", "arguments": {"code": code, **window}},
+            ])
+        return tools
+
     def _default_tools_for_intent(self, intent: str, query: str = "") -> list[dict]:
         normalized = self._text_field(intent).lower()
+        astock_tools = self._specific_astock_tools_from_query(query)
         specific_tools = self._specific_market_tools_from_query(query)
         event_tools = self._event_market_default_tools(query) if self._is_event_market_query(query) else []
+        if normalized in {"single_asset", "data_lookup"} and astock_tools:
+            return self._dedupe_mcp_tools(astock_tools + specific_tools + event_tools)
         if normalized in {"single_asset", "data_lookup", "market_overview"} and specific_tools:
             return self._dedupe_mcp_tools(specific_tools + event_tools)
         if normalized in {"risk", "general_investment"} and (specific_tools or event_tools):
@@ -5826,6 +5948,99 @@ class CLI:
             "snapshots": self._mcp_snapshot_lines(mcp_data),
             "warnings": error_keys,
             "instruction": "可用数据源必须进入综合判断；字段不标准时先概括数据源和方向，避免声称没有实时数据。",
+        }
+
+    def _market_fact_grounding(self, query: str, mcp_data, intent_plan: dict | None = None) -> dict:
+        plan = intent_plan if isinstance(intent_plan, dict) else {}
+        tools = plan.get("mcp_tools") if isinstance(plan.get("mcp_tools"), list) else []
+        tool_names = {self._text_field(item.get("name")) for item in tools if isinstance(item, dict)}
+        requires_astock = bool(
+            tool_names & {"search_astocks", "get_astock_realtime", "get_astock_history"}
+            or self._specific_astock_tools_from_query(query)
+        )
+        if not requires_astock:
+            return {"requires_astock_price": False, "status": "not_required"}
+        if not isinstance(mcp_data, dict) or not mcp_data:
+            return {
+                "requires_astock_price": True,
+                "status": "missing",
+                "instruction": "具体股票问题没有可核验 MCP 行情，禁止输出具体股价、支撑位、压力位或走势图。",
+            }
+        price_sources: list[str] = []
+        for key, value in mcp_data.items():
+            key_text = str(key)
+            if not key_text.startswith(("get_astock_realtime:", "get_astock_history:")):
+                continue
+            if self._mcp_value_has_error(value) or "error" in key_text.lower():
+                continue
+            if self._value_has_market_price(value):
+                price_sources.append(key_text)
+        if price_sources:
+            return {
+                "requires_astock_price": True,
+                "status": "grounded",
+                "price_sources": price_sources[:6],
+                "instruction": "股票价格和图表数值只能引用 price_sources 对应 MCP 返回；支撑/压力只能由历史 high/low/close 推导。",
+            }
+        errors = [str(key) for key in mcp_data.keys() if "error" in str(key).lower()]
+        return {
+            "requires_astock_price": True,
+            "status": "missing",
+            "warnings": errors[:6],
+            "instruction": "本轮没有 get_astock_realtime/get_astock_history 的可核验价格；禁止输出具体股价、技术价位和走势图。",
+        }
+
+    def _value_has_market_price(self, value) -> bool:
+        if self._close_points(value):
+            return True
+        for row in self._flatten_mcp_dict_rows(value):
+            if self._first_numeric_value(
+                row,
+                (
+                    "price",
+                    "latest",
+                    "last",
+                    "close",
+                    "close_price",
+                    "latest_price",
+                    "current_price",
+                    "last_price",
+                    "收盘",
+                    "收盘价",
+                    "最新价",
+                    "现价",
+                ),
+            ) is not None:
+                return True
+        return False
+
+    def _enforce_market_fact_grounding(self, query: str, synthesis: dict, mcp_data, intent_plan: dict | None = None) -> dict:
+        grounding = self._market_fact_grounding(query, mcp_data, intent_plan)
+        if grounding.get("status") != "missing":
+            return synthesis if isinstance(synthesis, dict) else {}
+        return {
+            "view": (
+                "这轮我没有拿到 Super66 MCP 返回的可核验股票行情，所以不会给出具体股价、支撑位、压力位或走势图。"
+                "刚才这类数值如果不是 MCP 明确返回，就应该视为无效。请先修复数据通道或确认标的代码后再做价格分析。"
+            ),
+            "suggestions": [
+                "先用 /plan 查看本轮是否成功调用 search_astocks、get_astock_realtime 和 get_astock_history。",
+                "执行 /doctor 检查登录态、Super66 MCP 权限和网络连通性。",
+                "重新提问时可以带上股票代码，例如“分析一下贵州茅台 600519 的表现”。",
+            ],
+            "risk_controls": [
+                "没有真实 MCP 行情时，不基于记忆价格做交易判断。",
+                "价格、涨跌幅、支撑/压力和图表只以 MCP 或用户显式提供数据为准。",
+            ],
+            "missing_data": [
+                "缺少 get_astock_realtime 或 get_astock_history 返回的真实价格/收盘价。",
+            ],
+            "followups": [
+                "检查完 MCP 后，再重新分析这只股票的近 120 天走势。",
+                "只基于真实 MCP 数据，帮我生成一张收盘价走势图。",
+            ],
+            "next_actions": ["/plan", "/doctor"],
+            "artifacts": [],
         }
 
     def _mcp_snapshot_lines(self, mcp_data, limit: int = 6) -> list[str]:
