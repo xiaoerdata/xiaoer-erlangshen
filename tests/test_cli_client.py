@@ -1593,9 +1593,9 @@ async def test_client_side_advice_maps_server_then_calls_local_llm(monkeypatch, 
     result = await cli.dispatch("/advice A股怎么看")
 
     assert "我先按“A股怎么看”来理解" in result
-    assert "服务端场景：市场监测与事件响应" in result
-    assert "本机模型：DeepSeek / deepseek-v4-flash" in result
-    assert "大模型 API Key 只在本机直连供应商" in result
+    assert "服务端场景：市场监测与事件响应" not in result
+    assert "本机模型：DeepSeek / deepseek-v4-flash" not in result
+    assert "大模型 API Key 只在本机直连供应商" not in result
     assert "降低单点暴露" in result
     plan = await cli.dispatch("/plan")
     assert "路由来源: 本机大模型意图理解" in plan
@@ -1748,7 +1748,7 @@ async def test_client_side_advice_uses_local_intent_to_fetch_super66_mcp(monkeyp
 
     assert "结合实时数据看" in result
     assert "先看主线" in result
-    assert "服务端场景：市场监测与事件响应" in result
+    assert "服务端场景：市场监测与事件响应" not in result
     assert "本轮执行：" not in result
     assert "Agent Trail：" not in result
     plan = await cli.dispatch("/plan")
@@ -2523,7 +2523,8 @@ async def test_artifacts_command_lists_saved_chart_files(monkeypatch, tmp_path):
     assert "- 图表视图: 1" in result
     assert "- 最近报告: .erlangshen/artifacts/reports/20260101-120000-资产表现.md" in result
     assert "- 最近图表: .erlangshen/artifacts/charts/20260101-120000-资产表现" in result
-    assert "- 最近可打开: .erlangshen/artifacts/charts/20260101-120000-资产表现.html" in result
+    assert "- 最近可打开:" in result
+    assert ".erlangshen/artifacts/charts/20260101-120000-资产表现.html" in result
     assert "- 名称链接: 打开最近产物: file://" in result
     assert "- 打开: /open report 或 /open chart" in result
     assert "产物收件箱:" in result
@@ -3153,18 +3154,27 @@ async def test_vague_market_query_fetches_default_market_data(monkeypatch):
         "get_index_data",
         "get_index_data",
         "get_index_data",
+        "get_index_data",
+        "get_global_asset_data",
+        "get_global_asset_data",
         "get_global_asset_data",
     ]
     assert calls[0][1]["index_name"] == "沪深300"
     assert calls[1][1]["index_name"] == "上证指数"
     assert calls[2][1]["index_name"] == "创业板指"
     assert calls[3][1]["index_name"] == "恒生科技指数"
-    assert calls[4][1]["asset_name"] == "黄金"
+    assert calls[4][1]["index_name"] == "恒生指数"
+    assert calls[5][1]["asset_name"] == "黄金"
+    assert calls[6][1]["asset_name"] == "美元指数"
+    assert calls[7][1]["asset_name"] == "原油"
     assert "get_index_data:沪深300" in data
     assert "get_index_data:上证指数" in data
     assert "get_index_data:创业板指" in data
     assert "get_index_data:恒生科技指数" in data
+    assert "get_index_data:恒生指数" in data
     assert "get_global_asset_data:黄金" in data
+    assert "get_global_asset_data:美元指数" in data
+    assert "get_global_asset_data:原油" in data
     assert data[search_key]["provider"] == "local_chrome"
     assert data[search_key]["query"].startswith(cli._today_market_search_query()[:10])
     assert plan["tool_selection_source"] == "client_market_overview_fallback"
@@ -3201,11 +3211,17 @@ async def test_yesterday_market_query_fetches_default_market_data(monkeypatch):
         "get_index_data",
         "get_index_data",
         "get_index_data",
+        "get_index_data",
+        "get_global_asset_data",
+        "get_global_asset_data",
         "get_global_asset_data",
     ]
     assert "get_index_data:沪深300" in data
     assert "get_index_data:恒生科技指数" in data
+    assert "get_index_data:恒生指数" in data
     assert "get_global_asset_data:黄金" in data
+    assert "get_global_asset_data:美元指数" in data
+    assert "get_global_asset_data:原油" in data
     assert data[search_key]["query"] == yesterday_query
     assert plan["needs_mcp"] is True
     assert plan["tool_selection_source"] == "client_market_overview_fallback"
@@ -3273,6 +3289,9 @@ async def test_market_overview_intent_fetches_default_data_without_keyword_rules
         "get_index_data",
         "get_index_data",
         "get_index_data",
+        "get_index_data",
+        "get_global_asset_data",
+        "get_global_asset_data",
         "get_global_asset_data",
     ]
     assert "get_index_data:沪深300" in data
@@ -4131,12 +4150,11 @@ async def test_client_side_advice_formats_string_sections_as_items():
         },
     )
 
-    assert "我已先读取 super-66 MCP 行情快照" in result
-    assert "get_index_data:沪深300" in result
-    assert "get_global_asset_data:黄金" in result
-    assert "关键数据：" in result
-    assert "日期 2026-06-10" in result
-    assert "涨跌幅 1.2" in result
+    assert "我已读取 2 个数据源（指数 1、跨资产 1）" in result
+    assert "原始明细可用 /plan 查看" in result
+    assert "关键数据：" not in result
+    assert "日期 2026-06-10" not in result
+    assert "涨跌幅 1.2" not in result
     assert "- 先看成交量。" in result
     assert "- 再看主线持续性。" in result
     assert "- 不追高。" in result
@@ -4711,11 +4729,12 @@ def test_vague_market_answer_removes_empty_data_claim_when_snapshot_exists():
         },
     )
 
-    assert "关键数据：" in result
+    assert "关键数据：" not in result
+    assert "我已读取 2 个数据源（指数 1、事件/宏观线索 1）" in result
     assert "可打开资源：" in result
     assert "科技成长新闻: https://example.com/news" in result
     assert "Agent Trail：" not in result
-    assert "科技成长板块成交活跃" in result
+    assert "科技成长成交活跃" in result
     assert "没有具体的实时市场数据" not in result
     assert "无法准确描述今天整体行情" not in result
     assert "方向性盘面判断" in result
@@ -4815,7 +4834,8 @@ def test_vague_market_answer_filters_generic_missing_data_when_snapshot_exists()
         },
     )
 
-    assert "关键数据：" in result
+    assert "关键数据：" not in result
+    assert "我已读取 2 个数据源（指数 1、事件/宏观线索 1）" in result
     assert "如果要落到你的账户，我还需要知道：" in result
     assert "你的持仓和风险偏好" in result
     assert "具体市场指数的实时点位" not in result
@@ -4869,7 +4889,7 @@ def test_client_advice_shows_partial_data_failures_and_repair_action():
         },
     )
 
-    assert "我已先读取 super-66 MCP 行情快照" in result
+    assert "我已读取 1 个数据源（指数 1）" in result
     assert "另有 1 个数据通道未成功" in result
     assert "- /plan 看本轮数据来源" in result
     assert "执行 /doctor 检查本地 Chrome web_search" in result

@@ -1050,8 +1050,10 @@ class CLI:
             return
         workspace = resolve_workspace_path()
         status = workspace_status(workspace)
-        if status.get("allowed"):
+        if status.get("allowed") and not self._is_package_install_workspace(status.get("path") or workspace):
             return
+        if status.get("allowed"):
+            print(_color("当前项目文件夹指向客户端安装目录，请重新选择一个用于保存图表、报告和记忆的项目文件夹。", "33"))
         line, _ = self._select_and_authorize_workspace(workspace, force=True)
         if "已跳过" in line:
             print(_color("项目文件夹未授权，本次仅进行对话与远程接口调用，不写入本地分析产物。", "33"))
@@ -1093,6 +1095,18 @@ class CLI:
             if selected is not None:
                 return selected
         return self._prompt_workspace_path(workspace)
+
+    def _is_package_install_workspace(self, workspace) -> bool:
+        if not workspace:
+            return False
+        package_root = Path(__file__).resolve().parents[1]
+        if "node_modules" not in package_root.parts:
+            return False
+        try:
+            Path(workspace).expanduser().resolve().relative_to(package_root)
+            return True
+        except (OSError, ValueError):
+            return False
 
     def _prompt_workspace_path(self, workspace) -> str:
         prompt = (
@@ -3095,7 +3109,7 @@ class CLI:
         else:
             uri = self._file_uri(target_text)
         if sys.stdout.isatty() and not os.getenv("ERLANGSHEN_NO_OSC8"):
-            return f"\033]8;;{uri}\033\\{clean_label}\033]8;;\033\\ ({uri})"
+            return f"\033]8;;{uri}\033\\{clean_label}\033]8;;\033\\"
         return f"{clean_label}: {uri}"
 
     def _workspace_file_link(self, path: str | Path, workspace: str, label: str | None = None) -> str:
@@ -4289,6 +4303,8 @@ class CLI:
                 "如果用户是“做成图表/继续/那它呢/详细说说”这类短追问，必须结合 recent_conversation 判断承接对象",
                 "如果用户是图表、报告或承接上一轮的追问，必须参考 previous_mcp_context 和 recent_artifacts；但不能编造其中不存在的数值",
                 "如果用户提到“刚才那个网页/图片/图/链接/报告”，必须参考 recent_resources 和 recent_artifacts，并用自然语言说明可通过 /links 或 /open 重新打开",
+                "市场分析默认不是单点快照：要综合指数、港股/美股联动、黄金/美元/原油等跨资产、成交与事件线索，有条件时用 120 天窗口观察趋势和相对强弱",
+                "不要逐条罗列 MCP 原始快照；把数据消化成趋势、结构、相对强弱、异常和可能驱动，明细留给 /plan",
                 "如果 MCP、web_search、服务端或大模型返回网页、图片、HTML、PDF 等非文本资源，必须保留为命名 resource_links，不要试图把富文本或二进制内容直接塞进终端",
                 "优先参考 client_intent_plan 中的 tool_rationale 和 data_strategy，说明你为什么用了这些数据边界",
                 "参考 client_intent_plan.route_summary、data_confidence、chart_opportunity、missing_inputs，把回答做成自然的分析路线，不要像规则模板",
@@ -4666,7 +4682,7 @@ class CLI:
             "route_warning": self._text_field(plan.get("route_warning") or plan.get("intent_error")),
             "needs_server_mapping": bool(plan.get("needs_server_mapping", True)),
             "needs_mcp": needs_mcp,
-            "mcp_tools": self._dedupe_mcp_tools(tools)[:6],
+            "mcp_tools": self._dedupe_mcp_tools(tools)[:12],
             "tool_selection_source": tool_selection_source,
             "tool_selection_note": tool_selection_note,
             "composition_patterns_used": composition_patterns_used,
@@ -5277,7 +5293,7 @@ class CLI:
             except Exception as exc:
                 mcp_init_error = self._sanitize_api_key_error(exc, "")
                 collected["super66_error"] = mcp_init_error
-        for item in self._dedupe_mcp_tools(tools)[:6]:
+        for item in self._dedupe_mcp_tools(tools)[:12]:
             name = item.get("name")
             arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
             if name not in self._allowed_super66_tools():
@@ -5307,14 +5323,19 @@ class CLI:
 
     def _default_market_overview_tools(self, query: str = "") -> list[dict]:
         search_query = self._market_overview_search_query(query)
-        window = self._recent_market_window_args(days=45)
+        macro_query = self._market_overview_macro_search_query(query)
+        window = self._recent_market_window_args(days=120)
         return [
             {"name": "get_index_data", "arguments": {"index_name": "沪深300", **window}},
             {"name": "get_index_data", "arguments": {"index_name": "上证指数", **window}},
             {"name": "get_index_data", "arguments": {"index_name": "创业板指", **window}},
             {"name": "get_index_data", "arguments": {"index_name": "恒生科技指数", **window}},
+            {"name": "get_index_data", "arguments": {"index_name": "恒生指数", **window}},
             {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", **window}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": "美元指数", **window}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": "原油", **window}},
             {"name": "web_search", "arguments": {"query": search_query, "count": 5}},
+            {"name": "web_search", "arguments": {"query": macro_query, "count": 5}},
         ]
 
     def _recent_market_window_args(self, days: int = 45) -> dict:
@@ -5332,6 +5353,13 @@ class CLI:
         if "最近" in text or "近期" in text:
             return "A股 近期行情 资金面 政策 重要新闻"
         return self._today_market_search_query()
+
+    def _market_overview_macro_search_query(self, query: str = "") -> str:
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        date_hint = "昨日" if ("昨天" in text or "昨日" in text) else "今日"
+        if "最近" in text or "近期" in text:
+            date_hint = "近期"
+        return f"中国 {date_hint} 宏观 数据 PMI CPI 利率 汇率 流动性 政策"
 
     def _is_event_market_query(self, query: str) -> bool:
         text = re.sub(r"\s+", "", self._text_field(query).lower())
@@ -6411,10 +6439,6 @@ class CLI:
         if source_line:
             lines.extend(["", source_line])
         snapshot_lines = data_inputs.get("mcp_snapshot") if isinstance(data_inputs, dict) else []
-        if snapshot_lines:
-            lines.extend(["", "关键数据："])
-            for item in snapshot_lines[:4]:
-                lines.append(f"- {item}")
         mcp_links = data_inputs.get("mcp_links") if isinstance(data_inputs, dict) else []
         if not isinstance(mcp_links, list):
             mcp_links = []
@@ -6476,14 +6500,15 @@ class CLI:
                     lines.append(f"- {title}: 已跳过，{item.get('reason')}")
                 else:
                     lines.append(f"- {title}: 生成失败，{item.get('error') or status or '未知原因'}")
-        meta = f"服务端场景：{scene}"
-        if confidence is not None:
-            meta += f"，置信度 {confidence}"
-        lines.extend([
-            "",
-            "—",
-            f"{meta}；本机模型：{provider} / {model}。大模型 API Key 只在本机直连供应商，未发送给二郎神服务端。",
-        ])
+        if os.getenv("ERLANGSHEN_SHOW_RESPONSE_META") == "1":
+            meta = f"服务端场景：{scene}"
+            if confidence is not None:
+                meta += f"，置信度 {confidence}"
+            lines.extend([
+                "",
+                "—",
+                f"{meta}；本机模型：{provider} / {model}。大模型 API Key 只在本机直连供应商，未发送给二郎神服务端。",
+            ])
         repair_action = self._mcp_repair_action(data_inputs)
         compact_next = []
         if next_actions:
@@ -6700,7 +6725,27 @@ class CLI:
         error_keys = [key for key in keys if "error" in str(key).lower()]
         usable = [str(key) for key in keys if key not in error_keys and str(key) != "note"]
         if usable:
-            line = "我已先读取 super-66 MCP 行情快照：" + "、".join(usable[:6]) + "。"
+            index_count = sum(1 for key in usable if key.startswith("get_index_data:"))
+            asset_count = sum(
+                1
+                for key in usable
+                if key.startswith("get_global_asset_data:") or key.startswith("get_future_market_data:")
+            )
+            web_count = sum(1 for key in usable if key.startswith("web_search:"))
+            other_count = max(0, len(usable) - index_count - asset_count - web_count)
+            dimensions = []
+            if index_count:
+                dimensions.append(f"指数 {index_count}")
+            if asset_count:
+                dimensions.append(f"跨资产 {asset_count}")
+            if web_count:
+                dimensions.append(f"事件/宏观线索 {web_count}")
+            if other_count:
+                dimensions.append(f"其他 {other_count}")
+            line = f"我已读取 {len(usable)} 个数据源"
+            if dimensions:
+                line += f"（{'、'.join(dimensions)}）"
+            line += "；原始明细可用 /plan 查看。"
             if error_keys:
                 line += f" 另有 {len(error_keys)} 个数据通道未成功，后面会降低确定性；可用 /plan 查看细节。"
             return line
