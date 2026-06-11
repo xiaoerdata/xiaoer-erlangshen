@@ -35,7 +35,13 @@ LOGO_WIDE = [
     "╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝",
 ]
 LOGO_COMPACT = [
-    "ERLANGSHEN 二郎神",
+    "███████╗██████╗",
+    "██╔════╝██╔══██╗",
+    "█████╗  ██████╔╝",
+    "██╔══╝  ██╔══██╗",
+    "███████╗██║  ██║",
+    "╚══════╝╚═╝  ╚═╝",
+    "二郎神 ERLANGSHEN",
 ]
 
 COMMAND_PALETTE = [
@@ -341,8 +347,7 @@ def _pad_display(text: str, width: int) -> str:
 
 
 def _logo() -> str:
-    lines = ["ERLANGSHEN 二郎神"] if _terminal_width() >= 60 else LOGO_COMPACT
-    return "\n".join(_color(line, "36;1") for line in lines)
+    return "\n".join(_color(line, "36;1") for line in LOGO_COMPACT)
 
 
 def _panel(title: str, rows: list[tuple[str, str]]) -> str:
@@ -362,6 +367,30 @@ def _text_panel(title: str, lines: list[str], min_width: int = 72, max_width: in
     bottom = "╰" + "─" * (width - 2) + "╯"
     body = ["│ " + _pad_display(line, width - 3) + "│" for line in lines]
     return "\n".join([_color(top, "36"), *body, _color(bottom, "36")])
+
+
+def _dashboard_panel(title: str, left_lines: list[str], right_lines: list[str]) -> str:
+    terminal = max(72, _terminal_width())
+    width = min(max(76, terminal - 4), 118)
+    inner_width = width - 4
+    gap = 3
+    left_width = min(max(24, max(_display_width(line) for line in left_lines) if left_lines else 24), 34)
+    right_width = max(32, inner_width - left_width - gap)
+    top = f"╭─ {title} " + "─" * max(0, width - _display_width(title) - 5) + "╮"
+    bottom = "╰" + "─" * (width - 2) + "╯"
+    row_count = max(len(left_lines), len(right_lines))
+    rows = []
+    for index in range(row_count):
+        left = left_lines[index] if index < len(left_lines) else ""
+        right = right_lines[index] if index < len(right_lines) else ""
+        rows.append(
+            "│ "
+            + _pad_display(left, left_width)
+            + " " * gap
+            + _pad_display(right, right_width)
+            + " │"
+        )
+    return "\n".join([_color(top, "36"), *rows, _color(bottom, "36")])
 
 
 class CLI:
@@ -614,16 +643,15 @@ class CLI:
         auth_text = username or ("已保存 token" if session.get("token") else "未登录")
         provider, model, llm_ready, key_hint = self._llm_status(config)
         memory_stats = self._memory_stats()
-        print(_logo())
-        print()
-        print(_panel("Session", [
-            ("version", f"v{__version__}"),
-            ("core", "已配置" if base_url else "未配置"),
-            ("account", auth_text),
-            ("model", f"{provider} / {model} ({'ready' if llm_ready else 'need key'})"),
-            ("workspace", "已授权" if workspace.get("allowed") else "未授权"),
-            ("memory", f"{memory_stats.get('count', 0)} 条本机记忆"),
-        ]))
+        print(self._session_dashboard(
+            base_url=base_url,
+            auth_text=auth_text,
+            provider=provider,
+            model=model,
+            llm_ready=llm_ready,
+            workspace=workspace,
+            memory_count=int(memory_stats.get("count", 0) or 0),
+        ))
         print()
         next_steps = self._next_steps(session, llm_ready)
         if next_steps:
@@ -633,6 +661,40 @@ class CLI:
             print(_color(f"注意: 当前大模型 API Key 未配置，请输入 /model key 在本机保存，或设置 {key_hint}=...。", "33;1"))
         print(_color("直接提问开始分析 · / 打开命令 · /memory 查看本机记忆 · /setup 补齐配置 · /exit 退出", "2"))
         print()
+
+    def _session_dashboard(
+        self,
+        *,
+        base_url: str,
+        auth_text: str,
+        provider: str,
+        model: str,
+        llm_ready: bool,
+        workspace: dict,
+        memory_count: int,
+    ) -> str:
+        account_state = "ready" if auth_text not in {"未登录", ""} else "login"
+        model_state = "ready" if llm_ready else "need key"
+        workspace_state = "ready" if workspace.get("allowed") else "sandbox"
+        core_state = "ready" if base_url else "missing"
+        left_lines = [
+            *LOGO_COMPACT,
+            "",
+            "MCP-first · local LLM",
+        ]
+        right_lines = [
+            f"Claude-style CLI workspace · v{__version__}",
+            "",
+            f"account   {account_state} · {auth_text}",
+            f"model     {model_state} · {provider} / {model}",
+            f"core      {core_state}",
+            f"workspace {workspace_state}",
+            f"memory    {memory_count} local notes",
+            "",
+            "commands  / · /model · /memory · /service",
+            "start     直接输入投资问题",
+        ]
+        return _dashboard_panel("Erlangshen", left_lines, right_lines)
 
     def _welcome_panel(
         self,
@@ -989,10 +1051,6 @@ class CLI:
         workspace = resolve_workspace_path()
         status = workspace_status(workspace)
         if status.get("allowed"):
-            resource_count = self._workspace_resource_count(workspace)
-            suffix = f" · 资源索引 {resource_count} 条" if resource_count else " · 资源索引已启用"
-            print(_color(f"项目文件夹: 已授权 {workspace}{suffix}", "2"))
-            print()
             return
         line, _ = self._select_and_authorize_workspace(workspace, force=True)
         if "已跳过" in line:

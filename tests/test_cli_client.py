@@ -22,7 +22,7 @@ def isolate_local_memory(monkeypatch, tmp_path):
 async def test_slash_help_returns_help_text():
     result = await CLI().dispatch("/help")
 
-    assert "ERLANGSHEN 二郎神" in result
+    assert "二郎神 ERLANGSHEN" in result
     assert "二郎神 - 服务端优先 CLI" in result
     assert "/login [xwab|xczt] [账号]" in result
     assert "/model" in result
@@ -41,15 +41,17 @@ def test_compact_logo_keeps_agent_identity(monkeypatch):
 
     logo = _logo()
 
-    assert logo.strip() == "ERLANGSHEN 二郎神"
+    assert "███████╗██████╗" in logo
+    assert "二郎神 ERLANGSHEN" in logo
 
 
-def test_wide_logo_stays_minimal(monkeypatch):
+def test_wide_logo_keeps_technical_mark(monkeypatch):
     monkeypatch.setattr("src.cli._terminal_width", lambda: 120)
 
     logo = _logo()
 
-    assert logo.strip() == "ERLANGSHEN 二郎神"
+    assert "███████╗██████╗" in logo
+    assert "二郎神 ERLANGSHEN" in logo
 
 
 def test_panels_use_terminal_display_width_for_chinese_text(monkeypatch):
@@ -453,15 +455,16 @@ def test_header_shows_agent_workspace_and_tool_channels(monkeypatch, tmp_path, c
     CLI().print_header()
     output = capsys.readouterr().out
 
-    assert "ERLANGSHEN 二郎神" in output
-    assert "Session" in output
-    assert "version" in output
-    assert "core       已配置" in output
-    assert "account    未登录" in output
-    assert "model" in output
-    assert "(need key)" in output
-    assert "workspace  未授权" in output
-    assert "memory     0 条本机记忆" in output
+    assert "Erlangshen" in output
+    assert "███████╗██████╗" in output
+    assert "二郎神 ERLANGSHEN" in output
+    assert "Claude-style CLI workspace" in output
+    assert "v0.1.35" in output
+    assert "core      ready" in output
+    assert "account   login · 未登录" in output
+    assert "model     need key" in output
+    assert "workspace sandbox" in output
+    assert "memory    0 local notes" in output
     assert "下一步" in output
     assert "/model key" in output
     assert "/memory 查看本机记忆" in output
@@ -1299,7 +1302,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.34"
+    assert capsys.readouterr().out.strip() == "0.1.35"
 
 
 @pytest.mark.asyncio
