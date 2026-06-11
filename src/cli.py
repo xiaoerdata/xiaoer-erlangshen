@@ -1054,6 +1054,7 @@ class CLI:
             return
         if status.get("allowed"):
             print(_color("当前项目文件夹指向客户端安装目录，请重新选择一个用于保存图表、报告和记忆的项目文件夹。", "33"))
+            workspace = self._default_workspace_candidate()
         line, _ = self._select_and_authorize_workspace(workspace, force=True)
         if "已跳过" in line:
             print(_color("项目文件夹未授权，本次仅进行对话与远程接口调用，不写入本地分析产物。", "33"))
@@ -1108,6 +1109,19 @@ class CLI:
         except (OSError, ValueError):
             return False
 
+    def _default_workspace_candidate(self) -> Path:
+        for raw in (os.getenv("ERLANGSHEN_LAUNCH_CWD"), os.getcwd(), str(Path.home())):
+            path = Path(str(raw or "")).expanduser()
+            if not path.exists() or not path.is_dir():
+                continue
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if not self._is_package_install_workspace(resolved):
+                return resolved
+        return Path.home().resolve()
+
     def _prompt_workspace_path(self, workspace) -> str:
         prompt = (
             "请选择二郎神本次可使用的项目文件夹（Tab 补全路径；输入 n 跳过）。\n"
@@ -1140,6 +1154,8 @@ class CLI:
             return None
 
         current = self._normalize_workspace_browser_path(workspace)
+        if self._is_package_install_workspace(current):
+            current = self._default_workspace_candidate()
         selected = 0
         rendered_height = 0
         fd = sys.stdin.fileno()
@@ -1208,8 +1224,9 @@ class CLI:
             return Path.cwd().resolve()
 
     def _workspace_directory_items(self, current: Path) -> list[tuple[str, Path, str]]:
+        use_label = "使用启动目录作为项目沙箱" if current == self._default_workspace_candidate() else "使用当前目录作为项目沙箱"
         items: list[tuple[str, Path, str]] = [
-            ("use", current, "使用当前目录作为项目沙箱"),
+            ("use", current, use_label),
             ("manual", current, "手动输入或粘贴其他路径"),
         ]
         seen_paths = {str(current)}
@@ -1381,6 +1398,7 @@ class CLI:
   erlangshen /model
   erlangshen /model select
   erlangshen /model key
+  erlangshen --cd /path/to/project
   erlangshen /memory
   erlangshen /setup workspace
   erlangshen /workspace browse
@@ -7861,10 +7879,27 @@ class CLI:
 
 def main():
     """主入口"""
+    args = sys.argv[1:]
+    startup_workspace, args = _extract_startup_workspace_args(args)
+    if args == ["__ERLANGSHEN_MISSING_WORKSPACE_PATH__"]:
+        print("--cd / --workspace 需要提供项目文件夹路径")
+        return
+    if startup_workspace:
+        try:
+            workspace = Path(startup_workspace).expanduser().resolve()
+            if not workspace.exists() or not workspace.is_dir():
+                print(f"项目文件夹不存在或不是目录: {workspace}")
+                return
+            os.chdir(workspace)
+            select_workspace(workspace)
+        except OSError as exc:
+            print(f"无法切换项目文件夹: {exc}")
+            return
+
     cli = CLI()
 
-    if len(sys.argv) > 1:
-        raw = " ".join(sys.argv[1:]).strip()
+    if args:
+        raw = " ".join(args).strip()
 
         if raw in {"--help", "-h"}:
             cli.print_help()
@@ -7887,6 +7922,31 @@ def main():
             asyncio.run(cli.interactive_mode())
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("\n再见!")
+
+
+def _extract_startup_workspace_args(args: list[str]) -> tuple[str | None, list[str]]:
+    workspace: str | None = None
+    remaining: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in {"--cd", "-C", "--workspace"}:
+            if index + 1 >= len(args):
+                return workspace, ["__ERLANGSHEN_MISSING_WORKSPACE_PATH__"]
+            workspace = args[index + 1]
+            index += 2
+            continue
+        if arg.startswith("--cd="):
+            workspace = arg.split("=", 1)[1]
+            index += 1
+            continue
+        if arg.startswith("--workspace="):
+            workspace = arg.split("=", 1)[1]
+            index += 1
+            continue
+        remaining.append(arg)
+        index += 1
+    return workspace, remaining
 
 
 if __name__ == "__main__":

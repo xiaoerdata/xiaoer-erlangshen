@@ -69,9 +69,11 @@ const args = process.argv.slice(2);
 // 合并环境变量，传递 DEEPSEEK_API_KEY
 const env = { ...process.env };
 const installDir = getInstallDir();
+const launchCwd = process.cwd();
 env.PYTHONPATH = env.PYTHONPATH
   ? `${installDir}${path.delimiter}${env.PYTHONPATH}`
   : installDir;
+env.ERLANGSHEN_LAUNCH_CWD = env.ERLANGSHEN_LAUNCH_CWD || launchCwd;
 
 const python = getPythonPath();
 const invocation = getPythonInvocation(args);
@@ -83,7 +85,7 @@ if (env.ERLANGSHEN_CLI_DEBUG === '1') {
 const proc = spawn(python, invocation.args, {
   env,
   stdio: 'inherit',
-  cwd: installDir
+  cwd: launchCwd
 });
 
 proc.on('exit', (code) => {

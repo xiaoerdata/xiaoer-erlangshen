@@ -3,7 +3,7 @@ import json
 import pytest
 from pathlib import Path
 
-from src.cli import CLI, _display_width, _logo, _panel, _text_panel, main
+from src.cli import CLI, _display_width, _extract_startup_workspace_args, _logo, _panel, _text_panel, main
 from src.commands.server import ServerCommand
 from src.client.server_client import _normalize_login_payload
 from src.client.chrome_search import build_search_url, _is_noise_search_result
@@ -459,7 +459,7 @@ def test_header_shows_agent_workspace_and_tool_channels(monkeypatch, tmp_path, c
     assert "███████╗██████╗" in output
     assert "二郎神 ERLANGSHEN" in output
     assert "Erlangshen agent workspace" in output
-    assert "v0.1.37" in output
+    assert "v0.1.39" in output
     assert "core      ready" in output
     assert "account   login · 未登录" in output
     assert "model     need key" in output
@@ -1302,7 +1302,30 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.37"
+    assert capsys.readouterr().out.strip() == "0.1.39"
+
+
+def test_startup_workspace_arg_sets_project_directory(monkeypatch, tmp_path, capsys):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ERLANGSHEN_WORKSPACE_FILE", str(tmp_path / "workspaces.json"))
+    monkeypatch.delenv("ERLANGSHEN_WORKSPACE", raising=False)
+    monkeypatch.delenv("ERLANGSHEN_LAUNCH_CWD", raising=False)
+    monkeypatch.setattr("sys.argv", ["erlangshen", "--cd", str(project), "--version"])
+
+    main()
+
+    assert capsys.readouterr().out.strip() == "0.1.39"
+    assert Path.cwd() == project.resolve()
+    assert workspace_status()["path"] == str(project.resolve())
+
+
+def test_extract_startup_workspace_args_supports_codex_style_cd():
+    workspace, remaining = _extract_startup_workspace_args(["--cd=/tmp/demo", "/status"])
+
+    assert workspace == "/tmp/demo"
+    assert remaining == ["/status"]
 
 
 @pytest.mark.asyncio
@@ -2277,6 +2300,32 @@ def test_workspace_directory_items_include_recent_workspaces(monkeypatch, tmp_pa
 
     assert recent_workspaces()[0]["path"] == str(recent)
     assert ("choose", recent.resolve(), "最近项目 · 已授权 · 直接切换") in items
+
+
+def test_startup_workspace_prompt_uses_launch_cwd_when_saved_workspace_is_package(monkeypatch, tmp_path, capsys):
+    workspace_file = tmp_path / "workspaces.json"
+    package_dir = tmp_path / "node_modules" / "erlangshen"
+    launch_dir = tmp_path / "project"
+    package_dir.mkdir(parents=True)
+    launch_dir.mkdir()
+    monkeypatch.setenv("ERLANGSHEN_WORKSPACE_FILE", str(workspace_file))
+    monkeypatch.setenv("ERLANGSHEN_LAUNCH_CWD", str(launch_dir))
+    approve_workspace(package_dir)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    cli = CLI()
+    seen = []
+    monkeypatch.setattr(cli, "_is_package_install_workspace", lambda path: str(package_dir) in str(path))
+    monkeypatch.setattr(cli, "_read_workspace_path_selection", lambda workspace: seen.append(Path(workspace)) or str(launch_dir))
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+
+    cli._confirm_workspace_sandbox()
+
+    output = capsys.readouterr().out
+    assert seen == [launch_dir.resolve()]
+    assert "客户端安装目录" in output
+    assert workspace_status()["path"] == str(launch_dir.resolve())
+    assert workspace_status()["allowed"] is True
 
 
 def test_workspace_directory_items_show_recent_resource_count(monkeypatch, tmp_path):
