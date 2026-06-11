@@ -62,8 +62,7 @@ class Super66MCP:
         use_cache: bool = True,
     ) -> dict[str, Any]:
         arguments = arguments or {}
-        normalized_tool = self._normalize_tool_name(tool_name)
-        normalized_arguments = self._normalize_tool_arguments(tool_name, arguments)
+        normalized_tool, normalized_arguments = self._normalize_tool_call(tool_name, arguments)
         cache_key = self._cache_key(normalized_tool, normalized_arguments)
         if use_cache and cache_key in self._cache:
             value, expires_at = self._cache[cache_key]
@@ -94,7 +93,7 @@ class Super66MCP:
                     "error": f"HTTP {response.status_code}",
                     "detail": payload,
                 }
-            result = self._extract_result(payload, tool_name, normalized_arguments)
+            result = self._extract_result(payload, normalized_tool, normalized_arguments)
             if use_cache:
                 self._cache[cache_key] = (result, time.time() + self.cache_ttl)
             return result
@@ -106,8 +105,8 @@ class Super66MCP:
             {"name": "search_astocks", "description": "搜索 A股标的"},
             {"name": "get_astock_realtime", "description": "获取 A股实时/最新行情"},
             {"name": "get_astock_history", "description": "获取 A股历史行情"},
-            {"name": "get_index_data", "description": "获取国内指数历史数据"},
-            {"name": "get_global_asset_data", "description": "获取全球资产历史数据"},
+            {"name": "get_index_data", "description": "获取 A股和港股宽基指数历史数据，如沪深300、恒生科技指数、恒生指数"},
+            {"name": "get_global_asset_data", "description": "获取黄金、美元、原油等全球资产历史数据；港股指数走 get_index_data"},
             {"name": "get_future_market_data", "description": "获取期货行情"},
             {"name": "search_products", "description": "搜索 ETF、公募、私募等产品"},
             {"name": "get_product_detail", "description": "获取产品详情"},
@@ -129,6 +128,58 @@ class Super66MCP:
             return tool_name
         return f"dc66_{tool_name}"
 
+    def _canonical_index_market_label(self, label: Any) -> str:
+        text = re.sub(r"\s+", "", str(label or "").lower())
+        if not text:
+            return ""
+        if (
+            "hstech" in text
+            or "hangsengtech" in text
+            or "hangsengtechnology" in text
+            or "恒生科技" in text
+        ):
+            return "恒生科技指数"
+        if "hscei" in text or "国企指数" in text or "恒生中国企业" in text or "hangsengchinaenterprises" in text:
+            return "恒生中国企业指数"
+        if "hsi" in text or "恒生指数" in text or "香港恒生指数" in text or "hangsengindex" in text:
+            return "恒生指数"
+        return ""
+
+    def _normalize_tool_call(self, tool_name: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        normalized_tool = self._normalize_tool_name(tool_name)
+        normalized_name = normalized_tool.removeprefix("dc66_")
+        args = dict(arguments or {})
+        if normalized_name in {"get_global_asset_data", "get_index_data"}:
+            label_keys = (
+                "asset_name",
+                "assetName",
+                "index_name",
+                "indexName",
+                "source_table",
+                "sourceTable",
+                "table_name",
+                "tableName",
+                "code",
+                "symbol",
+                "ticker",
+                "index_code",
+                "indexCode",
+                "asset_code",
+                "assetCode",
+                "label",
+            )
+            canonical_label = next(
+                (canonical for canonical in (self._canonical_index_market_label(args.get(key)) for key in label_keys) if canonical),
+                "",
+            )
+            if canonical_label:
+                for key in label_keys:
+                    args.pop(key, None)
+                args["index_name"] = canonical_label
+                normalized_tool = "dc66_get_index_data"
+        normalized_arguments = self._normalize_tool_arguments(normalized_tool, args)
+        return normalized_tool, normalized_arguments
+
     def _normalize_tool_arguments(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         args = dict(arguments or {})
         normalized_name = tool_name.removeprefix("dc66_")
@@ -137,8 +188,8 @@ class Super66MCP:
             "end_date": "endDate",
         }
         aliases = {
-            "get_index_data": {"index_name": "indexName", "index_code": "indexName"},
-            "get_global_asset_data": {"asset_name": "assetName", "asset_code": "assetCode", "source_table": "sourceTable"},
+            "get_index_data": {"index_name": "indexName", "index_code": "indexName", "indexCode": "indexName"},
+            "get_global_asset_data": {"asset_name": "assetName", "asset_code": "assetCode", "assetCode": "assetCode", "source_table": "sourceTable"},
             "get_future_market_data": {"contract_code": "contractCode", "contract_type": "contractType"},
             "search_products": {"product_type": "productType"},
             "get_product_detail": {"product_id": "productId", "product_type": "productType"},
@@ -208,6 +259,7 @@ class Super66MCP:
         rows = self._extract_rows(result)
         if rows:
             normalized_rows = [self._normalize_market_row(row, arguments) for row in rows if isinstance(row, dict)]
+            normalized_rows = self._sort_market_rows(normalized_rows)
             latest = normalized_rows[-1] if normalized_rows else {}
             return {
                 "tool": tool_name,
@@ -232,14 +284,24 @@ class Super66MCP:
     def _extract_rows(self, value: Any, depth: int = 0) -> list[dict[str, Any]]:
         if depth > 6:
             return []
+        if isinstance(value, str):
+            parsed = self._parse_json_text(value)
+            return self._extract_rows(parsed, depth + 1) if parsed is not None else []
         if isinstance(value, list):
             rows = []
             for item in value:
                 if isinstance(item, dict):
-                    rows.append(item)
+                    text_payload = item.get("text") if item.get("type") in {None, "text"} else None
+                    parsed = self._parse_json_text(text_payload) if isinstance(text_payload, str) else None
+                    if parsed is not None:
+                        rows.extend(self._extract_rows(parsed, depth + 1))
+                    else:
+                        rows.append(item)
                 elif isinstance(item, list):
                     rows.extend(self._extract_rows(item, depth + 1))
-            return rows
+                elif isinstance(item, str):
+                    rows.extend(self._extract_rows(item, depth + 1))
+            return rows if any(self._looks_like_market_row(item) for item in rows) else []
         if not isinstance(value, dict):
             return []
         columnar_rows = self._columnar_rows(value)
@@ -256,6 +318,7 @@ class Super66MCP:
             "history",
             "prices",
             "payload",
+            "content",
         )
         for key in row_keys:
             nested = value.get(key)
@@ -272,6 +335,17 @@ class Super66MCP:
         if self._looks_like_market_row(value):
             return [value]
         return []
+
+    def _parse_json_text(self, value: Any) -> Any:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text or text[0] not in "{[":
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            return None
 
     def _columnar_rows(self, value: dict[str, Any]) -> list[dict[str, Any]]:
         dates = value.get("dates") or value.get("date") or value.get("trade_dates")
@@ -406,6 +480,34 @@ class Super66MCP:
         }
         chinese_markers = {"日期", "交易日期", "收盘", "收盘价", "最新价", "涨跌幅", "成交额", "成交量", "净值"}
         return bool(keys & marker_keys or set(value.keys()) & chinese_markers)
+
+    def _sort_market_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not any(self._market_date_key(row) for row in rows):
+            return rows
+        return [
+            row
+            for _, row in sorted(
+                enumerate(rows),
+                key=lambda item: (
+                    0 if not self._market_date_key(item[1]) else 1,
+                    self._market_date_key(item[1]),
+                    item[0],
+                ),
+            )
+        ]
+
+    def _market_date_key(self, row: dict[str, Any]) -> str:
+        value = (
+            row.get("date")
+            or row.get("trade_date")
+            or row.get("trading_date")
+            or row.get("datetime")
+            or row.get("日期")
+            or row.get("交易日期")
+        )
+        if value is None:
+            return ""
+        return re.sub(r"\D", "", str(value))[:14]
 
     def _result_count(self, result: Any, fallback: int) -> int:
         if isinstance(result, dict):

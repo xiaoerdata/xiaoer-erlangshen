@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from src import __version__
 from src.auth.session import load_auth_session
+from src.client.local_memory import LocalMemoryStore
 from src.config import get_config, get_config_path, update_config
 from src.model_presets import MODEL_PRESETS, get_provider_preset, normalize_provider
 from src.workspace import approve_workspace, ensure_inside_workspace, recent_workspaces, resolve_workspace_path, select_workspace, workspace_status
@@ -34,14 +35,7 @@ LOGO_WIDE = [
     "╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝",
 ]
 LOGO_COMPACT = [
-    "╭─ ERLANGSHEN 二郎神 · Agent Console ─────╮",
-    "│  ███╗  MCP-first Investment Agent       │",
-    "│  ╚██║  Local LLM Key · Protected Core   │",
-    "│   ╚═╝  super-66 MCP · Chart Artifacts   │",
-    "│  ASK -> DATA -> MAP -> ANSWER -> LINKS  │",
-    "│  Ask · Data · Map · Think · Build · Open│",
-    "│  /setup workspace · /server · /tools    │",
-    "╰─────────────────────────────────────────╯",
+    "ERLANGSHEN 二郎神",
 ]
 
 COMMAND_PALETTE = [
@@ -93,6 +87,8 @@ COMMAND_PALETTE = [
     ("plan", "/plan", "查看最近一次分析的意图、工具调用和产物计划"),
     ("context", "/context", "查看或清空最近对话上下文"),
     ("context-clear", "/context clear", "清空最近对话上下文，保留登录、模型和工作区"),
+    ("memory", "/memory", "查看本机持久记忆；会自动压缩最近问答并注入上下文"),
+    ("memory-clear", "/memory clear", "清空本机持久记忆，不影响登录、模型 Key 和工作区"),
     ("analyze", "/analyze <query>", "本地综合分析"),
     ("macro", "/macro <query>", "本地宏观分析"),
     ("stock", "/stock <query>", "本地股票分析"),
@@ -119,7 +115,7 @@ COMMAND_GROUPS = [
         "server-artifact", "server-resources", "server-map", "server-advice",
     }),
     ("Workspace & Artifacts", {"workspace", "workspace-browse", "workspace-path", "artifacts", "open", "open-link", "links", "links-open", "chart", "report", "memo"}),
-    ("Market Intelligence", {"examples", "tools", "mcp", "plan", "context", "context-clear", "analyze", "macro", "stock", "search", "portfolio", "risk", "invest", "omniscient", "god", "cognition"}),
+    ("Market Intelligence", {"examples", "tools", "mcp", "plan", "context", "context-clear", "memory", "memory-clear", "analyze", "macro", "stock", "search", "portfolio", "risk", "invest", "omniscient", "god", "cognition"}),
     ("Session", {"commands", "clear", "help", "exit"}),
 ]
 
@@ -128,6 +124,7 @@ SLASH_SUBCOMMAND_ROOTS = {
     "workspace": {"workspace-browse", "workspace-path", "workspace"},
     "model": {"model-select", "model-key", "model"},
     "context": {"context-clear", "context"},
+    "memory": {"memory-clear", "memory"},
     "setup": {"setup-run", "setup-workspace", "setup"},
     "auth": {"login", "logout", "status", "whoami", "auth"},
     "chart": {"chart", "artifacts", "links", "open", "open-link"},
@@ -145,6 +142,7 @@ SLASH_CONTEXT_HINTS = {
     "open": "Resource Opener: open chart/report/link N",
     "links": "Resource Inbox: links / open / open link N",
     "context": "Session Memory: context / context clear",
+    "memory": "Local Memory: memory / memory clear",
 }
 
 SLASH_SUBCOMMAND_ORDER = {
@@ -272,6 +270,8 @@ COMMAND_NEXT_HINTS = {
     "/open [chart|report|link N]": "/artifacts 或 /links",
     "/context": "/context clear 或继续追问",
     "/context clear": "直接输入新问题",
+    "/memory": "/memory clear 或继续提问",
+    "/memory clear": "继续提问",
     "/clear": "直接输入新问题",
     "/help": "输入 / 打开命令面板",
     "/exit": "退出当前 CLI 会话",
@@ -341,19 +341,7 @@ def _pad_display(text: str, width: int) -> str:
 
 
 def _logo() -> str:
-    lines = LOGO_WIDE if _terminal_width() >= 96 else LOGO_COMPACT
-    if _terminal_width() >= 96:
-        lines = [
-            "╭─ ERLANGSHEN 二郎神 · Agent Console " + "─" * 46 + "╮",
-            *lines,
-            "│  MCP-FIRST INVESTMENT AGENT · LOCAL LLM KEY · PROTECTED SERVICE SIGNALS        │",
-            "│  ASK -> SUPER-66 MCP / WEB_SEARCH -> SERVER MAP -> LOCAL ANSWER -> CHART / LINKS │",
-            "│  ASK · DATA · MAP · THINK · BUILD · OPEN                                       │",
-            "│  Natural language in · named resources out · every chart/report has a link      │",
-            "│  Project Sandbox · Server Workbench · Tool Map · Chart Artifacts · Link Inbox  │",
-            "│  Type / · /setup workspace · /server · /tools · /links 1 opens resources          │",
-            "╰" + "─" * 86 + "╯",
-        ]
+    lines = ["ERLANGSHEN 二郎神"] if _terminal_width() >= 60 else LOGO_COMPACT
     return "\n".join(_color(line, "36;1") for line in lines)
 
 
@@ -407,7 +395,7 @@ class CLI:
         "map": ("server", "map"),
         "init": ("setup", ""),
     }
-    LOCAL_COMMANDS = {"commands", "cmd", "?", "model", "models", "config", "setup", "tools", "mcp", "plan", "context", "clear", "doctor", "brief", "examples", "links"}
+    LOCAL_COMMANDS = {"commands", "cmd", "?", "model", "models", "config", "setup", "tools", "mcp", "plan", "context", "memory", "mem", "clear", "doctor", "brief", "examples", "links"}
 
     def __init__(self):
         self.brain = None
@@ -423,6 +411,7 @@ class CLI:
         self._last_mcp_data: dict | None = None
         self._last_artifact_results: list[dict] = []
         self._last_resource_links: list[dict[str, object]] = []
+        self._memory = LocalMemoryStore()
 
     async def dispatch(self, user_input: str) -> str:
         """把交互输入或一次性参数分发到对应命令。"""
@@ -472,8 +461,10 @@ class CLI:
             return self.examples_text()
         if command in {"plan", "计划", "trace", "过程"}:
             return self.plan_text()
-        if command in {"context", "ctx", "上下文", "记忆"}:
+        if command in {"context", "ctx", "上下文"}:
             return self.context_text(args)
+        if command in {"memory", "mem", "记忆", "长期记忆"}:
+            return self.memory_text(args)
         if command in {"clear", "new", "新会话", "清空"}:
             return self.clear_session_text()
         if command in {"model", "models", "config"}:
@@ -497,13 +488,18 @@ class CLI:
         if command in {"chart", "artifact", "图表"}:
             return await self.chart_text(args)
         if command in self.COMMANDS:
+            if command == "analyze" and os.getenv("ERLANGSHEN_ENABLE_LOCAL_ANALYSIS") != "1":
+                return self._missing_local_module_message(command, "local analysis disabled")
             try:
                 command_class = self._load_command_class(command)
                 brain, mcp = self._command_context(command)
             except Exception as exc:
                 return self._missing_local_module_message(command, exc)
             cmd = command_class(brain, mcp)
-            return await cmd.execute(args)
+            try:
+                return await cmd.execute(args)
+            except Exception as exc:
+                return self._missing_local_module_message(command, exc)
         suggestion = self._command_suggestion(command)
         aliases = ", ".join(f"/{item[0]}" for item in COMMAND_PALETTE[:7])
         lines = [f"未知命令: /{command}"]
@@ -617,75 +613,25 @@ class CLI:
         username = user.get("username") or user.get("email") or user.get("id")
         auth_text = username or ("已保存 token" if session.get("token") else "未登录")
         provider, model, llm_ready, key_hint = self._llm_status(config)
+        memory_stats = self._memory_stats()
         print(_logo())
-        print()
-        print(self._welcome_panel(
-            base_url=base_url,
-            auth_text=auth_text,
-            provider=provider,
-            model=model,
-            llm_ready=llm_ready,
-            workspace=workspace,
-        ))
-        print()
-        print(self._command_ribbon_panel(
-            session=session,
-            llm_ready=llm_ready,
-            workspace=workspace,
-        ))
-        print()
-        print(self._mission_control_panel(
-            session=session,
-            base_url=base_url,
-            llm_ready=llm_ready,
-            workspace=workspace,
-        ))
-        print()
-        print(self._agent_hud_panel(
-            session=session,
-            base_url=base_url,
-            llm_ready=llm_ready,
-            workspace=workspace,
-        ))
-        print()
-        print(self._launchpad_panel(
-            session=session,
-            llm_ready=llm_ready,
-            workspace=workspace,
-        ))
-        print()
-        print(self._agent_readiness_panel(
-            session=session,
-            base_url=base_url,
-            llm_ready=llm_ready,
-            workspace=workspace,
-        ))
         print()
         print(_panel("Session", [
             ("version", f"v{__version__}"),
-            ("server", self._server_display_text(base_url)),
+            ("core", "已配置" if base_url else "未配置"),
             ("account", auth_text),
-            ("model", f"{provider} / {model} ({'key ready' if llm_ready else 'missing key'})"),
-            ("mode", "service-first / protected by xwab/xczt"),
+            ("model", f"{provider} / {model} ({'ready' if llm_ready else 'need key'})"),
+            ("workspace", "已授权" if workspace.get("allowed") else "未授权"),
+            ("memory", f"{memory_stats.get('count', 0)} 条本机记忆"),
         ]))
-        print()
-        print(_panel("Workspace & Tools", [
-            ("workspace", f"{'已授权' if workspace.get('allowed') else '未授权'} {workspace.get('path')}"),
-            ("market", "super-66 MCP first"),
-            ("artifacts", "/chart uses server chart artifact channel"),
-            ("picker", "type / then use arrows"),
-        ]))
-        print()
-        print(self._workspace_passport_panel(workspace))
         print()
         next_steps = self._next_steps(session, llm_ready)
         if next_steps:
-            print(_panel("Next Steps", next_steps))
-            print()
+            step_text = " · ".join(f"{label}: {value}" for label, value in next_steps[:3])
+            print(_color(f"下一步  {step_text}", "2"))
         if not llm_ready:
             print(_color(f"注意: 当前大模型 API Key 未配置，请输入 /model key 在本机保存，或设置 {key_hint}=...。", "33;1"))
-            print()
-        print(_color("输入 / 会弹出命令选择器；自然语言会先请求服务端场景映射，再由本机大模型生成建议；输入 /exit 退出。", "2"))
+        print(_color("直接提问开始分析 · / 打开命令 · /memory 查看本机记忆 · /setup 补齐配置 · /exit 退出", "2"))
         print()
 
     def _welcome_panel(
@@ -1343,6 +1289,8 @@ class CLI:
   /links                      查看最近网页、图片和本地产物名称链接
   /chart <标题> :: {json}      生成结构化图表 artifact
   /tools                      查看数据工具、搜索和图表通信能力
+  /memory                     查看本机持久记忆；自动压缩上下文
+  /memory clear               清空本机持久记忆
 
 本地开发命令:
   /analyze <query>            综合分析
@@ -1361,6 +1309,7 @@ class CLI:
   erlangshen /model
   erlangshen /model select
   erlangshen /model key
+  erlangshen /memory
   erlangshen /setup workspace
   erlangshen /workspace browse
   erlangshen /workspace path /path/to/project
@@ -1384,7 +1333,7 @@ class CLI:
                 ("workspace", "/workspace browse · 选择项目文件夹并授权图表/报告保存"),
                 ("model", "/model select · /model key 本机测试并保存 API Key"),
                 ("resources", "/links 1 · /open 1 打开网页、图片、图表和报告"),
-                ("audit", "/plan · /brief · /doctor 复盘工具链路、会话状态和诊断"),
+                ("audit", "/plan · /memory · /brief · /doctor 复盘工具链路、记忆和诊断"),
             ]),
             "",
         ]
@@ -2566,6 +2515,7 @@ class CLI:
                 "- 说明: 只清空本次 CLI 进程内的临时上下文和临时资源链接；不会影响登录、模型 Key、工作区、已保存报告或项目 resources.json 索引。",
             ])
         context = self._recent_conversation_context(limit=6)
+        local_memory = self._recent_local_memory_context(limit=6)
         mcp_context = self._last_mcp_context_brief()
         artifacts = self._recent_artifact_context()
         resources = self._recent_resource_context(limit=8)
@@ -2573,8 +2523,9 @@ class CLI:
         lines = [
             "【最近对话上下文】",
             f"- 条数: {len(context)}",
-            "- 进入本机大模型: recent_conversation、previous_mcp_context、recent_artifacts、recent_resources",
-            "- 范围: 本次 CLI 进程内的对话/MCP/产物摘要 + 已授权项目的资源索引",
+            f"- 本机记忆: {len(local_memory)} 条会被预算化注入",
+            "- 进入本机大模型: recent_conversation、local_memory、previous_mcp_context、recent_artifacts、recent_resources",
+            "- 范围: 本次 CLI 进程内摘要 + 本机持久记忆 + 已授权项目资源索引",
             "- 安全边界: 不展示 API Key、token、password、authorization 或服务端内部认知库全文",
             f"- 工作区: {'已授权' if workspace.get('allowed') else '未授权'} · {workspace.get('path')}",
         ]
@@ -2582,10 +2533,17 @@ class CLI:
             "",
             "上下文来源:",
             f"- recent_conversation: {len(context)} 条压缩对话",
+            f"- local_memory: {len(local_memory)} 条跨会话压缩记忆",
             f"- previous_mcp_context: {mcp_context.get('status')} · {', '.join(mcp_context.get('usable_sources') or []) or '暂无可用数据源'}",
             f"- recent_artifacts: {len(artifacts)} 个图表/报告摘要",
             f"- recent_resources: {len(resources)} 个网页/图片/图表/报告链接",
         ])
+        if local_memory:
+            lines.extend(["", "本机持久记忆:"])
+            for index, item in enumerate(local_memory[:6], 1):
+                tags = ", ".join(item.get("tags") or [])
+                tag_text = f" · {tags}" if tags else ""
+                lines.append(f"{index}. {item.get('user') or ''} -> {item.get('summary') or ''}{tag_text}")
         if mcp_context.get("snapshots"):
             lines.extend(["", "最近 MCP 快照:"])
             for item in (mcp_context.get("snapshots") or [])[:6]:
@@ -2625,9 +2583,54 @@ class CLI:
             "",
             "命令:",
             "  /context clear",
+            "  /memory",
             "  /plan",
             "  /links",
             "  /clear",
+        ])
+        return "\n".join(lines)
+
+    def memory_text(self, args: str = "") -> str:
+        action = (args or "").strip().lower()
+        if action in {"clear", "reset", "clean", "清空", "重置"}:
+            try:
+                self._memory.clear()
+            except (OSError, PermissionError, TypeError, ValueError) as exc:
+                return f"【本机记忆】\n- 清空失败: {exc}"
+            return "\n".join([
+                "【本机记忆】",
+                "- 已清空",
+                "- 影响范围: 只清空本机压缩记忆，不影响登录、模型 Key、工作区授权、报告和资源链接。",
+            ])
+
+        stats = self._memory_stats()
+        memories = self._recent_local_memory_context(limit=10)
+        lines = [
+            "【本机记忆】",
+            f"- 条数: {stats.get('count', 0)}",
+            f"- 文件: {stats.get('path')}",
+            f"- 更新时间: {stats.get('updated_at') or '暂无'}",
+            "- 机制: 每轮问答结束后自动压缩、脱敏并保存在本机；后续提问会按预算注入本机大模型上下文。",
+            "- 安全边界: API Key、token、password、authorization 会被隐藏；记忆不会发送给二郎神服务端。",
+        ]
+        if not memories:
+            lines.extend([
+                "",
+                "暂无本机记忆。直接提问后，二郎神会自动沉淀近期问题、回答摘要和主题标签。",
+            ])
+        else:
+            lines.append("")
+            for index, item in enumerate(memories, 1):
+                tags = ", ".join(item.get("tags") or []) or "无标签"
+                lines.append(f"{index}. {item.get('user') or ''}")
+                lines.append(f"   摘要: {item.get('summary') or ''}")
+                lines.append(f"   标签: {tags}")
+        lines.extend([
+            "",
+            "命令:",
+            "  /memory clear     清空本机持久记忆",
+            "  /context          查看本轮上下文和本机记忆注入情况",
+            "  /clear            开启干净会话，但保留本机记忆",
         ])
         return "\n".join(lines)
 
@@ -2811,6 +2814,7 @@ class CLI:
             f"首要下一步: {primary_action}",
             "",
             _panel("Readiness", rows),
+            "agent route: NL -> local intent -> MCP/search -> server map -> local answer",
             "",
             self._workspace_choice_deck(workspace),
             "",
@@ -3228,6 +3232,10 @@ class CLI:
             f.write("\n".join(report).rstrip() + "\n")
         return str(target)
 
+    def _should_save_advice_report(self, query: str, synthesis: dict) -> bool:
+        text = self._text_field(query).lower()
+        return any(keyword in text for keyword in ("报告", "report", "保存", "导出", "文档"))
+
     def _report_list_lines(self, values) -> list[str]:
         if not isinstance(values, list):
             return []
@@ -3315,6 +3323,7 @@ class CLI:
             "- 调用方式: 服务端只返回受保护场景映射；最终投资建议由客户端直连大模型生成",
             "",
             self._model_agent_flow_panel(provider, model, ready, key_hint),
+            "core       服务端只做受保护场景映射和 chart artifact，不接收模型 Key",
             "",
             self._model_setup_deck(provider, model, ready, key_hint),
             "",
@@ -3769,12 +3778,14 @@ class CLI:
             model=settings.model,
             data_inputs=data_inputs,
         )
-        report_path = self._save_advice_report(
-            query=query,
-            content=formatted,
-            artifact_results=synthesis.get("artifact_results"),
-            data_inputs=data_inputs,
-        )
+        report_path = None
+        if self._should_save_advice_report(query, synthesis):
+            report_path = self._save_advice_report(
+                query=query,
+                content=formatted,
+                artifact_results=synthesis.get("artifact_results"),
+                data_inputs=data_inputs,
+            )
         if report_path:
             workspace = str(workspace_status().get("path") or "")
             formatted = "\n".join([
@@ -4096,9 +4107,32 @@ class CLI:
             return
         self._conversation_history.append({"user": user, "assistant": assistant})
         self._conversation_history = self._conversation_history[-6:]
+        try:
+            status = workspace_status()
+            self._memory.remember_turn(
+                user_text=user,
+                assistant_text=assistant,
+                workspace=str(status.get("path") or ""),
+                source="conversation",
+            )
+        except (OSError, PermissionError, TypeError, ValueError):
+            return
 
     def _recent_conversation_context(self, limit: int = 4) -> list[dict[str, str]]:
         return list(self._conversation_history[-limit:])
+
+    def _recent_local_memory_context(self, limit: int = 4) -> list[dict[str, object]]:
+        try:
+            return self._memory.context(limit=limit, char_budget=1400)
+        except (OSError, PermissionError, TypeError, ValueError):
+            return []
+
+    def _memory_stats(self) -> dict[str, object]:
+        try:
+            stats = self._memory.stats()
+            return {"count": stats.count, "path": str(stats.path), "updated_at": stats.updated_at}
+        except (OSError, PermissionError, TypeError, ValueError):
+            return {"count": 0, "path": "", "updated_at": ""}
 
     def _truncate_context_text(self, text: str, limit: int) -> str:
         value = self._text_field(text)
@@ -4157,6 +4191,7 @@ class CLI:
             "as_of_date": datetime.now().strftime("%Y-%m-%d"),
             "timezone": "Asia/Shanghai",
             "recent_conversation": self._recent_conversation_context(),
+            "local_memory": self._recent_local_memory_context(limit=6),
             "previous_mcp_context": self._last_mcp_context_brief(),
             "recent_artifacts": self._recent_artifact_context(),
             "recent_resources": self._recent_resource_context(),
@@ -4186,11 +4221,13 @@ class CLI:
             "requirements": [
                 "先用自然语言给综合判断，再给少量可执行建议和风控",
                 "如果 mcp_data 已返回行情或新闻数据，必须优先结合这些数据回答，不要再说没有实时市场数据",
+                "凡涉及区间收益率、资产表现对比、图表收益值，优先使用起始收盘价和结束收盘价按 end_close / start_close - 1 计算；不要把单日涨跌幅字段当作区间收益",
                 "对于“今天行情怎么样/市场怎么看”这类宽泛问题，要把它当成市场概览任务处理，必须先引用 market_data_brief.snapshots 或网页线索，再给方向性解读",
                 "宽泛行情问题已经有 market_data_brief.snapshots 时，missing_data 不要再列具体指数、实时点位、新闻事件等基础行情项；只保留用户持仓、周期、仓位、风险偏好等个性化落地信息，没有就留空",
                 "如果 market_data_brief.status 是 empty 或只有错误，必须明确说“数据通道本轮没有拿到可用行情”，并给出 /login、/doctor、/tools 或安装 web_search 的下一步",
                 "如数据不足必须降低确定性并列出需要补充的数据",
                 "如果用户只是打招呼或问题过于泛泛，要自然追问，不要强行生成投资结论",
+                "如果 local_memory 已提供相关历史偏好、关注资产或上一阶段判断，要自然承接；不要逐条复述记忆，也不要把记忆当成实时数据",
                 "如果用户是“做成图表/继续/那它呢/详细说说”这类短追问，必须结合 recent_conversation 判断承接对象",
                 "如果用户是图表、报告或承接上一轮的追问，必须参考 previous_mcp_context 和 recent_artifacts；但不能编造其中不存在的数值",
                 "如果用户提到“刚才那个网页/图片/图/链接/报告”，必须参考 recent_resources 和 recent_artifacts，并用自然语言说明可通过 /links 或 /open 重新打开",
@@ -4796,7 +4833,7 @@ class CLI:
                 "trigger": "用户给出名称、代码、产品简称、管理人或某个资产。",
                 "preferred_chain": [
                     "search_astocks/search_products: 名称解析",
-                    "get_astock_realtime/get_product_detail/get_product_history/get_global_asset_data",
+                    "get_index_data/get_astock_realtime/get_product_detail/get_product_history/get_global_asset_data",
                     "web_search: 公告、新闻、公开页面",
                     "server map",
                     "local LLM",
@@ -4810,7 +4847,7 @@ class CLI:
                 "goal": "分析利率、汇率、政策、海外事件对多资产或风格的影响。",
                 "trigger": "用户问美元、利率、政策、通胀、海外市场、商品或跨资产传导。",
                 "preferred_chain": [
-                    "get_index_data: 相关 A股/港股/全球股票指数",
+                    "get_index_data: 相关 A股/港股宽基指数",
                     "get_global_asset_data: 黄金/美元/原油/美股资产参照",
                     "web_search: 最新事件和政策原文",
                     "server map",
@@ -4847,7 +4884,7 @@ class CLI:
             "mcp_tools": [
                 {
                     "name": "get_index_data",
-                    "use_when": "A股指数、港股指数、全球股票指数、市场整体、沪深300、上证指数、创业板、恒生科技指数等行情问题",
+                    "use_when": "A股指数、港股宽基指数、市场整体、沪深300、上证指数、创业板指、恒生科技指数、恒生指数等行情问题",
                     "args": {"index_name": "沪深300", "limit": 60},
                 },
                 {
@@ -4917,6 +4954,8 @@ class CLI:
             "selection_policy": [
                 "优先让大模型根据上下文选择工具组合，不用硬编码关键词替代理解",
                 "行情和产品数据优先 super-66 MCP；新闻和公开网页补充 web_search",
+                "恒生科技指数、恒生指数、HSTECH、HSI、Hang Seng Tech 只能使用 get_index_data；不要使用 get_global_asset_data",
+                "恒生科技指数和恒生指数属于 super-66 国内宽基指数数据源；调用 MCP 时只传 index_name/indexName，丢弃 sourceTable/global_index/global_assets 等表名提示",
                 "需要可视化时让服务端生成 chart artifact，再由客户端展示或保存",
                 "网页、图片、HTML、PDF 等非文本结果必须以命名 resource_links 返回，便于 /links open 1 或 /open link 1 打开",
             ],
@@ -4970,6 +5009,7 @@ class CLI:
                     "steps": [
                         "get_index_data: 沪深300 / 上证指数 / 创业板指 / 恒生科技指数",
                         "get_global_asset_data: 黄金 / 美元 / 原油等跨资产风险偏好参照",
+                        "港股宽基指数约束: 恒生科技指数/HSTECH/Hang Seng Tech/恒生指数/HSI/HSCEI 只走 get_index_data，不走 get_global_asset_data",
                         "web_search: 补充当天政策、资金面、产业新闻线索",
                         "server map: 获取受保护场景映射后再由本机大模型综合",
                     ],
@@ -4984,6 +5024,7 @@ class CLI:
                     "use_when": "用户问具体股票、指数、商品、基金或产品",
                     "steps": [
                         "先用 search_astocks/search_products 解析名称到代码或产品ID",
+                        "如果标的是恒生科技指数/HSTECH/Hang Seng Tech/HSCEI/恒生指数/HSI，直接用 get_index_data，参数 index_name/indexName，不要当作 global asset，也不要传 sourceTable",
                         "再用 get_astock_realtime/get_product_detail/get_product_history 拉取事实数据",
                         "必要时用 web_search 补公告或新闻",
                     ],
@@ -4997,7 +5038,7 @@ class CLI:
                     "name": "macro_event",
                     "use_when": "用户问利率、汇率、政策、海外市场或宏观事件影响",
                     "steps": [
-                        "get_index_data: 港股指数 / 相关股票指数",
+                        "get_index_data: 港股宽基指数 / 相关股票指数；恒生科技指数/HSTECH/Hang Seng Tech/恒生指数/HSI/HSCEI 归入这里",
                         "get_global_asset_data: 美元指数 / 黄金 / 原油 / 美股资产",
                         "web_search: 查找最新公开事件线索",
                         "server map: 映射到服务端受保护宏观/市场场景",
@@ -5042,6 +5083,7 @@ class CLI:
                     "trigger": "用户给出股票、基金、产品、商品或指数名称，需要先核实实体和事实数据",
                     "sequence": [
                         "本机 LLM 判断实体类型和是否需要 disambiguation",
+                        "若实体是恒生科技指数/HSTECH/Hang Seng Tech/HSCEI/恒生指数/HSI，选择 get_index_data，并丢弃 sourceTable/global_index/global_assets 等表名参数",
                         "名称不完整时先 search_astocks/search_products",
                         "再调用 get_astock_realtime/get_product_detail/get_product_history 或 global/future 数据",
                         "web_search 补公告、新闻或未覆盖公开信息",
@@ -5085,8 +5127,8 @@ class CLI:
             {"name": "search_astocks", "description": "搜索 A股标的"},
             {"name": "get_astock_realtime", "description": "获取 A股实时/最新行情"},
             {"name": "get_astock_history", "description": "获取 A股历史行情"},
-            {"name": "get_index_data", "description": "获取国内指数历史数据"},
-            {"name": "get_global_asset_data", "description": "获取全球资产历史数据"},
+            {"name": "get_index_data", "description": "获取 A股和港股宽基指数历史数据，如沪深300、恒生科技指数、恒生指数"},
+            {"name": "get_global_asset_data", "description": "获取黄金、美元、原油等全球资产历史数据；港股指数走 get_index_data"},
             {"name": "get_future_market_data", "description": "获取期货行情"},
             {"name": "search_products", "description": "搜索 ETF、公募、私募等产品"},
             {"name": "get_product_detail", "description": "获取产品详情"},
@@ -5096,7 +5138,7 @@ class CLI:
     def _mcp_tool_result_hints(self) -> dict[str, dict[str, object]]:
         return {
             "get_index_data": {
-                "result_shape": "指数历史或最近行情序列",
+                "result_shape": "A股和港股宽基指数历史或最近行情序列；恒生科技指数/HSTECH/Hang Seng Tech/恒生指数/HSI/HSCEI 属于这里",
                 "use_fields": ["index_name", "date", "close", "change_pct", "volume", "amount"],
                 "chart_fit": "line 用于走势，bar 用于当日/近期涨跌幅对比",
             },
@@ -5111,7 +5153,7 @@ class CLI:
                 "chart_fit": "line 用于价格或涨跌幅走势",
             },
             "get_global_asset_data": {
-                "result_shape": "黄金、美元、港美股、原油等全球资产历史序列",
+                "result_shape": "黄金、美元、美股资产、原油等全球资产历史序列；港股宽基指数必须用 get_index_data",
                 "use_fields": ["asset_name", "date", "close", "change_pct"],
                 "chart_fit": "line 用于趋势，bar 用于多资产涨跌幅对比",
             },
@@ -5225,17 +5267,93 @@ class CLI:
     def _today_market_search_query(self) -> str:
         return "A股 今日行情 资金面 政策 重要新闻"
 
+    def _is_event_market_query(self, query: str) -> bool:
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        if not text:
+            return False
+        event_words = (
+            "战争", "地缘", "冲突", "制裁", "油价", "原油", "通胀", "降息", "加息",
+            "美元", "人工智能", "产业利好", "科技成长", "风险", "避险",
+            "俄乌", "美伊", "缓和", "冲击峰值", "爆发期", "打打停停",
+        )
+        market_words = (
+            "市场", "股市", "股票", "权益", "港股", "a股", "美股", "指数",
+            "黄金", "贵金属", "原油", "油价", "美元", "通胀",
+        )
+        has_event = any(word in text for word in event_words) or re.search(r"(^|[^a-z])ai([^a-z]|$)", text)
+        return bool(has_event) and any(word in text for word in market_words)
+
+    def _event_market_default_tools(self, query: str) -> list[dict]:
+        window = self._recent_market_window_args(days=60)
+        return [
+            {"name": "get_index_data", "arguments": {"index_name": "恒生科技指数", **window}},
+            {"name": "get_index_data", "arguments": {"index_name": "沪深300", **window}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": "美元指数", **window}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", **window}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": "原油", **window}},
+            {"name": "web_search", "arguments": {"query": query or "最新宏观事件 市场影响", "count": 5}},
+        ]
+
+    def _specific_market_tools_from_query(self, query: str) -> list[dict]:
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        if not text:
+            return []
+        window = self._recent_market_window_args(days=60)
+        tools: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add_tool(name: str, label_key: str, label: str) -> None:
+            signature = (name, label)
+            if signature in seen:
+                return
+            seen.add(signature)
+            tools.append({"name": name, "arguments": {label_key: label, **window}})
+
+        hk_index = self._canonical_index_market_label(text)
+        if hk_index:
+            add_tool("get_index_data", "index_name", hk_index)
+        if any(alias in text for alias in ("港股", "香港股市", "香港市场")):
+            add_tool("get_index_data", "index_name", "恒生科技指数")
+        if any(alias in text for alias in ("股票市场", "股市", "权益市场", "科技股", "科技成长", "ai产业", "人工智能")):
+            add_tool("get_index_data", "index_name", "沪深300")
+            add_tool("get_index_data", "index_name", "恒生科技指数")
+        if any(alias in text for alias in ("美股", "美国股市", "美国市场")):
+            add_tool("get_index_data", "index_name", "标普500")
+            add_tool("get_index_data", "index_name", "纳斯达克指数")
+        for label, aliases in (
+            ("沪深300", ("沪深300", "csi300")),
+            ("上证指数", ("上证指数", "上证综指", "上证")),
+            ("创业板指", ("创业板指", "创业板")),
+            ("标普500", ("标普500", "sp500", "s&p500")),
+            ("纳斯达克指数", ("纳斯达克", "nasdaq")),
+        ):
+            if any(alias in text for alias in aliases):
+                add_tool("get_index_data", "index_name", label)
+        for label, aliases in (
+            ("美元指数", ("美元指数", "dxy", "美元走强", "美元走弱")),
+            ("黄金", ("黄金", "贵金属")),
+            ("原油", ("原油", "油价", "布伦特", "wti")),
+        ):
+            if any(alias in text for alias in aliases):
+                add_tool("get_global_asset_data", "asset_name", label)
+        if "通胀" in text:
+            add_tool("get_global_asset_data", "asset_name", "黄金")
+        if tools and any(word in text for word in ("怎么看", "影响", "为什么", "新闻", "政策", "风险", "战争", "冲突", "利好", "利空")):
+            tools.append({"name": "web_search", "arguments": {"query": query, "count": 5}})
+        return tools
+
     def _default_tools_for_intent(self, intent: str, query: str = "") -> list[dict]:
         normalized = self._text_field(intent).lower()
+        specific_tools = self._specific_market_tools_from_query(query)
+        event_tools = self._event_market_default_tools(query) if self._is_event_market_query(query) else []
+        if normalized in {"single_asset", "data_lookup", "market_overview"} and specific_tools:
+            return self._dedupe_mcp_tools(specific_tools + event_tools)
+        if normalized in {"risk", "general_investment"} and (specific_tools or event_tools):
+            return self._dedupe_mcp_tools(specific_tools + event_tools)
         if normalized in {"market_overview", "data_lookup"}:
             return self._default_market_overview_tools()
         if normalized == "macro":
-            window = self._recent_market_window_args(days=60)
-            return [
-                {"name": "get_global_asset_data", "arguments": {"asset_name": "美元指数", **window}},
-                {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", **window}},
-                {"name": "web_search", "arguments": {"query": query or "最新宏观政策 市场影响", "count": 5}},
-            ]
+            return self._dedupe_mcp_tools(specific_tools + (event_tools or self._event_market_default_tools(query)))
         return []
 
     def _should_reuse_previous_mcp_data(self, query: str, intent_plan: dict) -> bool:
@@ -5294,34 +5412,94 @@ class CLI:
         text = re.sub(r"\s+", "", self._text_field(label).lower())
         if not text:
             return ""
-        if "hstech" in text or "恒生科技" in text:
+        if (
+            "hstech" in text
+            or "hangsengtech" in text
+            or "hangsengtechnology" in text
+            or "恒生科技" in text
+        ):
             return "恒生科技指数"
-        if "国企指数" in text or "恒生中国企业" in text:
+        if "hscei" in text or "国企指数" in text or "恒生中国企业" in text or "hangsengchinaenterprises" in text:
             return "恒生中国企业指数"
-        if "hsi" in text or "恒生指数" in text or "香港恒生指数" in text:
+        if "hsi" in text or "恒生指数" in text or "香港恒生指数" in text or "hangsengindex" in text:
             return "恒生指数"
         return ""
 
     def _normalize_mcp_tool_route(self, name: str, arguments: dict) -> tuple[str, dict]:
         args = dict(arguments or {})
-        if name == "get_global_asset_data":
-            label = (
-                self._text_field(args.get("asset_name"))
-                or self._text_field(args.get("assetName"))
-                or self._text_field(args.get("source_table"))
-                or self._text_field(args.get("sourceTable"))
+        if name in {"get_global_asset_data", "get_index_data"}:
+            label_keys = (
+                "asset_name",
+                "assetName",
+                "index_name",
+                "indexName",
+                "source_table",
+                "sourceTable",
+                "table_name",
+                "tableName",
+                "code",
+                "symbol",
+                "ticker",
+                "index_code",
+                "indexCode",
+                "asset_code",
+                "assetCode",
+                "label",
             )
-            canonical_label = self._canonical_index_market_label(label)
-            if canonical_label:
-                args.pop("asset_name", None)
-                args.pop("assetName", None)
+            canonical_label = next(
+                (
+                    canonical
+                    for canonical in (self._canonical_index_market_label(args.get(key)) for key in label_keys)
+                    if canonical
+                ),
+                "",
+            )
+            if canonical_label and name == "get_global_asset_data":
+                for key in label_keys:
+                    args.pop(key, None)
                 args["index_name"] = canonical_label
-                args.pop("asset_code", None)
-                args.pop("assetCode", None)
-                args.pop("source_table", None)
-                args.pop("sourceTable", None)
                 return "get_index_data", args
+            if canonical_label and name == "get_index_data":
+                for key in label_keys:
+                    args.pop(key, None)
+                args["index_name"] = canonical_label
+        args = self._normalize_mcp_argument_aliases(name, args)
         return name, args
+
+    def _normalize_mcp_argument_aliases(self, name: str, arguments: dict) -> dict:
+        args = dict(arguments or {})
+        aliases_by_tool = {
+            "get_index_data": {
+                "indexName": "index_name",
+                "index_code": "index_name",
+                "indexCode": "index_name",
+            },
+            "get_global_asset_data": {
+                "assetName": "asset_name",
+                "asset_code": "asset_code",
+                "assetCode": "asset_code",
+                "sourceTable": "source_table",
+            },
+            "get_future_market_data": {
+                "contractCode": "contract_code",
+                "contractType": "contract_type",
+            },
+            "get_product_detail": {
+                "productId": "product_id",
+                "productType": "product_type",
+            },
+            "get_product_history": {
+                "productId": "product_id",
+                "productType": "product_type",
+            },
+            "search_products": {
+                "productType": "product_type",
+            },
+        }
+        for old, new in aliases_by_tool.get(name, {}).items():
+            if old in args and new not in args:
+                args[new] = args.pop(old)
+        return args
 
     def _extract_mcp_tool_specs(self, plan: dict) -> list[dict]:
         if not isinstance(plan, dict):
@@ -5700,11 +5878,11 @@ class CLI:
         row = self._find_mcp_market_row(value)
         if not isinstance(row, dict):
             return []
+        close_return = self._strict_close_return_pct(value)
         field_groups = [
             ("名称", ("name", "index_name", "asset_name", "product_name", "security_name", "fund_name", "symbol_name", "symbol", "code", "名称", "简称", "代码", "指数名称", "资产名称", "股票简称")),
             ("日期", ("date", "trade_date", "tradedate", "trading_date", "datetime", "timestamp", "time", "日期", "交易日期", "时间")),
             ("最新", ("price", "latest", "last", "close", "close_price", "latest_price", "current_price", "last_price", "nav", "unit_nav", "收盘", "收盘价", "最新价", "现价", "净值", "单位净值")),
-            ("涨跌幅", ("change_pct", "pct_chg", "percent", "changePercent", "change_percent", "changeRate", "涨跌幅", "涨幅", "涨跌幅(%)", "日涨跌幅")),
             ("涨跌", ("change", "change_amount", "price_change", "涨跌", "涨跌额")),
             ("成交额", ("amount", "turnover", "turnover_amount", "成交额", "成交额(元)")),
             ("成交量", ("volume", "vol", "成交量", "成交量(手)")),
@@ -5715,6 +5893,14 @@ class CLI:
             for alias in aliases:
                 if alias in row and self._is_safe_mcp_scalar(alias, row.get(alias)):
                     highlights.append(f"{label} {self._format_mcp_scalar(row.get(alias))}")
+                    used_keys.add(alias)
+                    break
+        if close_return is not None:
+            highlights.append(f"区间收益 {close_return:.2f}%")
+        else:
+            for alias in ("change_pct", "pct_chg", "percent", "changePercent", "change_percent", "changeRate", "涨跌幅", "涨幅", "涨跌幅(%)", "日涨跌幅"):
+                if alias in row and self._is_safe_mcp_scalar(alias, row.get(alias)):
+                    highlights.append(f"涨跌幅 {self._format_mcp_scalar(row.get(alias))}")
                     used_keys.add(alias)
                     break
         if highlights:
@@ -5756,7 +5942,7 @@ class CLI:
     def _find_mcp_market_row(self, value):
         if isinstance(value, list):
             rows = [item for item in value if isinstance(item, dict)]
-            return rows[-1] if rows else None
+            return self._latest_mcp_row_by_date(rows)
         if not isinstance(value, dict):
             return None
         latest = value.get("latest")
@@ -5767,13 +5953,37 @@ class CLI:
             if isinstance(nested, list):
                 rows = [item for item in nested if isinstance(item, dict)]
                 if rows:
-                    return rows[-1]
+                    return self._latest_mcp_row_by_date(rows)
             if isinstance(nested, dict):
                 found = self._find_mcp_market_row(nested)
                 if found:
                     return found
         primitive_count = sum(1 for item in value.values() if isinstance(item, (str, int, float, bool)) or item is None)
         return value if primitive_count else None
+
+    def _latest_mcp_row_by_date(self, rows: list[dict]) -> dict | None:
+        if not rows:
+            return None
+        if not any(self._mcp_row_date_key(row) for row in rows):
+            return rows[-1]
+        return max(enumerate(rows), key=lambda item: (self._mcp_row_date_key(item[1]), item[0]))[1]
+
+    def _mcp_row_date_key(self, row: dict) -> str:
+        value = (
+            row.get("date")
+            or row.get("trade_date")
+            or row.get("tradedate")
+            or row.get("trading_date")
+            or row.get("datetime")
+            or row.get("timestamp")
+            or row.get("time")
+            or row.get("日期")
+            or row.get("交易日期")
+            or row.get("时间")
+        )
+        if value is None:
+            return ""
+        return re.sub(r"\D", "", str(value))[:14]
 
     def _is_safe_mcp_scalar(self, key, value) -> bool:
         key_text = str(key).lower()
@@ -5989,6 +6199,9 @@ class CLI:
             return row
         if not isinstance(row, dict):
             return None
+        strict_return = self._strict_close_return_pct(row)
+        if strict_return is not None:
+            return strict_return
         for key in (
             "value",
             "change_pct",
@@ -6004,6 +6217,103 @@ class CLI:
         ):
             if key in row and self._numeric_chart_value(row.get(key)) is not None:
                 return row.get(key)
+        return None
+
+    def _strict_close_return_pct(self, value) -> float | None:
+        direct = self._direct_close_return_pct(value)
+        if direct is not None:
+            return direct
+        points = self._close_points(value)
+        if len(points) < 2:
+            return None
+        points = sorted(enumerate(points), key=lambda item: (item[1][0] or "", item[0]))
+        start_close = points[0][1][1]
+        end_close = points[-1][1][1]
+        if start_close is None or end_close is None or start_close == 0:
+            return None
+        return (end_close / start_close - 1.0) * 100.0
+
+    def _direct_close_return_pct(self, value) -> float | None:
+        if not isinstance(value, dict):
+            return None
+        start = self._first_numeric_value(
+            value,
+            (
+                "start_close",
+                "begin_close",
+                "initial_close",
+                "from_close",
+                "previous_close",
+                "prev_close",
+                "pre_close",
+                "prior_close",
+                "start_nav",
+                "begin_nav",
+                "期初收盘价",
+                "起始收盘价",
+                "前收盘价",
+                "昨收",
+            ),
+        )
+        end = self._first_numeric_value(
+            value,
+            (
+                "end_close",
+                "final_close",
+                "to_close",
+                "latest_close",
+                "close",
+                "close_price",
+                "last_close",
+                "end_nav",
+                "latest_nav",
+                "期末收盘价",
+                "结束收盘价",
+                "收盘价",
+                "收盘",
+            ),
+        )
+        if start is None or end is None or start == 0:
+            return None
+        return (end / start - 1.0) * 100.0
+
+    def _close_points(self, value) -> list[tuple[str, float]]:
+        points: list[tuple[str, float]] = []
+        if isinstance(value, list):
+            for item in value:
+                points.extend(self._close_points(item))
+            return points
+        if not isinstance(value, dict):
+            return points
+        close = self._first_numeric_value(
+            value,
+            (
+                "close",
+                "close_price",
+                "latest_close",
+                "last_close",
+                "nav",
+                "unit_nav",
+                "收盘",
+                "收盘价",
+                "净值",
+                "单位净值",
+            ),
+        )
+        if close is not None:
+            points.append((self._mcp_row_date_key(value), close))
+        for nested_key in ("data", "result", "payload", "body", "records", "items", "rows", "list", "history", "prices", "points", "series", "dataset", "values"):
+            nested = value.get(nested_key)
+            if isinstance(nested, (dict, list)):
+                points.extend(self._close_points(nested))
+        return points
+
+    def _first_numeric_value(self, value: dict, keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            if key in value:
+                number = self._numeric_chart_value(value.get(key))
+                if number is not None:
+                    return number
         return None
 
     def _format_client_advice(
@@ -6036,8 +6346,8 @@ class CLI:
             lines.extend(["", source_line])
         snapshot_lines = data_inputs.get("mcp_snapshot") if isinstance(data_inputs, dict) else []
         if snapshot_lines:
-            lines.extend(["", "市场快照："])
-            for item in snapshot_lines[:6]:
+            lines.extend(["", "关键数据："])
+            for item in snapshot_lines[:4]:
                 lines.append(f"- {item}")
         mcp_links = data_inputs.get("mcp_links") if isinstance(data_inputs, dict) else []
         if not isinstance(mcp_links, list):
@@ -6053,13 +6363,13 @@ class CLI:
                 synthesis_direct_links.append(item["link"])
         if mcp_links or synthesis_links or synthesis_direct_links:
             lines.extend(["", "可打开资源："])
-            for item in [*mcp_links, *synthesis_links, *synthesis_direct_links][:8]:
+            for item in [*mcp_links, *synthesis_links, *synthesis_direct_links][:6]:
                 lines.append(f"- {item}")
         view = self._align_view_with_data_availability(query, view, snapshot_lines, data_inputs)
         lines.extend(["", view])
         if suggestions:
             lines.extend(["", "可以先这样做："])
-            for item in suggestions[:5]:
+            for item in suggestions[:3]:
                 lines.append(f"- {item}")
         else:
             lines.extend(["", "如果你愿意，我建议你把问题再收窄一点：资产、周期、仓位和风险承受力这四项里，至少补两项。"])
@@ -6070,10 +6380,10 @@ class CLI:
             lines.append("- 注意仓位、期限、流动性与最大回撤约束。")
         if missing:
             lines.extend(["", self._missing_inputs_heading(query, data_inputs)])
-            for item in missing[:5]:
+            for item in missing[:3]:
                 lines.append(f"- {item}")
         if artifact_results:
-            lines.extend(["", "图表与分析产物："])
+            lines.extend(["", "图表："])
             for item in artifact_results:
                 title = self._text_field(item.get("title")) or "图表"
                 status = self._text_field(item.get("status"))
@@ -6081,61 +6391,25 @@ class CLI:
                     saved = item.get("saved") if isinstance(item.get("saved"), dict) else {}
                     if saved:
                         workspace = str(workspace_status().get("path") or "")
-                        json_link = self._workspace_file_link(saved.get("json"), workspace, label=f"{title} JSON") if saved.get("json") else ""
                         html_link = self._workspace_file_link(saved.get("html"), workspace, label=f"{title} HTML") if saved.get("html") else ""
                         lines.append(f"- {title}: 已生成")
-                        if json_link:
-                            lines.append(f"  JSON: {json_link}")
                         if html_link:
-                            lines.append(f"  HTML: {html_link}")
+                            lines.append(f"  打开: {html_link}")
                     else:
                         lines.append(f"- {title}: 已生成，工作区未授权，未写入本地文件")
                         lines.append("  下一步: /workspace browse 选择项目文件夹，或 /workspace path <路径> 手动指定，然后 /workspace allow 授权保存。")
                     resource_links = item.get("resource_links") if isinstance(item.get("resource_links"), list) else []
-                    for link in resource_links[:4]:
+                    for link in resource_links[:2]:
                         lines.append(f"  资源: {link}")
                     preview = item.get("preview") if isinstance(item.get("preview"), list) else []
                     if preview:
                         lines.append("  终端预览:")
-                        for row in preview[:6]:
+                        for row in preview[:5]:
                             lines.append(f"  {row}")
                 elif status == "skipped":
                     lines.append(f"- {title}: 已跳过，{item.get('reason')}")
                 else:
                     lines.append(f"- {title}: 生成失败，{item.get('error') or status or '未知原因'}")
-            lines.extend([
-                "",
-                "产物收件箱：",
-                "- /open chart 打开最近图表，/open report 打开最近报告。",
-                "- /artifacts 查看项目文件夹里的全部图表和报告。",
-                "- /links 1 或 /open 1 打开本轮网页、图片、图表和报告链接。",
-            ])
-        trace_lines = data_inputs.get("agent_trace") if isinstance(data_inputs, dict) else []
-        if trace_lines:
-            lines.extend(["", "本轮执行："])
-            for item in trace_lines[:6]:
-                lines.append(f"- {item}")
-        trail_lines = self._agent_trail_lines(
-            query=query,
-            scene=scene,
-            confidence=confidence,
-            provider=provider,
-            model=model,
-            data_inputs=data_inputs,
-            artifact_results=artifact_results,
-        )
-        if trail_lines:
-            lines.extend(["", "Agent Trail："])
-            lines.extend(trail_lines)
-        command_bar = self._answer_command_bar(
-            mcp_links=[*mcp_links, *synthesis_links, *synthesis_direct_links],
-            artifact_results=artifact_results,
-            data_inputs=data_inputs,
-        )
-        if command_bar:
-            lines.extend(["", "快捷操作："])
-            for item in command_bar:
-                lines.append(f"- {item}")
         meta = f"服务端场景：{scene}"
         if confidence is not None:
             meta += f"，置信度 {confidence}"
@@ -6144,31 +6418,15 @@ class CLI:
             "—",
             f"{meta}；本机模型：{provider} / {model}。大模型 API Key 只在本机直连供应商，未发送给二郎神服务端。",
         ])
-        lines.extend(["", "下一步："])
         repair_action = self._mcp_repair_action(data_inputs)
+        compact_next = []
         if next_actions:
-            for item in next_actions[:4]:
-                lines.append(f"- {item}")
-            if repair_action and all(repair_action not in item for item in next_actions):
-                lines.append(f"- {repair_action}")
-        else:
-            lines.append("- 输入 /plan 查看本次意图、MCP 工具和服务端映射过程。")
-            if repair_action:
-                lines.append(f"- {repair_action}")
-            if artifact_results:
-                lines.append("- 输入 /open 打开最近生成的图表或报告，/artifacts 查看全部产物。")
-            else:
-                lines.append("- 如果需要图表或报告，可以继续说“把这个做成图表/报告”。")
-        default_followups: list[str] = []
-        if followups:
-            lines.extend(["", "你也可以继续问："])
-            for item in followups[:3]:
-                lines.append(f"- {item}")
-        else:
-            default_followups = self._default_followups(query, missing, artifact_results, data_inputs)
-        if default_followups:
-            lines.extend(["", "你也可以继续问："])
-            for item in default_followups[:3]:
+            compact_next.extend(next_actions[:2])
+        if repair_action and all(repair_action not in item for item in compact_next):
+            compact_next.append(repair_action)
+        if compact_next:
+            lines.extend(["", "下一步："])
+            for item in compact_next[:3]:
                 lines.append(f"- {item}")
         return "\n".join(lines)
 

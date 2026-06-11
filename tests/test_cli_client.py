@@ -13,11 +13,16 @@ from src.mcp.super66 import Super66MCP
 from src.workspace import approve_workspace, recent_workspaces, workspace_status
 
 
+@pytest.fixture(autouse=True)
+def isolate_local_memory(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_MEMORY_FILE", str(tmp_path / "memory.json"))
+
+
 @pytest.mark.asyncio
 async def test_slash_help_returns_help_text():
     result = await CLI().dispatch("/help")
 
-    assert "███████" in result or "二郎神 ERLANGSHEN" in result
+    assert "ERLANGSHEN 二郎神" in result
     assert "二郎神 - 服务端优先 CLI" in result
     assert "/login [xwab|xczt] [账号]" in result
     assert "/model" in result
@@ -36,29 +41,15 @@ def test_compact_logo_keeps_agent_identity(monkeypatch):
 
     logo = _logo()
 
-    assert "ERLANGSHEN 二郎神" in logo
-    assert "Agent Console" in logo
-    assert "MCP-first Investment Agent" in logo
-    assert "Local LLM Key" in logo
-    assert "Chart Artifacts" in logo
-    assert "ASK -> DATA -> MAP -> ANSWER -> LINKS" in logo
-    assert "Ask · Data · Map · Think · Build · Open" in logo
-    assert "/setup workspace · /server · /tools" in logo
+    assert logo.strip() == "ERLANGSHEN 二郎神"
 
 
-def test_wide_logo_shows_agent_execution_rail(monkeypatch):
+def test_wide_logo_stays_minimal(monkeypatch):
     monkeypatch.setattr("src.cli._terminal_width", lambda: 120)
 
     logo = _logo()
 
-    assert "ERLANGSHEN 二郎神 · Agent Console" in logo
-    assert "MCP-FIRST INVESTMENT AGENT" in logo
-    assert "ASK -> SUPER-66 MCP / WEB_SEARCH -> SERVER MAP -> LOCAL ANSWER -> CHART / LINKS" in logo
-    assert "ASK · DATA · MAP · THINK · BUILD · OPEN" in logo
-    assert "Natural language in · named resources out · every chart/report has a link" in logo
-    assert "Project Sandbox · Server Workbench · Tool Map · Chart Artifacts · Link Inbox" in logo
-    assert "/setup workspace" in logo
-    assert "/links 1 opens resources" in logo
+    assert logo.strip() == "ERLANGSHEN 二郎神"
 
 
 def test_panels_use_terminal_display_width_for_chinese_text(monkeypatch):
@@ -86,7 +77,7 @@ async def test_command_palette_and_command_suggestion():
     assert "workspace  /workspace browse · 选择项目文件夹并授权图表/报告保存" in palette
     assert "model      /model select · /model key 本机测试并保存 API Key" in palette
     assert "resources  /links 1 · /open 1 打开网页、图片、图表和报告" in palette
-    assert "audit      /plan · /brief · /doctor 复盘工具链路、会话状态和诊断" in palette
+    assert "audit      /plan · /memory · /brief · /doctor 复盘工具链路、记忆和诊断" in palette
     assert "Getting Started" in palette
     assert "/setup" in palette
     assert "/setup run" in palette
@@ -453,6 +444,7 @@ def test_header_shows_agent_workspace_and_tool_channels(monkeypatch, tmp_path, c
     monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
     monkeypatch.setenv("ERLANGSHEN_WORKSPACE_FILE", str(tmp_path / "workspaces.json"))
     monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("ERLANGSHEN_MEMORY_FILE", str(tmp_path / "memory.json"))
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     monkeypatch.setenv("ERLANGSHEN_WORKSPACE", str(project_dir))
@@ -461,87 +453,25 @@ def test_header_shows_agent_workspace_and_tool_channels(monkeypatch, tmp_path, c
     CLI().print_header()
     output = capsys.readouterr().out
 
-    assert "Erlangshen Agent Console" in output
-    assert "投资智能体工作台" in output
-    assert "agentic investment analyst · MCP-first" in output
-    assert "Primary Action  /workspace browse 选择项目文件夹" in output
-    assert "Command Deck    / 打开可选择命令面板；/setup run 进入执行式初始化" in output
-    assert "First Run Path" in output
-    assert "/workspace browse  用方向键选择项目文件夹" in output
-    assert "确认本轮可写入的沙箱" in output
-    assert "/login xwab <账号>   绑定 XWAB/XCZT 账号" in output
-    assert "/model key           本机测试并保存大模型 API Key" in output
-    assert "本机 LLM 选择 MCP/web_search，再请求服务端映射" in output
-    assert "/links 1 或 /open 1   打开网页、图片、图表、PDF 或报告" in output
-    assert "Operator Layout" in output
-    assert "左侧是用户问题，右侧是二郎神回答" in output
-    assert "非文本结果不会挤进终端正文" in output
-    assert "chart artifact 会保存到授权项目文件夹" in output
-    assert "Agent Loop" in output
-    assert "本机大模型改写问题、判断意图、选择工具组合" in output
-    assert "super-66 MCP / web_search" in output
-    assert "Command Deck" in output
-    assert "/setup workspace" in output
-    assert "/server actions" in output
-    assert "/links open 1" in output
-    assert "Signal Rail" in output
-    assert "intent  ->  mcp data  ->  protected map" in output
-    assert "Starter Prompts" in output
-    assert "今天行情怎么样？先帮我看盘面主线和风险。" in output
-    assert "帮我看一下贵州茅台今天怎么走。" in output
-    assert "我现在偏红利和黄金，下一步要不要降低波动？" in output
-    assert "把刚才的资产表现做成图表。" in output
-    assert "/server flow" in output
-    assert "Trust Boundary" in output
-    assert "API Key 只保存在本机" in output
-    assert "Start      按 Primary Action 补齐缺口；准备好后直接输入投资问题" in output
+    assert "ERLANGSHEN 二郎神" in output
+    assert "Session" in output
+    assert "version" in output
+    assert "core       已配置" in output
+    assert "account    未登录" in output
+    assert "model" in output
+    assert "(need key)" in output
+    assert "workspace  未授权" in output
+    assert "memory     0 条本机记忆" in output
+    assert "下一步" in output
+    assert "/model key" in output
+    assert "/memory 查看本机记忆" in output
     assert "xiaoerdata" not in output
-    assert "Agent Command Ribbon" in output
-    assert "Now       /workspace browse 选择项目文件夹" in output
-    assert "Ask       /setup run · 本机 LLM 先理解意图，再选择 MCP/web_search" in output
-    assert "Verify    /server goals · 看服务端状态、工具链路和本轮 Agent 计划" in output
-    assert "Create    /workspace browse · 服务端 chart artifact -> 授权工作区" in output
-    assert "Recover   /links · 网页/图片/图表/报告链接收件箱 links[0]" in output
-    assert "Mode      /server 进入服务端工作台 · /tools 查看 MCP playbook · /workspace 管理沙箱" in output
-    assert "Mission Control" in output
-    assert "Ask -> Data -> Protected Core -> Local Answer -> Artifact" in output
-    assert "INPUT[ready]  ->  DATA[login]  ->  CORE[setup]  ->  OUTPUT[setup]" in output
-    assert "直接输入问题；或 /server map <问题> 只检查服务端理解" in output
-    assert "super-66 MCP 优先；web_search 补新闻和网页线索" in output
-    assert "说“做成图表/报告”或 /chart <标题> :: {json}" in output
-    assert "/links 1 或 /open 1 打开网页、图片、图表和报告" in output
-    assert "Agent HUD" in output
-    assert "account[need]" in output
-    assert "model[need]" in output
-    assert "workspace[need]" in output
-    assert "server[ok]" in output
-    assert "prompt -> local intent -> super-66/web_search -> server map -> local LLM -> chart" in output
-    assert "links[0]" in output
-    assert "Fast Path   /workspace browse 选择项目文件夹" in output
-    assert "回答产生网页/图片/图表后会出现在 /links" in output
-    assert "输入 /server 或 /workspace 会收窄到对应子命令" in output
-    assert "Agent Launchpad" in output
-    assert "Ask        /setup run 补齐账号和本机大模型" in output
-    assert "Verify     /server actions" in output
-    assert "Create     /workspace browse 或 /workspace path <路径> 选择项目文件夹并授权" in output
-    assert "Links      /links 查看资源" in output
-    assert "Data       super-66 MCP 行情/产品优先" in output
-    assert "Agent Readiness" in output
-    assert "account    NEED" in output
-    assert "model      NEED" in output
-    assert "workspace  NEED" in output
-    assert "mcp        NEED" in output
-    assert "server     OK" in output
-    assert "artifacts  NEED" in output
-    assert "Workspace & Tools" in output
-    assert str(project_dir) in output
-    assert "super-66 MCP first" in output
-    assert "/chart uses server chart artifact channel" in output
-    assert "Project Sandbox" in output
-    assert "Permission  未授权，当前不会写入本地文件" in output
-    assert ".erlangshen/artifacts" in output
-    assert "/workspace browse 用方向键选择项目文件夹" in output
-    assert "/setup 初始化工作区" in output
+    assert "Erlangshen Agent Console" not in output
+    assert "Mission Control" not in output
+    assert "Agent HUD" not in output
+    assert "Agent Launchpad" not in output
+    assert "Workspace & Tools" not in output
+    assert "Project Sandbox" not in output
     reset_config()
 
 
@@ -735,7 +665,9 @@ async def test_tools_command_exposes_mcp_and_artifact_capabilities():
     assert "宽泛行情任务没有任何工具计划" in result
     assert "audit_surface: 所有工具来源、补齐原因、降级和图表计划必须进入 /plan" in result
     assert "工具结果形态" in result
-    assert "get_index_data: 指数历史或最近行情序列" in result
+    assert "get_index_data: A股和港股宽基指数历史或最近行情序列" in result
+    assert "恒生科技指数" in result
+    assert "港股指数优先用 get_index_data" in result
     assert "字段: index_name, date, close, change_pct" in result
     assert "line 用于走势，bar 用于当日/近期涨跌幅对比" in result
     assert "web_search: 公开网页、新闻、公告、标题、摘要和 URL" in result
@@ -980,7 +912,7 @@ async def test_plan_command_shows_recent_resource_links():
     assert "2. local report: 打开报告: file:///tmp/report.md" in result
     assert "本轮 Playbook:" in result
     assert "- market_overview: 回答“今天行情/盘面/市场主线/风险偏好”这类宽泛问题" in result
-    assert "工具链: get_index_data: 沪深300/上证指数/创业板指 -> get_global_asset_data" in result
+    assert "工具链: get_index_data: 沪深300/上证指数/创业板指/恒生科技指数 -> get_global_asset_data" in result
     assert "新闻、政策原文、图片、图表页面必须转成 resource_links" in result
     assert "/links 查看最近网页、图片、图表和报告名称链接；/links open 1 直接打开第一个资源" in result
 
@@ -1814,12 +1746,8 @@ async def test_client_side_advice_uses_local_intent_to_fetch_super66_mcp(monkeyp
     assert "结合实时数据看" in result
     assert "先看主线" in result
     assert "服务端场景：市场监测与事件响应" in result
-    assert "本轮执行：" in result
-    assert "- 本机理解问题意图" in result
-    assert "- 读取 super-66 MCP / 本地网页线索" in result
-    assert "- 读取数据工具: get_index_data / 沪深300" in result
-    assert "- 向服务端确认改写后的问题场景" in result
-    assert "- 用本机 DeepSeek 生成分析" in result
+    assert "本轮执行：" not in result
+    assert "Agent Trail：" not in result
     plan = await cli.dispatch("/plan")
     assert "【最近一次分析计划】" in plan
     assert "market_overview" in plan
@@ -1841,7 +1769,7 @@ async def test_client_side_advice_uses_local_intent_to_fetch_super66_mcp(monkeyp
     assert "沪深300" in plan
     assert "工具链路解释:" in plan
     assert "get_index_data / 沪深300: 已返回" in plan
-    assert "用途: A股、指数、市场整体、沪深300、上证指数、创业板等行情问题" in plan
+    assert "用途: A股指数、港股宽基指数、市场整体、沪深300、上证指数、创业板指、恒生科技指数、恒生指数等行情问题" in plan
     assert '参数: {"index_name": "沪深300", "limit": 60}' in plan
     assert "数据键: get_index_data:沪深300" in plan
     assert "MCP 快照" in plan
@@ -1917,46 +1845,28 @@ async def test_client_side_advice_materializes_llm_chart_artifact(monkeypatch, t
     result = await cli.dispatch("资产表现怎么样")
     links = await cli.dispatch("/links")
 
-    assert "图表与分析产物" in result
+    assert "图表：" in result
     assert "资产表现: 已生成" in result
     assert "终端预览:" in result
     assert "A股" in result
     assert "黄金" in result
     assert "|" in result
-    assert "JSON" in result
-    assert "HTML" in result
+    assert "打开: 资产表现 HTML" in result
+    assert "JSON" not in result
     assert "资源: 资产表现: https://cdn.example.com/asset-chart.html" in result
     assert "资源: 资产表现 图片: https://cdn.example.com/asset-chart.png" in result
-    assert "产物收件箱：" in result
-    assert "/open chart 打开最近图表，/open report 打开最近报告" in result
-    assert "/artifacts 查看项目文件夹里的全部图表和报告" in result
-    assert "/links 1 或 /open 1 打开本轮网页、图片、图表和报告链接" in result
+    assert "产物收件箱：" not in result
     assert "server artifact · 资产表现怎么样" in links
     assert "资产表现: https://cdn.example.com/asset-chart.html" in links
     assert "资产表现 图片: https://cdn.example.com/asset-chart.png" in links
     assert "local artifact · 资产表现怎么样" in links
     assert "资产表现 HTML: file://" in links
     assert "资产表现 JSON: file://" in links
-    assert "报告已保存:" in result
-    assert "打开报告: file://" in result
-    assert "下一步：" in result
-    assert "/plan" in result
-    assert "/open" in result
-    assert "/artifacts" in result
+    assert "报告已保存:" not in result
     assert list((project_dir / ".erlangshen" / "artifacts" / "charts").glob("*.json"))
     assert list((project_dir / ".erlangshen" / "artifacts" / "charts").glob("*.html"))
     reports = list((project_dir / ".erlangshen" / "artifacts" / "reports").glob("*.md"))
-    assert reports
-    report_text = reports[0].read_text(encoding="utf-8")
-    assert "# 二郎神分析报告" in report_text
-    assert "## 数据与执行上下文" in report_text
-    assert "### 执行过程" in report_text
-    assert "- 本机理解问题意图" in report_text
-    assert "## 图表与产物" in report_text
-    assert "- [资产表现](file://" in report_text
-    assert "## 下一步" in report_text
-    assert "`/links`" in report_text
-    assert "`/open link 1`" in report_text
+    assert not reports
     reset_config()
 
 
@@ -2777,10 +2687,17 @@ def test_llm_prompts_include_mcp_catalog_and_chart_channel():
     assert "single_asset_or_product" in payload
     assert "macro_event_cross_asset" in payload
     assert "visualization_or_report_followup" in payload
+    assert "恒生科技指数、恒生指数、HSTECH、HSI、Hang Seng Tech 只能使用 get_index_data" in payload
+    assert "不要使用 get_global_asset_data" in payload
+    assert "国内宽基指数数据源" in payload
+    assert "sourceTable=global_index_daily/global_indices/global_assets" not in payload
+    assert "恒生科技指数/HSTECH/Hang Seng Tech/恒生指数/HSI/HSCEI 属于这里" in payload
     assert "preferred_chain" in payload
     assert "artifact_rule" in payload
     assert "resource_rule" in payload
     assert "get_index_data: 沪深300/上证指数/创业板指" in payload
+    assert "A股和港股宽基指数历史或最近行情序列" in payload
+    assert "港股宽基指数必须用 get_index_data" in payload
     assert "生成的 HTML/JSON/图片/报告路径都加入 /links" in payload
     assert "route_plans" in payload
     assert "composition_patterns" in payload
@@ -2899,6 +2816,52 @@ async def test_intent_parser_accepts_markdown_fenced_json_with_examples():
     assert plan["rewritten_query"] == "今天 A 股行情怎么样"
     assert {"name": "get_index_data", "arguments": {"index_name": "沪深300", "limit": 30}} in plan["mcp_tools"]
     assert "指数数据" in plan["tool_rationale"]
+
+
+@pytest.mark.asyncio
+async def test_intent_llm_can_select_hk_index_tool_without_global_asset():
+    captured = {}
+
+    class FakeLLMClient:
+        def __init__(self, settings, timeout=60.0):
+            pass
+
+        async def complete(self, messages, temperature=0.7, max_tokens=4096):
+            captured["payload"] = messages[-1]["content"]
+            return json.dumps(
+                {
+                    "intent": "single_asset",
+                    "needs_server_mapping": True,
+                    "needs_mcp": True,
+                    "mcp_tools": [
+                        {
+                            "name": "get_index_data",
+                            "arguments": {
+                                "index_name": "恒生科技指数",
+                                "sourceTable": "global_index_daily",
+                                "limit": 60,
+                            },
+                        }
+                    ],
+                    "rewritten_query": "恒生科技指数最新数据和近期走势",
+                    "route_summary": "用户要查恒生科技指数事实数据",
+                    "tool_rationale": "恒生科技/HSTECH 是港股股票指数，应使用 get_index_data",
+                    "data_strategy": "先取 super-66 指数数据，再结合服务端场景映射分析",
+                },
+                ensure_ascii=False,
+            )
+
+    plan = await CLI()._infer_client_intent("HSTECH 最新数据", {}, object(), FakeLLMClient)
+
+    assert "恒生科技指数、恒生指数、HSTECH、HSI、Hang Seng Tech 只能使用 get_index_data" in captured["payload"]
+    assert plan["route_source"] == "local_llm"
+    assert plan["intent"] == "single_asset"
+    assert {
+        "name": "get_index_data",
+        "arguments": {"limit": 60, "index_name": "恒生科技指数"},
+    } in plan["mcp_tools"]
+    assert not any(item["name"] == "get_global_asset_data" for item in plan["mcp_tools"])
+    assert "港股股票指数" in plan["tool_rationale"]
 
 
 def test_client_llm_advice_parser_accepts_markdown_wrapped_json():
@@ -3025,9 +2988,11 @@ async def test_context_command_shows_and_clears_recent_context():
 
     assert "【最近对话上下文】" in result
     assert "条数: 1" in result
-    assert "进入本机大模型: recent_conversation、previous_mcp_context、recent_artifacts、recent_resources" in result
+    assert "本机记忆: 1 条会被预算化注入" in result
+    assert "进入本机大模型: recent_conversation、local_memory、previous_mcp_context、recent_artifacts、recent_resources" in result
     assert "上下文来源:" in result
     assert "recent_conversation: 1 条压缩对话" in result
+    assert "local_memory: 1 条跨会话压缩记忆" in result
     assert "previous_mcp_context: available · get_index_data:沪深300" in result
     assert "recent_artifacts: 1 个图表/报告摘要" in result
     assert "recent_resources: 1 个网页/图片/图表/报告链接" in result
@@ -3046,6 +3011,7 @@ async def test_context_command_shows_and_clears_recent_context():
     assert "打开刚才那个网页/图片/图表" in result
     assert "/plan" in result
     assert "/links" in result
+    assert "/memory" in result
     assert "/clear" in result
 
     cleared = await cli.dispatch("/context clear")
@@ -3053,6 +3019,36 @@ async def test_context_command_shows_and_clears_recent_context():
 
     assert "已清空" in cleared
     assert "条数: 0" in empty
+
+
+@pytest.mark.asyncio
+async def test_memory_command_persists_redacted_local_context(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_MEMORY_FILE", str(tmp_path / "memory.json"))
+    cli = CLI()
+
+    cli._remember_conversation_turn(
+        "我关注恒生科技指数，key=sk-secret123456789",
+        "后续看港股和 AI 主线，不要暴露 npm_abcdef123456789。",
+    )
+    result = await cli.dispatch("/memory")
+
+    assert "【本机记忆】" in result
+    assert "条数: 1" in result
+    assert str(tmp_path / "memory.json") in result
+    assert "恒生科技指数" in result
+    assert "AI" in result
+    assert "[hidden-secret]" in result
+    assert "sk-secret123456789" not in result
+    assert "npm_abcdef123456789" not in result
+    assert "记忆不会发送给二郎神服务端" in result
+
+    messages = cli._client_advice_messages(query="继续说", matches=[])
+    payload = json.loads(messages[1]["content"])
+    assert payload["local_memory"][0]["user"].startswith("我关注恒生科技指数")
+
+    cleared = await cli.dispatch("/memory clear")
+    assert "已清空" in cleared
+    assert "条数: 0" in await cli.dispatch("/memory")
 
 
 @pytest.mark.asyncio
@@ -3287,6 +3283,44 @@ def test_intent_plan_accepts_flexible_llm_tool_shapes():
     assert plan["composition_patterns_used"] == ["market_snapshot_to_narrative", "product_history_to_risk"]
 
 
+def test_openai_tool_calls_hk_index_global_asset_is_routed_to_index_tool():
+    plan = CLI()._normalize_intent_plan(
+        {
+            "intent": "data_lookup",
+            "needs_mcp": True,
+            "tool_calls": [
+                {
+                    "id": "call_hstech",
+                    "type": "function",
+                    "function": {
+                        "name": "get_global_asset_data",
+                        "arguments": json.dumps(
+                            {
+                                "assetName": "global_indices",
+                                "sourceTable": "global_index_daily",
+                                "code": "HSTECH",
+                                "start_date": "2026-05-01",
+                                "limit": 60,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+            ],
+        },
+        "HSTECH 最新数据",
+    )
+
+    assert plan["needs_mcp"] is True
+    assert plan["tool_selection_source"] == "local_llm"
+    assert plan["mcp_tools"] == [
+        {
+            "name": "get_index_data",
+            "arguments": {"start_date": "2026-05-01", "limit": 60, "index_name": "恒生科技指数"},
+        }
+    ]
+
+
 def test_intent_plan_accepts_string_mcp_tool_shortcuts():
     plan = CLI()._normalize_intent_plan(
         {
@@ -3345,6 +3379,398 @@ def test_hk_index_aliases_are_routed_to_index_tool():
         and item["arguments"].get("asset_name") in {"恒生科技指数", "恒生指数"}
         for item in plan["mcp_tools"]
     )
+
+
+def test_macro_intent_defaults_include_hk_index_and_global_assets():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "macro", "needs_mcp": False, "mcp_tools": []},
+        "美元走强对港股和黄金有什么影响",
+    )
+
+    assert plan["needs_mcp"] is True
+    assert any(
+        item["name"] == "get_index_data" and item["arguments"].get("index_name") == "恒生科技指数"
+        for item in plan["mcp_tools"]
+    )
+    assert any(
+        item["name"] == "get_index_data" and item["arguments"].get("index_name") == "沪深300"
+        for item in plan["mcp_tools"]
+    )
+    assert any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "美元指数"
+        for item in plan["mcp_tools"]
+    )
+    assert any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "黄金"
+        for item in plan["mcp_tools"]
+    )
+    assert not any(
+        item["name"] == "get_global_asset_data"
+        and item["arguments"].get("asset_name") in {"恒生科技指数", "恒生指数", "HSTECH"}
+        for item in plan["mcp_tools"]
+    )
+
+
+def test_index_tool_accepts_asset_alias_arguments():
+    plan = CLI()._normalize_intent_plan(
+        {
+            "intent": "data_lookup",
+            "needs_mcp": True,
+            "tools": [
+                {
+                    "name": "get_index_data",
+                    "arguments": {
+                        "assetName": "global_assets",
+                        "sourceTable": "恒生科技指数",
+                        "start_date": "2026-05-01",
+                        "end_date": "2026-06-10",
+                    },
+                }
+            ],
+        },
+        "恒生科技最新数据",
+    )
+
+    assert {
+        "name": "get_index_data",
+        "arguments": {
+            "index_name": "恒生科技指数",
+            "start_date": "2026-05-01",
+            "end_date": "2026-06-10",
+        },
+    } in plan["mcp_tools"]
+
+
+def test_hk_index_code_aliases_route_to_index_tool():
+    plan = CLI()._normalize_intent_plan(
+        {
+            "intent": "data_lookup",
+            "needs_mcp": True,
+            "tools": [
+                {
+                    "name": "get_global_asset_data",
+                    "arguments": {
+                        "assetName": "global_indices",
+                        "sourceTable": "global_index_daily",
+                        "code": "HSTECH",
+                        "start_date": "2026-05-01",
+                        "limit": 3,
+                    },
+                },
+                {
+                    "name": "get_index_data",
+                    "arguments": {
+                        "sourceTable": "global_index_daily",
+                        "indexCode": "HSTECH",
+                        "limit": 3,
+                    },
+                },
+            ],
+        },
+        "HSTECH 最新数据不应该停在 4月30日",
+    )
+
+    assert {
+        "name": "get_index_data",
+        "arguments": {"start_date": "2026-05-01", "limit": 3, "index_name": "恒生科技指数"},
+    } in plan["mcp_tools"]
+    assert {
+        "name": "get_index_data",
+        "arguments": {"limit": 3, "index_name": "恒生科技指数"},
+    } in plan["mcp_tools"]
+    assert not any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") in {"HSTECH", "恒生科技指数"}
+        for item in plan["mcp_tools"]
+    )
+
+
+def test_english_hk_index_aliases_route_to_index_tool():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "single_asset", "needs_mcp": False, "mcp_tools": []},
+        "Hang Seng Tech Index latest data",
+    )
+
+    assert plan["needs_mcp"] is True
+    assert {
+        "name": "get_index_data",
+        "arguments": plan["mcp_tools"][0]["arguments"],
+    } in plan["mcp_tools"]
+    assert any(
+        item["name"] == "get_index_data" and item["arguments"].get("index_name") == "恒生科技指数"
+        for item in plan["mcp_tools"]
+    )
+
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "data_lookup", "needs_mcp": False, "mcp_tools": []},
+        "HSCEI latest data",
+    )
+
+    assert any(
+        item["name"] == "get_index_data" and item["arguments"].get("index_name") == "恒生中国企业指数"
+        for item in plan["mcp_tools"]
+    )
+    assert not any(item["name"] == "get_global_asset_data" for item in plan["mcp_tools"])
+
+
+def test_cross_asset_hk_index_scenario_dedupes_to_correct_tools():
+    plan = CLI()._normalize_intent_plan(
+        {
+            "intent": "macro",
+            "needs_mcp": True,
+            "tools": (
+                "get_global_asset_data:{\"assetName\":\"global_assets\",\"sourceTable\":\"恒生科技指数\",\"limit\":60}\n"
+                "get_index_data:{\"assetName\":\"HSTECH\",\"limit\":60}; "
+                "get_global_asset_data 美元指数; "
+                "get_global_asset_data 黄金"
+            ),
+        },
+        "美元走强的时候，恒生科技指数和黄金应该怎么一起看",
+    )
+
+    assert {
+        "name": "get_index_data",
+        "arguments": {"limit": 60, "index_name": "恒生科技指数"},
+    } in plan["mcp_tools"]
+    assert {"name": "get_global_asset_data", "arguments": {"asset_name": "美元指数"}} in plan["mcp_tools"]
+    assert {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金"}} in plan["mcp_tools"]
+    assert sum(
+        1
+        for item in plan["mcp_tools"]
+        if item["name"] == "get_index_data" and item["arguments"].get("index_name") == "恒生科技指数"
+    ) == 1
+    assert not any(
+        item["name"] == "get_global_asset_data"
+        and item["arguments"].get("asset_name") in {"HSTECH", "恒生科技指数"}
+        for item in plan["mcp_tools"]
+    )
+
+
+def test_mcp_argument_aliases_keep_cli_keys_readable():
+    cli = CLI()
+    plan = cli._normalize_intent_plan(
+        {
+            "intent": "data_lookup",
+            "needs_mcp": True,
+            "tools": [
+                {"name": "get_index_data", "arguments": {"indexName": "沪深300", "limit": 30}},
+                {"name": "get_index_data", "arguments": {"index_name": "沪深300", "limit": 30}},
+                {"name": "get_global_asset_data", "arguments": {"assetName": "黄金", "sourceTable": "global_assets"}},
+                {"name": "get_product_history", "arguments": {"productId": "fund-001", "productType": "fund"}},
+            ],
+        },
+        "帮我看沪深300、黄金和这个产品",
+    )
+
+    assert plan["mcp_tools"].count({"name": "get_index_data", "arguments": {"limit": 30, "index_name": "沪深300"}}) == 1
+    assert {"name": "get_global_asset_data", "arguments": {"source_table": "global_assets", "asset_name": "黄金"}} in plan["mcp_tools"]
+    assert {"name": "get_product_history", "arguments": {"product_id": "fund-001", "product_type": "fund"}} in plan["mcp_tools"]
+    assert cli._mcp_result_key("get_index_data", plan["mcp_tools"][0]["arguments"], 0) == "get_index_data:沪深300"
+
+
+def test_specific_single_asset_query_adds_precise_mcp_tool_when_llm_omits_tools():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "single_asset", "needs_mcp": False, "mcp_tools": []},
+        "恒生科技指数最新数据",
+    )
+
+    assert plan["needs_mcp"] is True
+    assert plan["tool_selection_source"] == "client_default_by_intent"
+    assert len(plan["mcp_tools"]) == 1
+    assert plan["mcp_tools"][0]["name"] == "get_index_data"
+    assert plan["mcp_tools"][0]["arguments"]["index_name"] == "恒生科技指数"
+    assert "get_global_asset_data" not in {item["name"] for item in plan["mcp_tools"]}
+
+
+def test_global_index_daily_table_name_does_not_trigger_ai_event_defaults():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "data_lookup", "needs_mcp": False, "mcp_tools": []},
+        "恒生科技指数在 global_index_daily 这张全球指数表里，查最新数据",
+    )
+
+    assert plan["needs_mcp"] is True
+    assert plan["mcp_tools"] == [
+        {
+            "name": "get_index_data",
+            "arguments": {
+                **CLI()._recent_market_window_args(days=60),
+                "index_name": "恒生科技指数",
+            },
+        }
+    ]
+
+
+def test_specific_cross_asset_query_adds_index_asset_and_search_tools():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "data_lookup", "needs_mcp": False, "mcp_tools": []},
+        "战争冲突影响下，恒生科技指数和黄金怎么看",
+    )
+
+    assert plan["needs_mcp"] is True
+    assert any(
+        item["name"] == "get_index_data" and item["arguments"].get("index_name") == "恒生科技指数"
+        for item in plan["mcp_tools"]
+    )
+    assert any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "黄金"
+        for item in plan["mcp_tools"]
+    )
+    assert any(item["name"] == "web_search" for item in plan["mcp_tools"])
+    assert not any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "恒生科技指数"
+        for item in plan["mcp_tools"]
+    )
+
+
+def test_risk_event_query_defaults_to_cross_asset_mcp_tools():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "risk", "needs_mcp": False, "mcp_tools": []},
+        "战争冲突引发油价上涨，但AI利好还在发酵，股票市场和黄金短期怎么博弈？",
+    )
+
+    assert plan["needs_mcp"] is True
+    assert plan["tool_selection_source"] == "client_default_by_intent"
+    expected = {
+        ("get_index_data", "index_name", "恒生科技指数"),
+        ("get_index_data", "index_name", "沪深300"),
+        ("get_global_asset_data", "asset_name", "黄金"),
+        ("get_global_asset_data", "asset_name", "原油"),
+        ("get_global_asset_data", "asset_name", "美元指数"),
+    }
+    actual = {
+        (item["name"], key, item["arguments"].get(key))
+        for item in plan["mcp_tools"]
+        for key in ("index_name", "asset_name")
+        if item["arguments"].get(key)
+    }
+    assert expected <= actual
+    assert any(item["name"] == "web_search" for item in plan["mcp_tools"])
+    assert not any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "恒生科技指数"
+        for item in plan["mcp_tools"]
+    )
+
+
+def test_general_investment_hk_precious_metals_event_query_fetches_data():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "general_investment", "needs_mcp": False, "mcp_tools": []},
+        "港股和贵金属在地缘冲突下短期怎么看？",
+    )
+
+    assert plan["needs_mcp"] is True
+    assert any(
+        item["name"] == "get_index_data" and item["arguments"].get("index_name") == "恒生科技指数"
+        for item in plan["mcp_tools"]
+    )
+    assert any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "黄金"
+        for item in plan["mcp_tools"]
+    )
+    assert any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "原油"
+        for item in plan["mcp_tools"]
+    )
+    assert any(item["name"] == "web_search" for item in plan["mcp_tools"])
+
+
+def test_geopolitical_easing_query_defaults_to_cross_asset_mcp_tools():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "general_investment", "needs_mcp": False, "mcp_tools": []},
+        "俄乌缓和迹象后，港股和黄金怎么看？",
+    )
+
+    assert plan["needs_mcp"] is True
+    expected = {
+        ("get_index_data", "index_name", "恒生科技指数"),
+        ("get_index_data", "index_name", "沪深300"),
+        ("get_global_asset_data", "asset_name", "美元指数"),
+        ("get_global_asset_data", "asset_name", "黄金"),
+        ("get_global_asset_data", "asset_name", "原油"),
+    }
+    actual = {
+        (item["name"], key, item["arguments"].get(key))
+        for item in plan["mcp_tools"]
+        for key in ("index_name", "asset_name")
+        if item["arguments"].get(key)
+    }
+    assert expected <= actual
+    assert any(item["name"] == "web_search" for item in plan["mcp_tools"])
+    assert not any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "恒生科技指数"
+        for item in plan["mcp_tools"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("intent", "query", "expected_tools", "needs_search"),
+    [
+        (
+            "single_asset",
+            "HSTECH 最新数据为什么不应该停在 4月30日？",
+            [("get_index_data", "index_name", "恒生科技指数")],
+            True,
+        ),
+        (
+            "market_overview",
+            "港股今天行情怎么看？",
+            [("get_index_data", "index_name", "恒生科技指数")],
+            True,
+        ),
+        (
+            "risk",
+            "通胀重新上行时，黄金和股票市场哪个弹性更大？",
+            [
+                ("get_global_asset_data", "asset_name", "黄金"),
+                ("get_index_data", "index_name", "沪深300"),
+                ("get_index_data", "index_name", "恒生科技指数"),
+            ],
+            True,
+        ),
+        (
+            "general_investment",
+            "AI利好下美股和港股短期谁更强？",
+            [
+                ("get_index_data", "index_name", "恒生科技指数"),
+                ("get_index_data", "index_name", "标普500"),
+                ("get_index_data", "index_name", "纳斯达克指数"),
+            ],
+            True,
+        ),
+    ],
+)
+def test_natural_language_data_calling_scenarios_select_correct_mcp_tools(
+    intent,
+    query,
+    expected_tools,
+    needs_search,
+):
+    plan = CLI()._normalize_intent_plan(
+        {"intent": intent, "needs_mcp": False, "mcp_tools": []},
+        query,
+    )
+
+    actual = {
+        (item["name"], key, item["arguments"].get(key))
+        for item in plan["mcp_tools"]
+        for key in ("index_name", "asset_name")
+        if item["arguments"].get(key)
+    }
+    assert plan["needs_mcp"] is True
+    for expected in expected_tools:
+        assert expected in actual
+    assert any(item["name"] == "web_search" for item in plan["mcp_tools"]) is needs_search
+    assert not any(
+        item["name"] == "get_global_asset_data"
+        and item["arguments"].get("asset_name") in {"HSTECH", "恒生科技指数", "恒生指数"}
+        for item in plan["mcp_tools"]
+    )
+
+
+def test_super66_registry_describes_hk_indices_as_index_data():
+    tools = {item["name"]: item["description"] for item in Super66MCP().list_registry_tools()}
+
+    assert "恒生科技指数" in tools["get_index_data"]
+    assert "港股宽基指数" in tools["get_index_data"]
+    assert "港股指数走 get_index_data" in tools["get_global_asset_data"]
 
 
 def test_display_json_fragments_are_stripped_from_view():
@@ -3433,6 +3859,120 @@ async def test_collect_client_data_runs_flexible_llm_tool_shapes(monkeypatch):
     ]
     assert "get_global_asset_data:黄金" in data
     assert "web_search:黄金政策影响" in data
+
+
+@pytest.mark.asyncio
+async def test_collect_client_data_routes_hk_index_aliases_to_reusable_keys(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments))
+            return {"tool": tool_name, "arguments": arguments or {}}
+
+    async def fake_search(self, query, arguments):
+        calls.append(("web_search", arguments))
+        return {"query": query, "provider": "local_chrome"}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+    monkeypatch.setattr(CLI, "_run_local_chrome_search", fake_search)
+
+    cli = CLI()
+    data = await cli._collect_client_mcp_data(
+        "美元走强时恒生科技和黄金怎么一起看",
+        {},
+        {
+            "needs_mcp": True,
+            "mcp_tools": [
+                {
+                    "name": "get_global_asset_data",
+                    "arguments": {"assetName": "global_assets", "sourceTable": "恒生科技指数", "limit": 60},
+                },
+                {"name": "get_index_data", "arguments": {"assetName": "HSTECH", "limit": 60}},
+                {"name": "get_global_asset_data", "arguments": {"assetName": "美元指数", "limit": 60}},
+                {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", "limit": 60}},
+                {"name": "web_search", "arguments": {"query": "美元 恒生科技 黄金", "count": 3}},
+            ],
+        },
+    )
+
+    assert calls == [
+        ("get_index_data", {"limit": 60, "index_name": "恒生科技指数"}),
+        ("get_global_asset_data", {"limit": 60, "asset_name": "美元指数"}),
+        ("get_global_asset_data", {"asset_name": "黄金", "limit": 60}),
+        ("web_search", {"query": "美元 恒生科技 黄金", "count": 3}),
+    ]
+    assert "get_index_data:恒生科技指数" in data
+    assert "get_global_asset_data:美元指数" in data
+    assert "get_global_asset_data:黄金" in data
+    assert "web_search:美元恒生科技黄金" in data
+    assert "get_global_asset_data:恒生科技指数" not in data
+
+
+@pytest.mark.asyncio
+async def test_collect_client_data_routes_openai_tool_call_hstech_to_index(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments))
+            return {"tool": tool_name, "latest": {"date": "2026-06-10", "close": 4724.79}, **(arguments or {})}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    plan = CLI()._normalize_intent_plan(
+        {
+            "intent": "data_lookup",
+            "needs_mcp": True,
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_global_asset_data",
+                        "arguments": json.dumps(
+                            {
+                                "assetName": "global_indices",
+                                "sourceTable": "global_index_daily",
+                                "code": "HSTECH",
+                                "limit": 60,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+            ],
+        },
+        "HSTECH 最新数据",
+    )
+    data = await CLI()._collect_client_mcp_data("HSTECH 最新数据", {}, plan)
+
+    assert calls == [("get_index_data", {"limit": 60, "index_name": "恒生科技指数"})]
+    assert "get_index_data:恒生科技指数" in data
+    assert data["get_index_data:恒生科技指数"]["latest"]["date"] == "2026-06-10"
+    assert "get_global_asset_data:恒生科技指数" not in data
+
+
+@pytest.mark.asyncio
+async def test_collect_client_data_defaults_specific_asset_when_tools_are_omitted(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments))
+            return {"tool": tool_name, "arguments": arguments or {}}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    cli = CLI()
+    plan = {"intent": "single_asset", "needs_mcp": False, "mcp_tools": []}
+    data = await cli._collect_client_mcp_data("恒生科技指数最新数据", {}, plan)
+
+    assert calls == [("get_index_data", plan["mcp_tools"][0]["arguments"])]
+    assert plan["needs_mcp"] is True
+    assert plan["tool_selection_source"] == "client_default_by_intent"
+    assert plan["mcp_tools"][0]["arguments"]["index_name"] == "恒生科技指数"
+    assert "get_index_data:恒生科技指数" in data
+    assert "get_global_asset_data:恒生科技指数" not in data
 
 
 def test_mcp_tool_label_is_readable_for_progress_trace():
@@ -3551,7 +4091,7 @@ async def test_client_side_advice_formats_string_sections_as_items():
     assert "我已先读取 super-66 MCP 行情快照" in result
     assert "get_index_data:沪深300" in result
     assert "get_global_asset_data:黄金" in result
-    assert "市场快照：" in result
+    assert "关键数据：" in result
     assert "日期 2026-06-10" in result
     assert "涨跌幅 1.2" in result
     assert "- 先看成交量。" in result
@@ -3561,21 +4101,11 @@ async def test_client_side_advice_formats_string_sections_as_items():
     assert "- 持仓。" in result
     assert "- 周期。" in result
     assert "下一步：" in result
-    assert "Agent Trail：" in result
-    assert "快捷操作：" in result
-    assert "- /plan 复盘本轮意图、MCP 数据、服务端映射和产物计划" in result
-    assert "意图: 本机大模型按“A股怎么看”理解" in result
-    assert "编排: 本机大模型主导 · 本机大模型选择指数和全球资产工具" in result
-    assert "数据: 已接入 get_index_data:沪深300, get_global_asset_data:黄金" in result
-    assert "服务端: 市场监测与事件响应 · 置信度 0.72" in result
-    assert "模型: Xiaomi MiMo / mimo-v2.5，API Key 仅在本机直连供应商" in result
+    assert "Agent Trail：" not in result
+    assert "快捷操作：" not in result
     assert "- /plan 看本轮数据来源" in result
     assert "- 继续问：把这个做成图表" in result
-    assert "你也可以继续问：" in result
-    assert result.count("你也可以继续问：") == 1
-    assert "- 你更关心指数还是个股？" in result
-    assert "- 你的持仓周期是日内还是一个月？" in result
-    assert "/plan" in result
+    assert "你也可以继续问：" not in result
     assert "如果需要图表或报告，可以继续说" not in result
     assert "- 可" not in result
 
@@ -3617,10 +4147,10 @@ def test_client_side_advice_formats_object_sections_as_natural_items():
     assert "- 你的持仓周期" in result
     assert "- 仓位上限是多少？" in result
     assert "- /plan；原因: 查看本轮 MCP 和服务端链路" in result
-    assert "- 你更关心指数还是个股？" in result
+    assert "你更关心指数还是个股？" not in result
 
 
-def test_client_side_advice_shows_dynamic_command_bar_for_resources_and_artifacts():
+def test_client_side_advice_keeps_artifact_answer_compact():
     cli = CLI()
     result = cli._format_client_advice(
         query="把今天行情做成图表",
@@ -3646,15 +4176,15 @@ def test_client_side_advice_shows_dynamic_command_bar_for_resources_and_artifact
         data_inputs={"mcp_links": ["盘面新闻: https://example.com/news"]},
     )
 
-    assert "快捷操作：" in result
-    assert "- /plan 复盘本轮意图、MCP 数据、服务端映射和产物计划" in result
-    assert "- /links 1 打开本轮网页、图片、图表或报告资源" in result
-    assert "- /open chart 打开最近生成的图表；/artifacts 查看全部产物" in result
+    assert "图表：" in result
+    assert "行情图: 已生成" in result
+    assert "快捷操作：" not in result
+    assert "产物收件箱：" not in result
     assert "{'action'" not in result
     assert "{'risk'" not in result
 
 
-def test_client_advice_agent_trail_shows_client_fallback_orchestration():
+def test_client_advice_hides_agent_trail_from_regular_answer():
     result = CLI()._format_client_advice(
         query="今天行情怎么样",
         matches=[{"scene": "市场监测与事件响应", "confidence": 0.6}],
@@ -3674,8 +4204,8 @@ def test_client_advice_agent_trail_shows_client_fallback_orchestration():
         },
     )
 
-    assert "Agent Trail：" in result
-    assert "编排: 客户端兜底补齐 · 宽泛行情问题没有工具计划，客户端补齐默认 MCP/web_search" in result
+    assert "Agent Trail：" not in result
+    assert "编排: 客户端兜底补齐" not in result
 
 
 def test_mcp_snapshot_lines_extracts_readable_market_fields():
@@ -3692,9 +4222,45 @@ def test_mcp_snapshot_lines_extracts_readable_market_fields():
     })
 
     assert lines == [
-        "get_index_data:沪深300: 日期 2026-06-10，最新 4100，涨跌幅 1.2，成交量 123456"
+        "get_index_data:沪深300: 日期 2026-06-10，最新 4100，成交量 123456，区间收益 1.23%"
     ]
     assert "should-not-render" not in "\n".join(lines)
+
+
+def test_mcp_snapshot_lines_use_latest_date_for_descending_rows():
+    lines = CLI()._mcp_snapshot_lines({
+        "get_index_data:恒生科技指数": {
+            "data": [
+                {"date": "2026-06-10", "close": 4724.79, "pct_chg": 1.2},
+                {"date": "2026-04-30", "close": 4300.12, "pct_chg": -0.8},
+            ]
+        }
+    })
+
+    joined = "\n".join(lines)
+    assert "日期 2026-06-10" in joined
+    assert "最新 4725" in joined
+    assert "2026-04-30" not in joined
+
+
+def test_chart_return_prefers_strict_start_end_close_division():
+    cli = CLI()
+    data = cli._coerce_chart_artifact_data({
+        "指数A": {
+            "history": [
+                {"date": "2026-01-01", "close": 100, "change_pct": 99},
+                {"date": "2026-01-10", "close": 110, "change_pct": -50},
+            ]
+        },
+        "指数B": {
+            "start_close": 200,
+            "end_close": 190,
+            "change_pct": 99,
+        },
+    })
+
+    assert data["指数A"] == pytest.approx(10.0)
+    assert data["指数B"] == pytest.approx(-5.0)
 
 
 def test_super66_normalizes_supabase_rows_for_market_snapshot():
@@ -3727,13 +4293,160 @@ def test_super66_normalizes_supabase_rows_for_market_snapshot():
     assert latest["close"] == 4100.5
     assert latest["change_pct"] == 1.2
     assert lines == [
-        "get_index_data:沪深300: 名称 沪深300，日期 2026-06-10，最新 4100，涨跌幅 1.2，成交额 123456"
+        "get_index_data:沪深300: 名称 沪深300，日期 2026-06-10，最新 4100，成交额 123456，涨跌幅 1.2"
     ]
+
+
+def test_super66_uses_latest_date_when_rows_are_descending():
+    payload = {
+        "code": 200,
+        "data": {
+            "result": {
+                "rows": [
+                    {"指数名称": "恒生科技指数", "date": "2026-06-10", "close": 4724.79},
+                    {"指数名称": "恒生科技指数", "date": "2026-04-30", "close": 4300.12},
+                ],
+                "count": 2,
+            }
+        },
+    }
+
+    result = Super66MCP()._extract_result(payload, "dc66_get_index_data", {"indexName": "恒生科技指数"})
+
+    assert result["rows"][0]["date"] == "2026-04-30"
+    assert result["rows"][-1]["date"] == "2026-06-10"
+    assert result["latest"]["date"] == "2026-06-10"
+    assert result["latest"]["close"] == 4724.79
+
+
+def test_super66_uses_latest_tradedate_alias_in_nested_payload():
+    payload = {
+        "code": 200,
+        "data": {
+            "result": {
+                "payload": {
+                    "data": [
+                        {"指数名称": "恒生科技指数", "tradedate": "2026/06/10", "close_price": "4724.79"},
+                        {"指数名称": "恒生科技指数", "tradedate": "2026/04/30", "close_price": "4300.12"},
+                    ]
+                },
+                "count": 2,
+            }
+        },
+    }
+
+    result = Super66MCP()._extract_result(payload, "dc66_get_index_data", {"indexName": "恒生科技指数"})
+
+    assert result["rows"][0]["date"] == "2026/04/30"
+    assert result["rows"][-1]["date"] == "2026/06/10"
+    assert result["latest"]["date"] == "2026/06/10"
+    assert result["latest"]["close"] == 4724.79
+
+
+def test_super66_extracts_rows_from_mcp_text_content_json():
+    payload = {
+        "code": 200,
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "records": [
+                            {"指数名称": "恒生科技指数", "trade_date": "2026-06-10", "close": 4724.79},
+                            {"指数名称": "恒生科技指数", "trade_date": "2026-04-30", "close": 4300.12},
+                        ],
+                        "count": 2,
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ],
+    }
+
+    result = Super66MCP()._extract_result(payload, "dc66_get_index_data", {"indexName": "恒生科技指数"})
+
+    assert result["source_format"] == "supabase_rows"
+    assert result["rows"][0]["date"] == "2026-04-30"
+    assert result["rows"][-1]["date"] == "2026-06-10"
+    assert result["latest"]["date"] == "2026-06-10"
+    assert result["latest"]["close"] == 4724.79
+
+
+def test_super66_does_not_treat_plain_mcp_text_content_as_market_rows():
+    payload = {
+        "code": 200,
+        "content": [
+            {
+                "type": "text",
+                "text": "没有找到符合条件的行情数据，请调整指数名称。",
+            }
+        ],
+    }
+
+    result = Super66MCP()._extract_result(payload, "dc66_get_index_data", {"indexName": "恒生科技指数"})
+
+    assert result == payload
+    assert "latest" not in result
+    assert "source_format" not in result
 
 
 def test_super66_maps_mcp_arguments_to_production_schema():
     mcp = Super66MCP()
 
+    assert mcp._normalize_tool_call(
+        "get_global_asset_data",
+        {
+            "assetName": "global_assets",
+            "sourceTable": "恒生科技指数",
+            "start_date": "2026-05-01",
+            "end_date": "2026-06-10",
+            "limit": 3,
+        },
+    ) == (
+        "dc66_get_index_data",
+        {"indexName": "恒生科技指数", "startDate": "2026-05-01", "endDate": "2026-06-10", "limit": 3},
+    )
+    assert mcp._normalize_tool_call(
+        "get_index_data",
+        {"assetName": "HSTECH", "start_date": "2026-05-01", "limit": 3},
+    ) == (
+        "dc66_get_index_data",
+        {"startDate": "2026-05-01", "limit": 3, "indexName": "恒生科技指数"},
+    )
+    assert mcp._normalize_tool_call(
+        "get_global_asset_data",
+        {
+            "assetName": "global_indices",
+            "sourceTable": "global_index_daily",
+            "code": "HSTECH",
+            "start_date": "2026-05-01",
+            "limit": 3,
+        },
+    ) == (
+        "dc66_get_index_data",
+        {"startDate": "2026-05-01", "limit": 3, "indexName": "恒生科技指数"},
+    )
+    assert mcp._normalize_tool_call(
+        "get_index_data",
+        {"sourceTable": "global_index_daily", "indexCode": "HSTECH", "start_date": "2026-05-01", "limit": 3},
+    ) == (
+        "dc66_get_index_data",
+        {"startDate": "2026-05-01", "limit": 3, "indexName": "恒生科技指数"},
+    )
+    assert mcp._normalize_tool_call(
+        "get_global_asset_data",
+        {"sourceTable": "global_index_daily", "symbol": "Hang Seng Tech Index", "limit": 3},
+    ) == (
+        "dc66_get_index_data",
+        {"limit": 3, "indexName": "恒生科技指数"},
+    )
+    assert mcp._normalize_tool_call(
+        "get_global_asset_data",
+        {"sourceTable": "global_index_daily", "ticker": "HSCEI", "limit": 3},
+    ) == (
+        "dc66_get_index_data",
+        {"limit": 3, "indexName": "恒生中国企业指数"},
+    )
     assert mcp._normalize_tool_arguments(
         "get_index_data",
         {"index_name": "恒生科技指数", "start_date": "2026-05-01", "end_date": "2026-06-10", "limit": 3},
@@ -3742,6 +4455,65 @@ def test_super66_maps_mcp_arguments_to_production_schema():
         "get_global_asset_data",
         {"asset_name": "黄金", "source_table": "黄金", "start_date": "2026-05-01", "limit": 3},
     ) == {"assetName": "黄金", "sourceTable": "黄金", "startDate": "2026-05-01", "limit": 3}
+
+
+@pytest.mark.asyncio
+async def test_super66_call_tool_redirects_hk_index_to_index_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        content = b"{}"
+
+        def json(self):
+            return {
+                "code": 200,
+                "data": {
+                    "result": {
+                        "rows": [
+                            {"date": "2026-06-10", "close": 4724.79, "volume": 83224013000}
+                        ]
+                    }
+                },
+            }
+
+    class FakeClient:
+        is_closed = False
+
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setenv("SUPER66_MCP_TOKEN", "token")
+    mcp = Super66MCP()
+    mcp._client = FakeClient()
+    mcp._cache.clear()
+
+    result = await mcp.call_tool(
+        "get_global_asset_data",
+        {
+            "assetName": "global_assets",
+            "sourceTable": "恒生科技指数",
+            "code": "HSTECH",
+            "start_date": "2026-05-01",
+            "end_date": "2026-06-10",
+        },
+        use_cache=False,
+    )
+
+    assert captured["json"] == {
+        "name": "dc66_get_index_data",
+        "arguments": {
+            "startDate": "2026-05-01",
+            "endDate": "2026-06-10",
+            "indexName": "恒生科技指数",
+        },
+    }
+    assert result["tool"] == "dc66_get_index_data"
+    assert result["arguments"]["indexName"] == "恒生科技指数"
+    assert result["latest"]["date"] == "2026-06-10"
 
 
 def test_super66_normalizes_columnar_market_series():
@@ -3762,7 +4534,7 @@ def test_super66_normalizes_columnar_market_series():
     assert result["latest"]["index_name"] == "沪深300"
     assert result["latest"]["date"] == "2026-06-10"
     assert result["latest"]["close"] == 4100
-    assert lines == ["get_index_data:沪深300: 名称 沪深300，日期 2026-06-10，最新 4100，成交量 20"]
+    assert lines == ["get_index_data:沪深300: 名称 沪深300，日期 2026-06-10，最新 4100，成交量 20，区间收益 1.23%"]
 
 
 def test_chrome_search_defaults_to_bing_and_filters_block_pages(monkeypatch):
@@ -3896,21 +4668,17 @@ def test_vague_market_answer_removes_empty_data_claim_when_snapshot_exists():
         },
     )
 
-    assert "市场快照：" in result
+    assert "关键数据：" in result
     assert "可打开资源：" in result
     assert "科技成长新闻: https://example.com/news" in result
-    assert "Agent Trail：" in result
-    assert "资源: 1 个网页/图片/报告链接已进入 /links，可用 /links 1 打开" in result
+    assert "Agent Trail：" not in result
     assert "科技成长板块成交活跃" in result
     assert "没有具体的实时市场数据" not in result
     assert "无法准确描述今天整体行情" not in result
     assert "方向性盘面判断" in result
     assert "如果要落到你的账户，我还需要知道：" in result
     assert "我还需要你补充：" not in result
-    assert "你也可以继续问：" in result
-    assert "把这些市场快照进一步拆成“主线、风险、可跟踪指标”" in result
-    assert "把这个分析做成图表，对比关键资产或指标" in result
-    assert "如果我补充你的持仓和周期，结论会怎么变化？" in result
+    assert "你也可以继续问：" not in result
 
 
 def test_client_advice_shows_named_resource_links_without_workspace_save():
@@ -4004,7 +4772,7 @@ def test_vague_market_answer_filters_generic_missing_data_when_snapshot_exists()
         },
     )
 
-    assert "市场快照：" in result
+    assert "关键数据：" in result
     assert "如果要落到你的账户，我还需要知道：" in result
     assert "你的持仓和风险偏好" in result
     assert "具体市场指数的实时点位" not in result
