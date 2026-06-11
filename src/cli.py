@@ -7705,7 +7705,7 @@ class CLI:
             sys.stdout.write(f"\033[{tail}D")
         sys.stdout.flush()
 
-    def _read_escape_sequence(self, timeout: float = 0.05) -> str:
+    def _read_escape_sequence(self, timeout: float = 0.2) -> str:
         import select
 
         if not select.select([sys.stdin], [], [], timeout)[0]:

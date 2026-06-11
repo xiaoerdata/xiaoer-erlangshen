@@ -3,6 +3,7 @@ import json
 import pytest
 from pathlib import Path
 
+from src import __version__
 from src.cli import CLI, _display_width, _extract_startup_workspace_args, _logo, _panel, _text_panel, main
 from src.commands.server import ServerCommand
 from src.client.server_client import _normalize_login_payload
@@ -459,7 +460,7 @@ def test_header_shows_agent_workspace_and_tool_channels(monkeypatch, tmp_path, c
     assert "███████╗██████╗" in output
     assert "二郎神 ERLANGSHEN" in output
     assert "Erlangshen agent workspace" in output
-    assert "v0.1.39" in output
+    assert f"v{__version__}" in output
     assert "core      ready" in output
     assert "account   login · 未登录" in output
     assert "model     need key" in output
@@ -1302,7 +1303,7 @@ def test_main_prints_version(monkeypatch, capsys):
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.39"
+    assert capsys.readouterr().out.strip() == __version__
 
 
 def test_startup_workspace_arg_sets_project_directory(monkeypatch, tmp_path, capsys):
@@ -1316,7 +1317,7 @@ def test_startup_workspace_arg_sets_project_directory(monkeypatch, tmp_path, cap
 
     main()
 
-    assert capsys.readouterr().out.strip() == "0.1.39"
+    assert capsys.readouterr().out.strip() == __version__
     assert Path.cwd() == project.resolve()
     assert workspace_status()["path"] == str(project.resolve())
 
@@ -2409,6 +2410,29 @@ def test_workspace_browser_render_shows_current_resource_count(monkeypatch, tmp_
     output = capsys.readouterr().out
 
     assert "当前项目资源索引: 已发现 2 条网页/图片/图表/报告链接" in output
+
+
+def test_escape_sequence_waits_long_enough_for_arrow_keys(monkeypatch):
+    class FakeStdin:
+        def __init__(self, text):
+            self.chars = list(text)
+
+        def read(self, size=1):
+            return self.chars.pop(0) if self.chars else ""
+
+    fake_stdin = FakeStdin("[B")
+    timeouts = []
+
+    def fake_select(reads, writes, errors, timeout):
+        timeouts.append(timeout)
+        return (reads, writes, errors) if fake_stdin.chars else ([], [], [])
+
+    monkeypatch.setattr("sys.stdin", fake_stdin)
+    monkeypatch.setattr("select.select", fake_select)
+
+    assert CLI()._read_escape_sequence() == "down"
+    assert timeouts
+    assert all(timeout >= 0.2 for timeout in timeouts)
 
 
 def test_startup_workspace_prompt_can_select_and_authorize_path(monkeypatch, tmp_path, capsys):
