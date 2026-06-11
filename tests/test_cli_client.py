@@ -2437,23 +2437,27 @@ def test_escape_sequence_waits_long_enough_for_arrow_keys(monkeypatch):
 
 def test_workspace_browser_ignores_bare_escape_instead_of_canceling(monkeypatch, tmp_path):
     class FakeStdin:
-        def __init__(self, text):
-            self.chars = list(text)
-
         def isatty(self):
             return True
 
         def fileno(self):
             return 0
 
-        def read(self, size=1):
-            return self.chars.pop(0) if self.chars else ""
-
     project = tmp_path / "project"
     project.mkdir()
-    fake_stdin = FakeStdin("\x1b\r")
+    fake_bytes = bytearray(b"\x1b\r")
+
+    def fake_read(fd, size):
+        if not fake_bytes:
+            return b""
+        value = bytes(fake_bytes[:size])
+        del fake_bytes[:size]
+        return value
+
+    fake_stdin = FakeStdin()
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr("os.read", fake_read)
     monkeypatch.setattr("termios.tcgetattr", lambda fd: [])
     monkeypatch.setattr("termios.tcsetattr", lambda *args, **kwargs: None)
     monkeypatch.setattr("tty.setcbreak", lambda fd: None)
@@ -2466,33 +2470,53 @@ def test_workspace_browser_ignores_bare_escape_instead_of_canceling(monkeypatch,
     assert selected == str(project.resolve())
 
 
+def test_workspace_key_reads_full_arrow_sequence_once(monkeypatch):
+    fake_bytes = bytearray(b"\x1b[B")
+
+    def fake_read(fd, size):
+        if not fake_bytes:
+            return b""
+        value = bytes(fake_bytes[:size])
+        del fake_bytes[:size]
+        return value
+
+    monkeypatch.setattr("os.read", fake_read)
+    monkeypatch.setattr("select.select", lambda reads, writes, errors, timeout: (reads, writes, errors) if fake_bytes else ([], [], []))
+
+    assert CLI()._read_workspace_key(0) == "down"
+    assert not fake_bytes
+
+
 def test_workspace_browser_handles_delayed_arrow_tail(monkeypatch, tmp_path):
     class FakeStdin:
-        def __init__(self, text):
-            self.chars = list(text)
-
         def isatty(self):
             return True
 
         def fileno(self):
             return 0
 
-        def read(self, size=1):
-            return self.chars.pop(0) if self.chars else ""
-
     project = tmp_path / "project"
     child = tmp_path / "child"
     project.mkdir()
     child.mkdir()
-    fake_stdin = FakeStdin("\x1b[B\r")
+    fake_stdin = FakeStdin()
+    fake_bytes = bytearray(b"\x1b[B\r")
+
+    def fake_read(fd, size):
+        if not fake_bytes:
+            return b""
+        value = bytes(fake_bytes[:size])
+        del fake_bytes[:size]
+        return value
 
     def fake_select(reads, writes, errors, timeout):
-        if fake_stdin.chars and fake_stdin.chars[0] == "[":
+        if fake_bytes and fake_bytes[0:1] == b"[":
             return ([], [], [])
-        return (reads, writes, errors) if fake_stdin.chars else ([], [], [])
+        return (reads, writes, errors) if fake_bytes else ([], [], [])
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr("os.read", fake_read)
     monkeypatch.setattr("termios.tcgetattr", lambda fd: [])
     monkeypatch.setattr("termios.tcsetattr", lambda *args, **kwargs: None)
     monkeypatch.setattr("tty.setcbreak", lambda fd: None)

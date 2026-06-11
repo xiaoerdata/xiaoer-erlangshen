@@ -1166,14 +1166,14 @@ class CLI:
                 items = self._workspace_directory_items(current)
                 selected = max(0, min(selected, len(items) - 1))
                 rendered_height = self._render_workspace_browser(current, items, selected)
-                ch = sys.stdin.read(1)
-                if ch == "\x03":
+                key = self._read_workspace_key(fd)
+                if key == "ctrl_c":
                     raise KeyboardInterrupt
-                if ch == "\x04":
+                if key == "eof":
                     raise EOFError
-                if ch in {"q", "Q"}:
+                if key in {"q", "Q"}:
                     return "n"
-                if ch in {"\r", "\n"}:
+                if key == "enter":
                     action, path, _ = items[selected]
                     if action == "use":
                         return str(current)
@@ -1186,30 +1186,18 @@ class CLI:
                     current = path
                     selected = 0
                     continue
-                if ch in {"p", "P"}:
+                if key in {"p", "P"}:
                     self._clear_terminal_block(rendered_height)
                     rendered_height = 0
                     return self._prompt_workspace_path(current)
-                if ch == "\x1b":
-                    action = self._read_escape_sequence()
-                    if action == "escape":
-                        continue
-                    if action == "up":
-                        selected = (selected - 1) % len(items)
-                    elif action == "down":
-                        selected = (selected + 1) % len(items)
-                    continue
-                if ch == "[":
-                    action = self._read_bracket_escape_tail()
-                    if action == "up":
-                        selected = (selected - 1) % len(items)
-                    elif action == "down":
-                        selected = (selected + 1) % len(items)
-                    continue
-                if ch in {"k", "K"}:
+                if key in {"up", "k", "K"}:
                     selected = (selected - 1) % len(items)
-                elif ch in {"j", "J"}:
+                elif key in {"down", "j", "J"}:
                     selected = (selected + 1) % len(items)
+                elif key == "home":
+                    selected = 0
+                elif key == "end":
+                    selected = len(items) - 1
         finally:
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -7773,6 +7761,82 @@ class CLI:
             "H": "home",
             "F": "end",
         }.get(sys.stdin.read(1), "literal")
+
+    def _read_workspace_key(self, fd: int, timeout: float = 0.03) -> str:
+        import select
+
+        try:
+            first = os.read(fd, 1)
+        except OSError:
+            return "eof"
+        if not first:
+            return "eof"
+        if first == b"\x03":
+            return "ctrl_c"
+        if first == b"\x04":
+            return "eof"
+        if first in {b"\r", b"\n"}:
+            return "enter"
+        if first == b"\x1b":
+            sequence = first + self._read_available_key_bytes(fd, timeout=timeout)
+            action = self._decode_terminal_key_sequence(sequence)
+            return "escape" if action == "literal" else action
+        if first == b"[":
+            sequence = first + self._read_available_key_bytes(fd, timeout=timeout, max_bytes=6)
+            return self._decode_terminal_key_sequence(sequence)
+        try:
+            return first.decode("utf-8", errors="ignore") or "literal"
+        except UnicodeDecodeError:
+            return "literal"
+
+    def _read_available_key_bytes(self, fd: int, *, timeout: float = 0.03, max_bytes: int = 8) -> bytes:
+        import select
+
+        chunks = bytearray()
+        while len(chunks) < max_bytes and select.select([fd], [], [], timeout)[0]:
+            try:
+                part = os.read(fd, 1)
+            except OSError:
+                break
+            if not part:
+                break
+            chunks.extend(part)
+            if part in {b"A", b"B", b"C", b"D", b"H", b"F", b"~"}:
+                break
+        return bytes(chunks)
+
+    def _decode_terminal_key_sequence(self, sequence: bytes) -> str:
+        aliases = {
+            b"\x1b[A": "up",
+            b"\x1b[B": "down",
+            b"\x1b[C": "right",
+            b"\x1b[D": "left",
+            b"\x1b[H": "home",
+            b"\x1b[F": "end",
+            b"\x1bOA": "up",
+            b"\x1bOB": "down",
+            b"\x1bOC": "right",
+            b"\x1bOD": "left",
+            b"\x1bOH": "home",
+            b"\x1bOF": "end",
+            b"[A": "up",
+            b"[B": "down",
+            b"[C": "right",
+            b"[D": "left",
+            b"[H": "home",
+            b"[F": "end",
+            b"\x1b[1~": "home",
+            b"\x1b[3~": "delete",
+            b"\x1b[4~": "end",
+            b"\x1b[7~": "home",
+            b"\x1b[8~": "end",
+            b"[1~": "home",
+            b"[3~": "delete",
+            b"[4~": "end",
+            b"[7~": "home",
+            b"[8~": "end",
+        }
+        return aliases.get(sequence, "literal")
 
     def _slash_command_picker(self) -> tuple[str, str, str] | None:
         """Interactive slash-command picker used inside cbreak mode."""
