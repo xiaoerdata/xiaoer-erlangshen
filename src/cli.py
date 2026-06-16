@@ -4951,11 +4951,14 @@ class CLI:
         *,
         temperature: float,
         max_tokens: int,
+        json_preview_field: str = "",
+        preview_title: str = "二郎神",
     ) -> str:
         if not self._should_stream_llm() or not (hasattr(client, "stream_complete_events") or hasattr(client, "stream_complete")):
             return await client.complete(messages, temperature=temperature, max_tokens=max_tokens)
         chunks: list[str] = []
         reasoning_state = self._new_reasoning_stream_state()
+        answer_state = self._new_answer_stream_state(preview_title)
         received = 0
         next_refresh = 120
         if hasattr(client, "stream_complete_events"):
@@ -4970,20 +4973,24 @@ class CLI:
                 if event_type == "content":
                     self._finish_reasoning_stream(reasoning_state)
                     chunks.append(text)
+                    self._write_json_answer_preview(answer_state, "".join(chunks), json_preview_field)
                     received += len(text)
                     if received >= next_refresh:
                         self._refresh_token_status_bar(activity=f"模型输出 {received} 字")
                         next_refresh = received + 120
             self._finish_reasoning_stream(reasoning_state)
+            self._finish_answer_stream(answer_state)
             return "".join(chunks)
         async for chunk in client.stream_complete(messages, temperature=temperature, max_tokens=max_tokens):
             if not chunk:
                 continue
             chunks.append(chunk)
+            self._write_json_answer_preview(answer_state, "".join(chunks), json_preview_field)
             received += len(chunk)
             if received >= next_refresh:
                 self._refresh_token_status_bar(activity=f"模型输出 {received} 字")
                 next_refresh = received + 120
+        self._finish_answer_stream(answer_state)
         return "".join(chunks)
 
     def _new_reasoning_stream_state(self) -> dict[str, object]:
@@ -5054,6 +5061,127 @@ class CLI:
         summary = f"▸ 思考过程已折叠 · {chars} 字 · {self._format_seconds(elapsed)}"
         width = self._reasoning_box_width()
         return _color(_pad_display(summary, width), "35")
+
+    def _new_answer_stream_state(self, title: str) -> dict[str, object]:
+        return {
+            "title": self._text_field(title) or "二郎神",
+            "visible": False,
+            "closed": False,
+            "line_count": 0,
+            "preview": "",
+            "started": time.perf_counter(),
+        }
+
+    def _should_show_answer_stream(self) -> bool:
+        setting = os.getenv("ERLANGSHEN_ANSWER_STREAM", "on").lower()
+        if setting in {"0", "off", "false", "no"}:
+            return False
+        return sys.stdout.isatty() or setting in {"1", "on", "true", "yes", "force"}
+
+    def _write_json_answer_preview(self, state: dict[str, object], raw_text: str, field: str) -> None:
+        if not field or not self._should_show_answer_stream() or state.get("closed"):
+            return
+        preview = self._extract_partial_json_string_field(raw_text, field).strip()
+        if not preview or preview == state.get("preview"):
+            return
+        state["preview"] = preview
+        self._render_answer_stream(state, preview)
+
+    def _render_answer_stream(self, state: dict[str, object], preview: str) -> None:
+        body = self._compact_answer_stream_preview(preview)
+        elapsed = self._format_seconds(time.perf_counter() - float(state.get("started") or time.perf_counter()))
+        footer = self._token_dialog_footer(activity=f"生成中 {elapsed}")
+        title = f"{state.get('title') or '二郎神'} · 生成中"
+        block = "\n".join([self._message_block(title, body or "正在组织回答...", "32;1"), footer])
+        lines = block.splitlines()
+        try:
+            if state.get("visible"):
+                count = int(state.get("line_count") or 0)
+                if count > 0:
+                    sys.stdout.write(f"\033[{count}A\033[J")
+            sys.stdout.write(block + "\n")
+            sys.stdout.flush()
+            state["visible"] = True
+            state["line_count"] = len(lines)
+        except OSError:
+            state["closed"] = True
+
+    def _finish_answer_stream(self, state: dict[str, object]) -> None:
+        if not state.get("visible") or state.get("closed"):
+            return
+        state["closed"] = True
+        try:
+            count = int(state.get("line_count") or 0)
+            if count > 0:
+                sys.stdout.write(f"\033[{count}A\033[J")
+                sys.stdout.flush()
+        except OSError:
+            pass
+
+    def _compact_answer_stream_preview(self, text: str) -> str:
+        text = " ".join(str(text or "").split())
+        if not text:
+            return ""
+        width = max(20, self._dialog_box_width() - 4)
+        max_width = width * 8
+        if _display_width(text) <= max_width:
+            return text
+        suffix = _clip_display(text[::-1], max_width - 2)[::-1] if max_width > 2 else ""
+        return "…" + suffix.lstrip()
+
+    def _extract_partial_json_string_field(self, raw_text: str, field: str) -> str:
+        text = raw_text or ""
+        token = json.dumps(str(field), ensure_ascii=False)
+        index = text.find(token)
+        if index < 0:
+            return ""
+        index += len(token)
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text) or text[index] != ":":
+            return ""
+        index += 1
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text) or text[index] != '"':
+            return ""
+        index += 1
+        chars: list[str] = []
+        escape = False
+        while index < len(text):
+            char = text[index]
+            if escape:
+                if char == "u":
+                    digits = text[index + 1:index + 5]
+                    if len(digits) < 4:
+                        break
+                    try:
+                        chars.append(chr(int(digits, 16)))
+                        index += 5
+                        escape = False
+                        continue
+                    except ValueError:
+                        chars.append("u")
+                else:
+                    chars.append({
+                        '"': '"',
+                        "\\": "\\",
+                        "/": "/",
+                        "b": "\b",
+                        "f": "\f",
+                        "n": "\n",
+                        "r": "\r",
+                        "t": "\t",
+                    }.get(char, char))
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                break
+            else:
+                chars.append(char)
+            index += 1
+        return "".join(chars)
 
     async def client_side_advice(self, raw_query: str) -> str:
         parsed = self._parse_client_advice_input(raw_query)
@@ -5195,6 +5323,8 @@ class CLI:
                 ),
                 temperature=0.35,
                 max_tokens=min(int(config.llm_max_tokens or 4096), 1600),
+                json_preview_field="view",
+                preview_title="二郎神",
             )
             self._refresh_token_status_bar(activity="analysis ready")
         except Exception as exc:
@@ -5687,6 +5817,7 @@ class CLI:
             "不能声称看到了完整服务端认知库或内部案例全文。"
             "你的语气要像一位克制、可靠、会和用户自然沟通的投资分析师，不要机械套模板。"
             "输出 JSON 对象，字段为 view, suggestions, risk_controls, missing_data，可选 followups, next_actions, artifacts；"
+            "必须把 view 作为 JSON 对象的第一个字段，view 的值必须是可直接展示给用户的自然语言正文；"
             "suggestions、risk_controls、missing_data、followups、next_actions 优先返回字符串数组；"
             "如需保留原因、条件、阈值或命令，也可以返回对象数组，例如 {\"action\":\"...\",\"reason\":\"...\",\"condition\":\"...\"}。"
             "artifacts 如需图表，使用数组: [{\"type\":\"chart\",\"chart_type\":\"bar\",\"title\":\"标题\",\"data\":{\"A股\":1.2}}]。"

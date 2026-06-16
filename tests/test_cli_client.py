@@ -205,6 +205,44 @@ async def test_complete_llm_response_folds_reasoning_in_place_for_tty(monkeypatc
     assert "思考过程已折叠" in output
 
 
+@pytest.mark.asyncio
+async def test_complete_llm_response_streams_json_view_preview(monkeypatch, capsys):
+    monkeypatch.setenv("ERLANGSHEN_LLM_STREAM", "on")
+    monkeypatch.setenv("ERLANGSHEN_ANSWER_STREAM", "on")
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class FakeClient:
+        async def stream_complete_events(self, messages, *, temperature, max_tokens):
+            yield {"type": "content", "text": '{"view":"先看主线，'}
+            yield {"type": "content", "text": '不要追高。","suggestions":[]}'}
+
+        async def complete(self, messages, *, temperature, max_tokens):
+            raise AssertionError("non-streaming fallback should not run")
+
+    result = await CLI()._complete_llm_response(
+        FakeClient(),
+        [{"role": "user", "content": "hello"}],
+        temperature=0.1,
+        max_tokens=32,
+        json_preview_field="view",
+    )
+
+    output = capsys.readouterr().out
+    assert result == '{"view":"先看主线，不要追高。","suggestions":[]}'
+    assert "二郎神 · 生成中" in output
+    assert "先看主线" in output
+    assert '{"view"' not in output
+    assert "\033[J" in output
+
+
+def test_partial_json_string_field_extracts_incomplete_view():
+    cli = CLI()
+    assert cli._extract_partial_json_string_field('{"view":"先看\\n第二段', "view") == "先看\n第二段"
+    assert cli._extract_partial_json_string_field('{"other":"x","view":"贵州茅台', "view") == "贵州茅台"
+    assert cli._extract_partial_json_string_field('{"view":123}', "view") == ""
+
+
 def test_message_block_width_tracks_terminal(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     cli = CLI()
