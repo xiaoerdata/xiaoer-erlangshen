@@ -5577,6 +5577,7 @@ class CLI:
             return formatted
 
         synthesis = self._parse_client_llm_advice(raw_text)
+        synthesis = self._recover_client_synthesis_from_reasoning(synthesis)
         synthesis = self._enforce_market_fact_grounding(query, synthesis, mcp_data, intent_plan)
         synthesis = self._repair_client_synthesis_with_grounded_mcp(query, synthesis, mcp_data, intent_plan)
         synthesis = {
@@ -6626,7 +6627,22 @@ class CLI:
             tool_selection_source = "client_default_by_intent"
             if not tool_selection_note:
                 tool_selection_note = "本机大模型未给出具体工具，客户端按 intent/data_recipes 补齐默认 MCP 工具，避免无事实数据分析。"
-        astock_tools = self._specific_astock_tools_from_query(query)
+        index_guardrail_tools = self._index_market_guardrail_tools(query)
+        if index_guardrail_tools:
+            before = list(tools)
+            tools = self._drop_misdirected_astock_lookup_tools(tools)
+            if tools != before or not self._has_index_market_tool(tools):
+                tools = self._dedupe_mcp_tools(index_guardrail_tools + tools)
+                source = tool_selection_source or route_source or "local_llm"
+                tool_selection_source = (
+                    source
+                    if "client_index_guardrail" in source
+                    else f"{source}+client_index_guardrail"
+                )
+                note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
+                tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
+            needs_mcp = True
+        astock_tools = [] if index_guardrail_tools else self._specific_astock_tools_from_query(query)
         if astock_tools:
             before = list(tools)
             tools = self._dedupe_mcp_tools(astock_tools + tools)
@@ -7278,7 +7294,23 @@ class CLI:
             return provided
         tools = intent_plan.get("mcp_tools") if isinstance(intent_plan, dict) else []
         tools = self._dedupe_mcp_tools(tools) if isinstance(tools, list) else []
-        astock_tools = self._specific_astock_tools_from_query(query)
+        index_guardrail_tools = self._index_market_guardrail_tools(query)
+        if index_guardrail_tools:
+            before = list(tools)
+            tools = self._drop_misdirected_astock_lookup_tools(tools)
+            if tools != before or not self._has_index_market_tool(tools):
+                tools = self._dedupe_mcp_tools(index_guardrail_tools + tools)
+            if isinstance(intent_plan, dict):
+                intent_plan["needs_mcp"] = True
+                intent_plan["mcp_tools"] = tools
+                source = self._text_field(intent_plan.get("tool_selection_source") or intent_plan.get("route_source") or "local_llm")
+                intent_plan["tool_selection_source"] = (
+                    source if "client_index_guardrail" in source else f"{source}+client_index_guardrail"
+                )
+                note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
+                previous = self._text_field(intent_plan.get("tool_selection_note"))
+                intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
+        astock_tools = [] if index_guardrail_tools else self._specific_astock_tools_from_query(query)
         astock_guardrail = "client_astock_guardrail"
         if not astock_tools:
             astock_tools = self._specific_astock_tools_from_followup_context(query, intent_plan)
@@ -7596,9 +7628,69 @@ class CLI:
         text = re.sub(r"\s+", "", (query or "").lower())
         if not text:
             return False
-        market_words = ("行情", "市场", "盘面", "大盘", "今天", "今日", "昨天", "昨日", "现在", "近期", "最近", "走势")
-        vague_forms = ("怎么样", "如何", "咋样", "怎么看", "什么情况", "情况", "分析", "复盘", "回顾", "过一遍", "看一下", "看看")
+        market_words = ("行情", "市场", "盘面", "大盘", "指数", "今天", "今日", "昨天", "昨日", "现在", "近期", "最近", "走势")
+        vague_forms = ("怎么样", "如何", "咋样", "怎么看", "什么情况", "情况", "分析", "复盘", "回顾", "过一遍", "看一下", "看看", "查询", "查一下", "查查", "表现", "涨跌")
         return any(word in text for word in market_words) and any(form in text for form in vague_forms)
+
+    def _index_market_guardrail_tools(self, query: str) -> list[dict]:
+        if not self._is_index_market_query(query):
+            return []
+        specific = self._specific_market_tools_from_query(query)
+        return specific or self._default_market_overview_tools(query)
+
+    def _is_index_market_query(self, query: str) -> bool:
+        text = self._text_field(query)
+        compact = re.sub(r"\s+", "", text.lower())
+        if not compact:
+            return False
+        if self._contains_specific_astock_reference(text, compact):
+            return False
+        index_words = (
+            "指数", "大盘", "宽基", "上证", "深证", "深成指", "创业板", "科创50",
+            "沪深300", "中证", "恒生", "hstech", "hsi", "csi300", "sp500", "nasdaq",
+        )
+        action_words = (
+            "昨天", "昨日", "今天", "今日", "近期", "最近", "最新", "表现", "涨跌",
+            "涨幅", "跌幅", "行情", "走势", "收盘", "查询", "查一下", "查查", "看一下",
+            "看看", "复盘", "回顾", "怎么样", "如何", "怎么看",
+        )
+        return any(word in compact for word in index_words) and any(word in compact for word in action_words)
+
+    def _contains_specific_astock_reference(self, text: str, compact: str = "") -> bool:
+        compact = compact or re.sub(r"\s+", "", self._text_field(text).lower())
+        if re.search(r"(?<!\d)(?:sh|sz)?[036]\d{5}(?!\d)", compact, flags=re.I):
+            return True
+        return any(alias in text or alias.lower() in compact for alias in ("贵州茅台", "茅台"))
+
+    def _has_index_market_tool(self, tools: list[dict]) -> bool:
+        return any(
+            isinstance(item, dict)
+            and item.get("name") in {
+                "get_index_data",
+                "batch_get_index_data",
+                "get_global_asset_data",
+                "batch_get_global_asset_data",
+                "get_macro_data",
+                "get_hot_stocks",
+            }
+            for item in tools or []
+        )
+
+    def _drop_misdirected_astock_lookup_tools(self, tools: list[dict]) -> list[dict]:
+        cleaned = []
+        for item in tools or []:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+            if name in {"search_astocks", "get_astock_realtime", "get_astock_history", "batch_get_astock_realtime", "get_astock_realtime_batch"}:
+                continue
+            if name == "web_search":
+                query = re.sub(r"\s+", "", self._text_field(arguments.get("query")).lower())
+                if "股票代码" in query and ("a股" in query or "股票" in query):
+                    continue
+            cleaned.append(item)
+        return cleaned
 
     def _default_market_overview_tools(self, query: str = "") -> list[dict]:
         search_query = self._market_overview_search_query(query)
@@ -7742,7 +7834,7 @@ class CLI:
     def _specific_astock_tools_from_query(self, query: str) -> list[dict]:
         text = self._text_field(query)
         compact = re.sub(r"\s+", "", text.lower())
-        if not compact or self._canonical_index_market_label(compact):
+        if not compact or self._canonical_index_market_label(compact) or self._is_index_market_query(query):
             return []
         code_match = re.search(r"(?<!\d)(?:sh|sz)?([036]\d{5})(?!\d)", compact, flags=re.I)
         keyword = ""
@@ -7765,12 +7857,12 @@ class CLI:
             if not any(word in compact for word in astock_context_words):
                 return []
             cleaned = re.sub(
-                r"(分析一下|帮我分析|帮我|分析|看一下|看看|今天|今日|昨日|昨天|今年|年内|最近|近期|的|结果|结论|是|呢|表现|走势|股价|涨跌|怎么样|如何|怎么走|A股|a股|股票|个股)",
+                r"(分析一下|帮我分析|帮我|分析|查询一下|查询|查一下|查查|查看|看一下|看看|今天|今日|昨日|昨天|今年|年内|最近|近期|的|结果|结论|是|呢|表现|走势|股价|涨跌|怎么样|如何|怎么走|A股|a股|股票|个股|指数|大盘|宽基)",
                 "",
                 text,
                 flags=re.I,
             ).strip(" ，。！？?;；")
-            generic_assets = {"资产", "市场", "行情", "大盘", "股市", "股票", "个股", "公司", "结果", "结果是", "结论", "结论是", "黄金", "原油", "美元", "美元指数"}
+            generic_assets = {"资产", "市场", "行情", "大盘", "指数", "宽基", "股市", "股票", "个股", "公司", "结果", "结果是", "结论", "结论是", "黄金", "原油", "美元", "美元指数"}
             if (
                 cleaned
                 and 2 <= len(cleaned) <= 12
@@ -8797,6 +8889,81 @@ class CLI:
         if data:
             return data
         return {"view": text, "suggestions": [], "risk_controls": [], "missing_data": []}
+
+    def _recover_client_synthesis_from_reasoning(self, synthesis: dict) -> dict:
+        if not isinstance(synthesis, dict):
+            synthesis = {}
+        direct = self._direct_client_final_answer(synthesis)
+        view = self._text_field(synthesis.get("view"))
+        if direct and not self._looks_like_reasoning_leak(direct):
+            return synthesis
+        if view and not self._looks_like_reasoning_leak(view) and len(view) >= 24:
+            return synthesis
+        reasoning = self._current_reasoning_text()
+        if not reasoning:
+            return synthesis
+        recovered = self._parse_json_object(
+            reasoning,
+            preferred_keys={"final_answer", "view", "suggestions", "risk_controls", "missing_data", "artifacts"},
+        )
+        if recovered:
+            recovered_answer = self._direct_client_final_answer(recovered) or self._text_field(recovered.get("view"))
+            if recovered_answer and not self._looks_like_reasoning_leak(recovered_answer):
+                return {**synthesis, **recovered, "recovered_from_reasoning": True}
+        answer = self._extract_final_answer_from_reasoning(reasoning)
+        if not answer:
+            return synthesis
+        merged = {
+            **synthesis,
+            "final_answer": answer,
+            "view": answer,
+            "recovered_from_reasoning": True,
+        }
+        merged.setdefault("suggestions", [])
+        merged.setdefault("risk_controls", [])
+        merged.setdefault("missing_data", [])
+        return merged
+
+    def _current_reasoning_text(self) -> str:
+        trace = self._last_reasoning_trace if isinstance(self._last_reasoning_trace, dict) else {}
+        raw_text = trace.get("text")
+        return raw_text if isinstance(raw_text, str) else self._text_field(raw_text)
+
+    def _extract_final_answer_from_reasoning(self, reasoning: str) -> str:
+        text = reasoning or ""
+        if not text:
+            return ""
+        patterns = (
+            r"final_answer\s*(?:的)?(?:内容|自然语言)?\s*[：:]\s*[“\"](?P<answer>.*?)[”\"]",
+            r"构建\s*final_answer\s*(?:的自然语言)?\s*[：:]\s*[“\"](?P<answer>.*?)[”\"]",
+            r"现在[，,]?\s*(?:构建|写)\s*final_answer\s*(?:的自然语言)?\s*[：:]\s*[“\"](?P<answer>.*?)[”\"]",
+            r"final_answer\s*(?:的)?(?:内容|自然语言)?\s*[：:]\s*(?P<answer>.*?)(?=\n\s*(?:然后|其他字段|[-*]\s*)?(?:view|suggestions|risk_controls|missing_data|followups|next_actions|artifacts)\s*[：:]|$)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.I | re.S)
+            if not match:
+                continue
+            answer = self._clean_recovered_final_answer(match.group("answer"))
+            if answer:
+                return answer
+        return ""
+
+    def _clean_recovered_final_answer(self, value: str) -> str:
+        text = (value or "").strip()
+        text = text.strip(" \t\r\n\"'“”")
+        text = re.sub(
+            r"\n\s*(?:然后|其他字段|[-*]\s*)?(?:view|suggestions|risk_controls|missing_data|followups|next_actions|artifacts)\s*[：:].*$",
+            "",
+            text,
+            flags=re.I | re.S,
+        ).strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I).strip()
+        text = re.sub(r"\s*```$", "", text).strip()
+        if len(text) < 6:
+            return ""
+        if self._looks_like_reasoning_leak(text):
+            return ""
+        return text
 
     async def _materialize_synthesis_artifacts(self, synthesis: dict, client, query: str) -> list[dict]:
         requests = self._extract_synthesis_artifact_requests(synthesis, query)

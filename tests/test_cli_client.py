@@ -4842,6 +4842,75 @@ def test_unknown_astock_name_adds_name_search_and_web_code_lookup():
     assert "get_astock_realtime" not in {item["name"] for item in tools}
 
 
+def test_index_performance_query_does_not_trigger_astock_guardrail():
+    cli = CLI()
+
+    assert cli._specific_astock_tools_from_query("查询一下昨天的指数表现") == []
+    plan = cli._normalize_intent_plan(
+        {
+            "intent": "single_asset",
+            "needs_mcp": True,
+            "mcp_tools": [
+                {"name": "search_astocks", "arguments": {"keyword": "查询一下指数", "limit": 5}},
+                {"name": "web_search", "arguments": {"query": "查询一下指数 股票代码 A股 最新", "count": 5}},
+            ],
+            "tool_selection_source": "client_astock_guardrail",
+        },
+        "查询一下昨天的指数表现",
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    assert "search_astocks" not in tool_names
+    assert "batch_get_index_data" in tool_names
+    assert "client_index_guardrail" in plan["tool_selection_source"]
+    assert cli._market_fact_grounding("查询一下昨天的指数表现", {}, plan)["status"] == "not_required"
+
+
+@pytest.mark.asyncio
+async def test_collect_index_performance_query_overrides_bad_astock_plan(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments or {}))
+            return {
+                "tool": tool_name,
+                "records": [
+                    {
+                        "index_name": "沪深300",
+                        "date": "2026-06-15",
+                        "close": 4000.0,
+                        "change_pct": 1.2,
+                    }
+                ],
+            }
+
+    async def fake_search(self, query, arguments):
+        calls.append(("web_search", arguments or {}))
+        return {"query": query, "results": [{"title": "A股昨日行情"}]}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+    monkeypatch.setattr(CLI, "_run_local_chrome_search", fake_search)
+
+    cli = CLI()
+    plan = {
+        "intent": "single_asset",
+        "needs_mcp": True,
+        "mcp_tools": [
+            {"name": "search_astocks", "arguments": {"keyword": "查询一下指数", "limit": 5}},
+            {"name": "web_search", "arguments": {"query": "查询一下指数 股票代码 A股 最新", "count": 5}},
+        ],
+        "tool_selection_source": "client_astock_guardrail",
+    }
+    data = await cli._collect_client_mcp_data("查询一下昨天的指数表现", {}, plan)
+
+    called_names = [name for name, _ in calls]
+    assert "search_astocks" not in called_names
+    assert "batch_get_index_data" in called_names
+    assert any(key.startswith("batch_get_index_data:") for key in data)
+    assert "client_index_guardrail" in plan["tool_selection_source"]
+
+
 def test_astock_code_extraction_reads_web_search_snippets():
     codes = CLI()._extract_astock_codes_from_value(
         {"results": [{"title": "宁德时代 股票代码 300750 最新行情", "snippet": "创业板龙头公司"}]}
@@ -5527,8 +5596,37 @@ def test_client_side_advice_uses_final_answer_without_reformatting():
     )
 
     assert result == final_answer
-    assert "我先按" not in result
-    assert "可以先这样做" not in result
+
+
+def test_client_side_advice_recovers_final_answer_json_from_reasoning():
+    cli = CLI()
+    cli._last_reasoning_trace = {
+        "text": '准备输出。\n```json\n{"final_answer":"正式回答：沪深300昨日上涨1.2%。","view":"摘要","suggestions":[],"risk_controls":[],"missing_data":[]}\n```',
+    }
+
+    recovered = cli._recover_client_synthesis_from_reasoning(
+        {"view": "final_answer必须放在 JSON 对象里，suggestions: []"}
+    )
+
+    assert recovered["final_answer"] == "正式回答：沪深300昨日上涨1.2%。"
+    assert recovered["recovered_from_reasoning"] is True
+
+
+def test_client_side_advice_recovers_quoted_final_answer_from_reasoning():
+    cli = CLI()
+    cli._last_reasoning_trace = {
+        "text": (
+            "现在，构建final_answer的自然语言：\n\n"
+            "“关于昨天（2026-06-15）的指数表现，沪深300上涨1.2%，创业板指回落0.4%。”\n\n"
+            "然后，其他字段：\n- view: 摘要\n- suggestions: []"
+        ),
+    }
+
+    recovered = cli._recover_client_synthesis_from_reasoning({"view": ""})
+
+    assert recovered["final_answer"] == "关于昨天（2026-06-15）的指数表现，沪深300上涨1.2%，创业板指回落0.4%。"
+    assert "然后" not in recovered["final_answer"]
+    assert "suggestions" not in recovered["final_answer"]
 
 
 def test_live_region_line_count_handles_wide_and_ansi_text(monkeypatch):
