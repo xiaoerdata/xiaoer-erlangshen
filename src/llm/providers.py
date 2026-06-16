@@ -8,6 +8,7 @@ Messages-compatible providers without adding provider-specific SDKs.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -177,9 +178,30 @@ def resolve_llm_settings(
 class LLMClient:
     """Small async client for supported LLM provider protocols."""
 
+    _last_usage: dict[str, Any] = {}
+    _active_request: dict[str, Any] = {}
+    _session_usage: dict[str, Any] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "requests": 0,
+        "elapsed_seconds": 0.0,
+    }
+
     def __init__(self, settings: LLMProviderSettings, timeout: float = 60.0):
         self.settings = settings
         self.timeout = timeout
+
+    @classmethod
+    def usage_snapshot(cls) -> dict[str, Any]:
+        snapshot = dict(cls._last_usage or {})
+        snapshot["session"] = dict(cls._session_usage or {})
+        if cls._active_request:
+            active = dict(cls._active_request)
+            active["elapsed_seconds"] = max(0.0, time.perf_counter() - float(active.get("started_monotonic") or 0.0))
+            active.pop("started_monotonic", None)
+            snapshot["active"] = active
+        return snapshot
 
     async def complete(
         self,
@@ -198,9 +220,13 @@ class LLMClient:
                 f"{self.settings.display_name} API Base URL 未配置，请设置对应 BASE_URL 环境变量"
             )
 
-        if self.settings.protocol == ANTHROPIC_MESSAGES:
-            return await self._complete_anthropic(messages, temperature=temperature, max_tokens=max_tokens)
-        return await self._complete_openai_compatible(messages, temperature=temperature, max_tokens=max_tokens)
+        started = self._mark_request_started(messages)
+        try:
+            if self.settings.protocol == ANTHROPIC_MESSAGES:
+                return await self._complete_anthropic(messages, temperature=temperature, max_tokens=max_tokens, started=started)
+            return await self._complete_openai_compatible(messages, temperature=temperature, max_tokens=max_tokens, started=started)
+        finally:
+            type(self)._active_request = {}
 
     async def _complete_openai_compatible(
         self,
@@ -208,6 +234,7 @@ class LLMClient:
         *,
         temperature: float,
         max_tokens: int,
+        started: float,
     ) -> str:
         payload = {
             "model": self.settings.model,
@@ -224,7 +251,15 @@ class LLMClient:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
-        return str(data["choices"][0]["message"]["content"])
+        text = str(data["choices"][0]["message"]["content"])
+        self._record_usage(
+            messages=messages,
+            response_text=text,
+            usage=data.get("usage") if isinstance(data, dict) else None,
+            started=started,
+            protocol=OPENAI_COMPATIBLE,
+        )
+        return text
 
     async def _complete_anthropic(
         self,
@@ -232,6 +267,7 @@ class LLMClient:
         *,
         temperature: float,
         max_tokens: int,
+        started: float,
     ) -> str:
         system, conversation = _split_anthropic_messages(messages)
         payload: dict[str, Any] = {
@@ -250,7 +286,62 @@ class LLMClient:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
-        return _extract_anthropic_text(data)
+        text = _extract_anthropic_text(data)
+        self._record_usage(
+            messages=messages,
+            response_text=text,
+            usage=data.get("usage") if isinstance(data, dict) else None,
+            started=started,
+            protocol=ANTHROPIC_MESSAGES,
+        )
+        return text
+
+    def _mark_request_started(self, messages: list[dict[str, str]]) -> float:
+        started = time.perf_counter()
+        type(self)._active_request = {
+            "provider": self.settings.display_name or self.settings.provider,
+            "model": self.settings.model,
+            "input_tokens": _estimate_messages_tokens(messages),
+            "started_monotonic": started,
+        }
+        return started
+
+    def _record_usage(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        response_text: str,
+        usage: Any,
+        started: float,
+        protocol: str,
+    ) -> None:
+        input_tokens, output_tokens, total_tokens, approximate = _extract_usage_tokens(
+            usage,
+            protocol=protocol,
+            messages=messages,
+            response_text=response_text,
+        )
+        elapsed = max(0.001, time.perf_counter() - started)
+        tokens_per_second = output_tokens / elapsed if elapsed > 0 else 0.0
+        snapshot = {
+            "provider": self.settings.display_name or self.settings.provider,
+            "model": self.settings.model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "elapsed_seconds": elapsed,
+            "tokens_per_second": tokens_per_second,
+            "approximate": approximate,
+            "updated_at": time.time(),
+        }
+        session = dict(type(self)._session_usage)
+        session["input_tokens"] = int(session.get("input_tokens") or 0) + input_tokens
+        session["output_tokens"] = int(session.get("output_tokens") or 0) + output_tokens
+        session["total_tokens"] = int(session.get("total_tokens") or 0) + total_tokens
+        session["requests"] = int(session.get("requests") or 0) + 1
+        session["elapsed_seconds"] = float(session.get("elapsed_seconds") or 0.0) + elapsed
+        type(self)._last_usage = snapshot
+        type(self)._session_usage = session
 
 
 def _first_env(names: Iterable[str]) -> Optional[str]:
@@ -311,6 +402,57 @@ def _provider_config_value(config: Any, provider: str, field: str) -> Optional[s
         if value:
             return value
     return None
+
+
+def _extract_usage_tokens(
+    usage: Any,
+    *,
+    protocol: str,
+    messages: list[dict[str, str]],
+    response_text: str,
+) -> tuple[int, int, int, bool]:
+    if isinstance(usage, dict):
+        if protocol == ANTHROPIC_MESSAGES:
+            input_tokens = _coerce_token_int(usage.get("input_tokens"))
+            output_tokens = _coerce_token_int(usage.get("output_tokens"))
+        else:
+            input_tokens = _coerce_token_int(usage.get("prompt_tokens") or usage.get("input_tokens"))
+            output_tokens = _coerce_token_int(usage.get("completion_tokens") or usage.get("output_tokens"))
+        total_tokens = _coerce_token_int(usage.get("total_tokens"))
+        if input_tokens or output_tokens or total_tokens:
+            if total_tokens <= 0:
+                total_tokens = input_tokens + output_tokens
+            return input_tokens, output_tokens, total_tokens, False
+    input_tokens = _estimate_messages_tokens(messages)
+    output_tokens = _estimate_text_tokens(response_text)
+    return input_tokens, output_tokens, input_tokens + output_tokens, True
+
+
+def _coerce_token_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _estimate_messages_tokens(messages: list[dict[str, str]]) -> int:
+    total = 0
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        total += 4
+        total += _estimate_text_tokens(message.get("role"))
+        total += _estimate_text_tokens(message.get("content"))
+    return total
+
+
+def _estimate_text_tokens(value: Any) -> int:
+    text = str(value or "")
+    if not text:
+        return 0
+    cjk = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    non_cjk = len(text) - cjk
+    return max(1, cjk + (non_cjk + 3) // 4)
 
 
 def _generic_model_from_config(config: Any, provider: str) -> Optional[str]:

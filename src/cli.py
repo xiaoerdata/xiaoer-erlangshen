@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import time
 import unicodedata
 from datetime import datetime, timedelta
 from html import escape
@@ -474,6 +475,8 @@ class CLI:
         self._last_resource_links: list[dict[str, object]] = []
         self._command_usage_cache: dict[str, object] | None = None
         self._memory = LocalMemoryStore()
+        self._token_status_visible = False
+        self._token_status_activity = "ready"
 
     async def dispatch(self, user_input: str) -> str:
         """把交互输入或一次性参数分发到对应命令。"""
@@ -657,6 +660,7 @@ class CLI:
 
                 result = await self.dispatch(user_input)
 
+                self._refresh_token_status_bar(activity="ready")
                 print(self._format_interactive_turn(user_input, result))
 
             except (KeyboardInterrupt, EOFError):
@@ -888,6 +892,8 @@ class CLI:
         auth_text = username or ("已保存 token" if session.get("token") else "未登录")
         provider, model, llm_ready, key_hint = self._llm_status(config)
         memory_stats = self._memory_stats()
+        self._token_status_visible = sys.stdout.isatty()
+        print(self._token_status_line(activity="ready"))
         print(self._session_dashboard(
             base_url=base_url,
             auth_text=auth_text,
@@ -940,6 +946,108 @@ class CLI:
             "start     直接输入投资问题",
         ]
         return _dashboard_panel("Erlangshen", left_lines, right_lines)
+
+    def _token_status_line(self, activity: str = "", width: int | None = None) -> str:
+        width = min(max(72, width or _terminal_width()), 150)
+        text = self._token_meter_text(activity=activity or self._token_status_activity)
+        clipped = _clip_display(text, width)
+        padded = clipped + " " * max(0, width - _display_width(clipped))
+        return _color(padded, "30;46")
+
+    def _token_meter_text(self, *, activity: str = "", compact: bool = False) -> str:
+        session = load_auth_session()
+        config = get_config()
+        provider, model, llm_ready, _ = self._llm_status(config)
+        account = "account ready" if session.get("token") else "account login"
+        model_state = "model ready" if llm_ready else "model key"
+        snapshot = self._llm_usage_snapshot()
+        active = snapshot.get("active") if isinstance(snapshot.get("active"), dict) else {}
+        session_usage = snapshot.get("session") if isinstance(snapshot.get("session"), dict) else {}
+
+        if active:
+            elapsed = self._format_seconds(active.get("elapsed_seconds"))
+            input_tokens = self._format_token_count(active.get("input_tokens"))
+            last = f"running in~{input_tokens} elapsed {elapsed}"
+            speed = "tok/s ..."
+        else:
+            approximate = "~" if snapshot.get("approximate") else ""
+            total = self._format_token_count(snapshot.get("total_tokens"))
+            input_tokens = self._format_token_count(snapshot.get("input_tokens"))
+            output_tokens = self._format_token_count(snapshot.get("output_tokens"))
+            if snapshot.get("total_tokens"):
+                last = f"last {approximate}{total}t in {input_tokens} out {output_tokens}"
+                speed = f"{float(snapshot.get('tokens_per_second') or 0.0):.1f} tok/s"
+            else:
+                last = "last --"
+                speed = "tok/s --"
+
+        session_total = self._format_token_count(session_usage.get("total_tokens"))
+        requests = int(session_usage.get("requests") or 0)
+        session_text = f"session {session_total}t/{requests}r"
+        model_text = f"{provider}/{model}"
+        if len(model_text) > (22 if compact else 34):
+            model_text = model_text[:(19 if compact else 31)] + "..."
+        activity_text = self._text_field(activity or self._token_status_activity or "ready")
+        if len(activity_text) > 24:
+            activity_text = activity_text[:21] + "..."
+        prefix = "TOK" if compact else "Session Meter"
+        return " · ".join([
+            prefix,
+            account,
+            model_state,
+            model_text,
+            last,
+            speed,
+            session_text,
+            activity_text,
+        ])
+
+    def _token_meter_compact(self) -> str:
+        return self._token_meter_text(activity=self._token_status_activity, compact=True)
+
+    def _llm_usage_snapshot(self) -> dict:
+        try:
+            from src.llm import LLMClient
+
+            snapshot = LLMClient.usage_snapshot()
+            return snapshot if isinstance(snapshot, dict) else {}
+        except Exception:
+            return {}
+
+    def _format_token_count(self, value) -> str:
+        try:
+            number = max(0, int(value or 0))
+        except (TypeError, ValueError):
+            number = 0
+        if number >= 1_000_000:
+            return f"{number / 1_000_000:.1f}M"
+        if number >= 10_000:
+            return f"{number / 1_000:.0f}k"
+        if number >= 1_000:
+            return f"{number / 1_000:.1f}k"
+        return str(number)
+
+    def _format_seconds(self, value) -> str:
+        try:
+            seconds = max(0.0, float(value or 0.0))
+        except (TypeError, ValueError):
+            seconds = 0.0
+        if seconds >= 60:
+            return f"{seconds / 60:.1f}m"
+        return f"{seconds:.1f}s"
+
+    def _refresh_token_status_bar(self, activity: str = "") -> None:
+        if activity:
+            self._token_status_activity = self._text_field(activity)
+        if not self._token_status_visible or not sys.stdout.isatty():
+            return
+        if os.getenv("ERLANGSHEN_TOKEN_STATUS", "on").lower() in {"0", "off", "false", "no"}:
+            return
+        try:
+            sys.stdout.write("\0337\033[1;1H" + self._token_status_line(activity=self._token_status_activity) + "\0338")
+            sys.stdout.flush()
+        except OSError:
+            pass
 
     def _welcome_panel(
         self,
@@ -1187,6 +1295,7 @@ class CLI:
             model_text = model_text[:31] + "..."
         return (
             "  ".join(chips)
+            + f"  {self._token_meter_compact()}"
             + f"  model:{model_text}"
             + f"  next:{action}"
             + ("  links:/links open 1" if resource_count else "")
@@ -4717,6 +4826,7 @@ class CLI:
                 temperature=0,
                 max_tokens=16,
             )
+            self._refresh_token_status_bar(activity="model key checked")
             return True, "连接测试成功"
         except Exception as exc:
             return False, self._sanitize_api_key_error(exc, api_key)
@@ -4903,6 +5013,7 @@ class CLI:
                 temperature=0.35,
                 max_tokens=min(int(config.llm_max_tokens or 4096), 1600),
             )
+            self._refresh_token_status_bar(activity="analysis ready")
         except Exception as exc:
             message = f"本机大模型调用失败: {type(exc).__name__}: {exc}".rstrip()
             snapshot_lines = self._mcp_snapshot_lines(mcp_data)
@@ -5655,6 +5766,7 @@ class CLI:
                 temperature=0.1,
                 max_tokens=500,
             )
+            self._refresh_token_status_bar(activity="intent ready")
             parsed = self._parse_json_object(
                 raw_text,
                 preferred_keys={"intent", "needs_mcp", "mcp_tools", "rewritten_query", "route_summary"},
@@ -8497,6 +8609,7 @@ class CLI:
             clean = self._format_progress_trace_item(message)
             if clean and clean not in self._agent_trace:
                 self._agent_trace.append(clean)
+        self._refresh_token_status_bar(activity=self._format_progress_trace_item(message) or message)
         if sys.stdout.isatty():
             print(_color(f"· {message}...", "2"), flush=True)
 

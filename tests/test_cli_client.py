@@ -11,7 +11,7 @@ from src.commands.server import ServerCommand
 from src.client.server_client import _normalize_login_payload
 from src.client.chrome_search import build_search_url, _is_noise_search_result
 from src.config import get_config, reset_config, update_config
-from src.llm.providers import resolve_llm_settings
+from src.llm.providers import LLMClient, resolve_llm_settings
 from src.mcp.super66 import Super66MCP
 from src.workspace import approve_workspace, recent_workspaces, workspace_status
 
@@ -20,6 +20,9 @@ from src.workspace import approve_workspace, recent_workspaces, workspace_status
 def isolate_local_memory(monkeypatch, tmp_path):
     monkeypatch.setenv("ERLANGSHEN_MEMORY_FILE", str(tmp_path / "memory.json"))
     monkeypatch.setenv("ERLANGSHEN_COMMAND_USAGE_FILE", str(tmp_path / "command_usage.json"))
+    LLMClient._last_usage = {}
+    LLMClient._active_request = {}
+    LLMClient._session_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "requests": 0, "elapsed_seconds": 0.0}
 
 
 @pytest.mark.asyncio
@@ -68,6 +71,59 @@ def test_panels_use_terminal_display_width_for_chinese_text(monkeypatch):
     rows = _panel("初始化", [("workspace", "未授权 项目文件夹"), ("model", "小米 MiMo / mimo-v2.5")])
     row_widths = [_display_width(line) for line in rows.splitlines()]
     assert len(set(row_widths)) == 1
+
+
+def test_llm_usage_snapshot_records_real_usage():
+    settings = resolve_llm_settings(provider="openai", model="gpt-test", api_key="test-key")
+    client = LLMClient(settings)
+    LLMClient._last_usage = {}
+    LLMClient._active_request = {}
+    LLMClient._session_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "requests": 0, "elapsed_seconds": 0.0}
+
+    started = client._mark_request_started([{"role": "user", "content": "hello"}])
+    client._record_usage(
+        messages=[{"role": "user", "content": "hello"}],
+        response_text="ok",
+        usage={"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+        started=started,
+        protocol="openai_chat",
+    )
+
+    snapshot = LLMClient.usage_snapshot()
+    assert snapshot["input_tokens"] == 12
+    assert snapshot["output_tokens"] == 5
+    assert snapshot["total_tokens"] == 17
+    assert snapshot["approximate"] is False
+    assert snapshot["tokens_per_second"] > 0
+    assert snapshot["session"]["total_tokens"] == 17
+    assert snapshot["session"]["requests"] == 1
+
+
+def test_token_meter_text_renders_usage_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("NO_COLOR", "1")
+    save_auth_session({"token": "token", "user": {"username": "tester"}})
+    LLMClient._last_usage = {
+        "provider": "OpenAI",
+        "model": "gpt-test",
+        "input_tokens": 1000,
+        "output_tokens": 250,
+        "total_tokens": 1250,
+        "elapsed_seconds": 2.5,
+        "tokens_per_second": 100.0,
+        "approximate": True,
+    }
+    LLMClient._active_request = {}
+    LLMClient._session_usage = {"input_tokens": 1000, "output_tokens": 250, "total_tokens": 1250, "requests": 1, "elapsed_seconds": 2.5}
+
+    line = CLI()._token_meter_text(activity="analysis ready")
+
+    assert "Session Meter" in line
+    assert "account ready" in line
+    assert "last ~1.2kt" in line
+    assert "100.0 tok/s" in line
+    assert "session 1.2kt/1r" in line
+    assert "analysis ready" in line
 
 
 @pytest.mark.asyncio
