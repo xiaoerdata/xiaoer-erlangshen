@@ -616,6 +616,34 @@ def test_json_cli_envelope_and_history_path(monkeypatch, tmp_path):
     assert cli._history_path() == history_path
 
 
+def test_input_history_persists_and_navigates_like_terminal_history(monkeypatch, tmp_path):
+    history_path = tmp_path / "history"
+    monkeypatch.setenv("ERLANGSHEN_HISTORY_FILE", str(history_path))
+    cli = CLI()
+
+    cli._remember_input_history("分析昨天")
+    cli._remember_input_history("分析昨天")
+    cli._remember_input_history("分析贵州茅台")
+
+    assert history_path.read_text(encoding="utf-8").splitlines() == ["分析昨天", "分析贵州茅台"]
+
+    text, index, draft = cli._history_previous_text("临时草稿", None, "")
+    assert (text, index, draft) == ("分析贵州茅台", 1, "临时草稿")
+
+    text, index, draft = cli._history_previous_text(text, index, draft)
+    assert (text, index, draft) == ("分析昨天", 0, "临时草稿")
+
+    text, index, draft = cli._history_next_text(text, index, draft)
+    assert (text, index, draft) == ("分析贵州茅台", 1, "临时草稿")
+
+    text, index, draft = cli._history_next_text(text, index, draft)
+    assert (text, index, draft) == ("临时草稿", None, "临时草稿")
+
+    reloaded = CLI()
+    reloaded._load_input_history()
+    assert reloaded._input_history == ["分析昨天", "分析贵州茅台"]
+
+
 def test_strict_exit_code_classifies_cli_failures():
     assert _strict_exit_code("/statsu", "未知命令: /statsu") == 64
     assert _strict_exit_code("/chart", "请提供图表标题和 JSON 数据。") == 64

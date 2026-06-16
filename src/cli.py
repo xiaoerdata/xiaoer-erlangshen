@@ -468,6 +468,7 @@ class CLI:
         self.hooks = None
         self._slash_dropdown_lines = 0
         self._input_history: list[str] = []
+        self._input_history_loaded = False
         self._prompt_session = None
         self._slash_selected = 0
         self._last_agent_plan: dict | None = None
@@ -9433,6 +9434,7 @@ class CLI:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             return input(self.prompt()).strip()
 
+        self._load_input_history()
         try:
             return await self._read_prompt_toolkit()
         except ImportError:
@@ -9517,45 +9519,35 @@ class CLI:
         text_area.buffer.on_text_changed += invalidate
         bindings = KeyBindings()
 
-        @bindings.add("down", filter=Condition(slash_active))
+        @bindings.add("down", filter=Condition(slash_active), eager=True)
         def _(event):
             matches = slash_matches()
             if matches:
                 cli._slash_selected = (clamp_selected(matches) + 1) % len(matches)
                 event.app.invalidate()
 
-        @bindings.add("up", filter=Condition(slash_active))
+        @bindings.add("up", filter=Condition(slash_active), eager=True)
         def _(event):
             matches = slash_matches()
             if matches:
                 cli._slash_selected = (clamp_selected(matches) - 1) % len(matches)
                 event.app.invalidate()
 
-        @bindings.add("up", filter=Condition(lambda: not slash_active()))
+        @bindings.add("up", filter=Condition(lambda: not slash_active()), eager=True)
         def _(event):
             nonlocal history_index, draft
-            if not cli._input_history:
-                return
-            if history_index is None:
-                draft = text_area.text
-                history_index = len(cli._input_history) - 1
-            else:
-                history_index = max(0, history_index - 1)
-            text_area.text = cli._input_history[history_index]
+            next_text, history_index, draft = cli._history_previous_text(text_area.text, history_index, draft)
+            text_area.text = next_text
             text_area.buffer.cursor_position = len(text_area.text)
+            event.app.invalidate()
 
-        @bindings.add("down", filter=Condition(lambda: not slash_active()))
+        @bindings.add("down", filter=Condition(lambda: not slash_active()), eager=True)
         def _(event):
-            nonlocal history_index
-            if history_index is None:
-                return
-            if history_index < len(cli._input_history) - 1:
-                history_index += 1
-                text_area.text = cli._input_history[history_index]
-            else:
-                history_index = None
-                text_area.text = draft
+            nonlocal history_index, draft
+            next_text, history_index, draft = cli._history_next_text(text_area.text, history_index, draft)
+            text_area.text = next_text
             text_area.buffer.cursor_position = len(text_area.text)
+            event.app.invalidate()
 
         @bindings.add("enter")
         def _(event):
@@ -9615,8 +9607,7 @@ class CLI:
 
         command = await app.run_async()
         command = command.strip()
-        if command and (not self._input_history or self._input_history[-1] != command):
-            self._input_history.append(command)
+        self._remember_input_history(command)
         return command
 
     def _read_prompt_manual(self) -> str:
@@ -9645,32 +9636,19 @@ class CLI:
                 if ch in {"\r", "\n"}:
                     print()
                     command = buffer.strip()
-                    if command and (not self._input_history or self._input_history[-1] != command):
-                        self._input_history.append(command)
+                    self._remember_input_history(command)
                     return command
                 if ch == "\x1b":
                     action = self._read_escape_sequence()
                     if action == "up":
-                        if self._input_history:
-                            if history_index is None:
-                                draft = buffer
-                                history_index = len(self._input_history) - 1
-                            else:
-                                history_index = max(0, history_index - 1)
-                            buffer = self._input_history[history_index]
-                            cursor = len(buffer)
-                            self._render_prompt(buffer, cursor)
+                        buffer, history_index, draft = self._history_previous_text(buffer, history_index, draft)
+                        cursor = len(buffer)
+                        self._render_prompt(buffer, cursor)
                         continue
                     if action == "down":
-                        if history_index is not None:
-                            if history_index < len(self._input_history) - 1:
-                                history_index += 1
-                                buffer = self._input_history[history_index]
-                            else:
-                                history_index = None
-                                buffer = draft
-                            cursor = len(buffer)
-                            self._render_prompt(buffer, cursor)
+                        buffer, history_index, draft = self._history_next_text(buffer, history_index, draft)
+                        cursor = len(buffer)
+                        self._render_prompt(buffer, cursor)
                         continue
                     if action == "left":
                         cursor = max(0, cursor - 1)
@@ -9712,9 +9690,9 @@ class CLI:
                         if not needs_more:
                             self._render_prompt(buffer, cursor)
                             print()
-                            if buffer and (not self._input_history or self._input_history[-1] != buffer):
-                                self._input_history.append(buffer)
-                            return buffer.strip()
+                            command = buffer.strip()
+                            self._remember_input_history(command)
+                            return command
                     self._render_prompt(buffer, cursor)
                     continue
                 if ch.isprintable():
@@ -10272,6 +10250,7 @@ class CLI:
         )
 
     def _setup_completion(self) -> None:
+        self._load_input_history()
         try:
             import readline
         except ImportError:
@@ -10305,6 +10284,78 @@ class CLI:
         if env_path:
             return Path(env_path).expanduser()
         return Path("~/.erlangshen/history").expanduser()
+
+    def _load_input_history(self) -> None:
+        if self._input_history_loaded:
+            return
+        self._input_history_loaded = True
+        try:
+            lines = self._history_path().read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, OSError, UnicodeError):
+            return
+        history: list[str] = []
+        for line in lines:
+            command = line.strip()
+            if command and (not history or history[-1] != command):
+                history.append(command)
+        self._input_history = history[-1000:]
+
+    def _save_input_history(self) -> None:
+        history = self._input_history[-1000:]
+        try:
+            path = self._history_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(("\n".join(history) + "\n") if history else "", encoding="utf-8")
+        except OSError:
+            pass
+
+    def _remember_input_history(self, command: str) -> None:
+        command = self._text_field(command).strip()
+        if not command:
+            return
+        self._load_input_history()
+        if self._input_history and self._input_history[-1] == command:
+            return
+        self._input_history.append(command)
+        if len(self._input_history) > 1000:
+            self._input_history = self._input_history[-1000:]
+        try:
+            import readline
+
+            readline.add_history(command)
+        except (ImportError, OSError):
+            pass
+        self._save_input_history()
+
+    def _history_previous_text(
+        self,
+        current_text: str,
+        history_index: int | None,
+        draft: str,
+    ) -> tuple[str, int | None, str]:
+        self._load_input_history()
+        if not self._input_history:
+            return current_text, history_index, draft
+        if history_index is None:
+            draft = current_text
+            history_index = len(self._input_history) - 1
+        else:
+            history_index = max(0, history_index - 1)
+        return self._input_history[history_index], history_index, draft
+
+    def _history_next_text(
+        self,
+        current_text: str,
+        history_index: int | None,
+        draft: str,
+    ) -> tuple[str, int | None, str]:
+        self._load_input_history()
+        if history_index is None:
+            return current_text, history_index, draft
+        if history_index < len(self._input_history) - 1:
+            history_index += 1
+            return self._input_history[history_index], history_index, draft
+        return draft, None, draft
 
     def _command_usage_scope(self) -> str:
         if os.getenv("ERLANGSHEN_DISABLE_COMMAND_USAGE"):
