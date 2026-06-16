@@ -127,6 +127,28 @@ def test_token_meter_text_renders_usage_snapshot(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_complete_llm_response_uses_streaming_when_enabled(monkeypatch):
+    monkeypatch.setenv("ERLANGSHEN_LLM_STREAM", "on")
+
+    class FakeClient:
+        async def stream_complete(self, messages, *, temperature, max_tokens):
+            yield '{"view":'
+            yield '"ok"}'
+
+        async def complete(self, messages, *, temperature, max_tokens):
+            raise AssertionError("non-streaming fallback should not run")
+
+    result = await CLI()._complete_llm_response(
+        FakeClient(),
+        [{"role": "user", "content": "hello"}],
+        temperature=0.1,
+        max_tokens=32,
+    )
+
+    assert result == '{"view":"ok"}'
+
+
+@pytest.mark.asyncio
 async def test_command_palette_and_command_suggestion():
     cli = CLI()
 
@@ -578,11 +600,26 @@ def test_message_block_wraps_markdown_and_list_continuations():
 
     assert "▸ 综合判断" in block
     assert "- 这是一个很长很长的建议" in block
-    assert "  需要在终端消息块里保持列表层次" in block
+    assert "  " in block
+    assert "终端消息块" in block
+    assert "保持列表层次" in block or "持列表层次" in block
     assert "并自然换行" in block
+    widths = [_display_width(line) for line in block.splitlines()]
+    assert len(set(widths)) == 1
     for line in block.splitlines():
         if line.startswith("│ "):
-            assert len(line) <= 111
+            assert _display_width(line) <= 110
+
+
+def test_message_block_wraps_chinese_by_terminal_display_width(monkeypatch):
+    monkeypatch.setattr("src.cli._terminal_width", lambda: 72)
+    text = "这轮我没有拿到 Super66 MCP 返回的可核验股票行情，所以不会给出具体股价、支撑位、压力位或走势图。"
+
+    block = CLI()._message_block("二郎神", text, "32")
+
+    widths = [_display_width(line) for line in block.splitlines()]
+    assert len(set(widths)) == 1
+    assert max(widths) == 68
 
 
 def test_prompt_status_bar_shows_readiness_without_server_url(monkeypatch, tmp_path):
@@ -2747,6 +2784,7 @@ def test_interactive_turn_visually_separates_question_and_answer():
     assert "今天市场情况怎么样" in output
     assert "╭─ 二郎神 " in output
     assert "先看主线。" in output
+    assert "TOK ·" in output
 
 
 def test_market_overview_defaults_use_batch_macro_and_hot_stock_tools():
@@ -4459,6 +4497,41 @@ def test_astock_query_defaults_to_search_realtime_and_history_tools():
         and item["arguments"].get("startDate")
         for item in plan["mcp_tools"]
     )
+
+
+def test_astock_query_augments_llm_market_overview_tools():
+    plan = CLI()._normalize_intent_plan(
+        {
+            "intent": "market_overview",
+            "needs_mcp": True,
+            "mcp_tools": [{"name": "batch_get_index_data", "arguments": {"index_names": ["沪深300"]}}],
+            "tool_selection_source": "local_llm",
+        },
+        "分析贵州茅台今年的表现",
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    assert tool_names[:3] == ["search_astocks", "get_astock_realtime", "get_astock_history"]
+    assert {"name": "get_astock_realtime", "arguments": {"code": "600519"}} in plan["mcp_tools"]
+    assert "batch_get_index_data" in tool_names
+    assert "client_astock_guardrail" in plan["tool_selection_source"]
+
+
+def test_unknown_astock_name_adds_name_search_and_web_code_lookup():
+    tools = CLI()._specific_astock_tools_from_query("分析宁德时代今年表现")
+
+    assert tools[0] == {"name": "search_astocks", "arguments": {"keyword": "宁德时代", "limit": 5}}
+    assert tools[1]["name"] == "web_search"
+    assert "宁德时代 股票代码 A股" in tools[1]["arguments"]["query"]
+    assert "get_astock_realtime" not in {item["name"] for item in tools}
+
+
+def test_astock_code_extraction_reads_web_search_snippets():
+    codes = CLI()._extract_astock_codes_from_value(
+        {"results": [{"title": "宁德时代 股票代码 300750 最新行情", "snippet": "创业板龙头公司"}]}
+    )
+
+    assert codes == ["300750"]
 
 
 def test_astock_grounding_removes_ungrounded_prices_and_artifacts():

@@ -7,10 +7,11 @@ Messages-compatible providers without adding provider-specific SDKs.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any, AsyncIterator, Iterable, Optional
 
 import httpx
 
@@ -228,6 +229,34 @@ class LLMClient:
         finally:
             type(self)._active_request = {}
 
+    async def stream_complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[str]:
+        if not self.settings.has_api_key:
+            raise RuntimeError(
+                f"{self.settings.display_name} API Key 未配置，请设置 "
+                f"{' 或 '.join(self.settings.api_key_envs)}"
+            )
+        if not self.settings.base_url:
+            raise RuntimeError(
+                f"{self.settings.display_name} API Base URL 未配置，请设置对应 BASE_URL 环境变量"
+            )
+
+        started = self._mark_request_started(messages)
+        try:
+            if self.settings.protocol == ANTHROPIC_MESSAGES:
+                async for chunk in self._stream_anthropic(messages, temperature=temperature, max_tokens=max_tokens, started=started):
+                    yield chunk
+            else:
+                async for chunk in self._stream_openai_compatible(messages, temperature=temperature, max_tokens=max_tokens, started=started):
+                    yield chunk
+        finally:
+            type(self)._active_request = {}
+
     async def _complete_openai_compatible(
         self,
         messages: list[dict[str, str]],
@@ -295,6 +324,123 @@ class LLMClient:
             protocol=ANTHROPIC_MESSAGES,
         )
         return text
+
+    async def _stream_openai_compatible(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        started: float,
+    ) -> AsyncIterator[str]:
+        payload = {
+            "model": self.settings.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if self.settings.provider == "mimo":
+            payload.pop("max_tokens", None)
+            payload["max_completion_tokens"] = max_tokens
+        headers = _api_key_headers(self.settings)
+        url = _join_openai_url(self.settings.base_url or "", "chat/completions")
+        parts: list[str] = []
+        usage: Any = None
+        async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    text = line.strip()
+                    if not text or not text.startswith("data:"):
+                        continue
+                    event_text = text[5:].strip()
+                    if event_text == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(event_text)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(event, dict) and event.get("usage"):
+                        usage = event.get("usage")
+                    choices = event.get("choices") if isinstance(event, dict) else None
+                    if not isinstance(choices, list):
+                        continue
+                    for choice in choices:
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+                        chunk = delta.get("content") or choice.get("text") or ""
+                        if not isinstance(chunk, str) or not chunk:
+                            continue
+                        parts.append(chunk)
+                        yield chunk
+        response_text = "".join(parts)
+        self._record_usage(
+            messages=messages,
+            response_text=response_text,
+            usage=usage,
+            started=started,
+            protocol=OPENAI_COMPATIBLE,
+        )
+
+    async def _stream_anthropic(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        started: float,
+    ) -> AsyncIterator[str]:
+        system, conversation = _split_anthropic_messages(messages)
+        payload: dict[str, Any] = {
+            "model": self.settings.model,
+            "messages": conversation,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if system:
+            payload["system"] = system
+        headers = _api_key_headers(self.settings)
+        headers["anthropic-version"] = "2023-06-01"
+        url = _join_anthropic_url(self.settings.base_url or "")
+        parts: list[str] = []
+        usage: dict[str, Any] = {}
+        async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    text = line.strip()
+                    if not text or not text.startswith("data:"):
+                        continue
+                    try:
+                        event = json.loads(text[5:].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+                    delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
+                    for source in (message.get("usage"), delta.get("usage"), event.get("usage")):
+                        if isinstance(source, dict):
+                            usage.update(source)
+                    if event.get("type") != "content_block_delta":
+                        continue
+                    chunk_delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
+                    chunk = chunk_delta.get("text") or ""
+                    if not isinstance(chunk, str) or not chunk:
+                        continue
+                    parts.append(chunk)
+                    yield chunk
+        response_text = "".join(parts)
+        self._record_usage(
+            messages=messages,
+            response_text=response_text,
+            usage=usage or None,
+            started=started,
+            protocol=ANTHROPIC_MESSAGES,
+        )
 
     def _mark_request_started(self, messages: list[dict[str, str]]) -> float:
         started = time.perf_counter()

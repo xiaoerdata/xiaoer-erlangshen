@@ -892,8 +892,7 @@ class CLI:
         auth_text = username or ("已保存 token" if session.get("token") else "未登录")
         provider, model, llm_ready, key_hint = self._llm_status(config)
         memory_stats = self._memory_stats()
-        self._token_status_visible = sys.stdout.isatty()
-        print(self._token_status_line(activity="ready"))
+        self._token_status_visible = sys.stdout.isatty() and os.getenv("ERLANGSHEN_TOKEN_STATUS", "dialog").lower() == "top"
         print(self._session_dashboard(
             base_url=base_url,
             auth_text=auth_text,
@@ -953,6 +952,12 @@ class CLI:
         clipped = _clip_display(text, width)
         padded = clipped + " " * max(0, width - _display_width(clipped))
         return _color(padded, "30;46")
+
+    def _token_dialog_footer(self, activity: str = "") -> str:
+        width = min(max(64, _terminal_width() - 4), 110)
+        content_width = max(20, width - 4)
+        text = self._token_meter_text(activity=activity or self._token_status_activity, compact=True)
+        return _color("   " + _pad_display(text, content_width), "2")
 
     def _token_meter_text(self, *, activity: str = "", compact: bool = False) -> str:
         session = load_auth_session()
@@ -1041,7 +1046,7 @@ class CLI:
             self._token_status_activity = self._text_field(activity)
         if not self._token_status_visible or not sys.stdout.isatty():
             return
-        if os.getenv("ERLANGSHEN_TOKEN_STATUS", "on").lower() in {"0", "off", "false", "no"}:
+        if os.getenv("ERLANGSHEN_TOKEN_STATUS", "dialog").lower() != "top":
             return
         try:
             sys.stdout.write("\0337\033[1;1H" + self._token_status_line(activity=self._token_status_activity) + "\0338")
@@ -1314,11 +1319,13 @@ class CLI:
         if not self._is_advice_turn(user_input):
             return f"\n{result}\n"
         question = self._turn_question_text(user_input)
+        meter = self._token_dialog_footer(activity="ready")
         return "\n".join([
             "",
             self._message_block("你", question, "36;1"),
             "",
             self._message_block("二郎神", result, "32;1"),
+            meter,
             "",
         ])
 
@@ -1340,16 +1347,17 @@ class CLI:
 
     def _message_block(self, title: str, body: str, color_code: str) -> str:
         width = min(max(64, _terminal_width() - 4), 110)
-        top = _color(f"╭─ {title} " + "─" * max(0, width - len(title) - 5) + "╮", color_code)
+        content_width = width - 4
+        top = _color(f"╭─ {title} " + "─" * max(0, width - _display_width(title) - 5) + "╮", color_code)
         bottom = _color("╰" + "─" * (width - 2) + "╯", color_code)
         lines = []
         for raw_line in (body or "").splitlines() or [""]:
             if not raw_line:
-                lines.append("│ " + "".ljust(width - 3) + "│")
+                lines.append("│ " + " " * content_width + " │")
                 continue
             display_line = self._message_display_line(raw_line)
-            for line in self._wrap_text(display_line, width - 4):
-                lines.append("│ " + line.ljust(width - 3) + "│")
+            for line in self._wrap_text(display_line, content_width):
+                lines.append("│ " + _pad_display(line, content_width) + " │")
         return "\n".join([top, *lines, bottom])
 
     def _message_display_line(self, text: str) -> str:
@@ -1365,23 +1373,26 @@ class CLI:
 
     def _wrap_text(self, text: str, limit: int, *, continuation_indent: int | None = None) -> list[str]:
         text = str(text)
-        if len(text) <= limit:
+        if _display_width(text) <= limit:
             return [text]
         prefix = ""
         if continuation_indent is None:
             match = re.match(r"^(\s*(?:[-*]|\d+[.、])\s+)", text)
             if match:
-                prefix = " " * len(match.group(1))
+                prefix = " " * _display_width(match.group(1))
         elif continuation_indent > 0:
             prefix = " " * continuation_indent
         result = []
         remaining = text
         first = True
-        while len(remaining) > limit:
+        while remaining and _display_width(("" if first else prefix) + remaining) > limit:
             current_prefix = "" if first else prefix
-            available = max(8, limit - len(current_prefix))
+            available = max(8, limit - _display_width(current_prefix))
             cut = self._wrap_cut_index(remaining, available)
             chunk = remaining[:cut].rstrip()
+            if not chunk:
+                chunk = _clip_display(remaining, available).rstrip()
+                cut = max(1, len(chunk))
             result.append(current_prefix + chunk)
             remaining = remaining[cut:].lstrip()
             first = False
@@ -1390,14 +1401,24 @@ class CLI:
         return result
 
     def _wrap_cut_index(self, text: str, limit: int) -> int:
-        if len(text) <= limit:
+        if _display_width(text) <= limit:
             return len(text)
-        window = text[:limit + 1]
+        width = 0
+        end = 0
+        for index, char in enumerate(text):
+            char_width = 0 if unicodedata.combining(char) else (2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1)
+            if width + char_width > limit:
+                break
+            width += char_width
+            end = index + 1
+        window = text[:max(1, end)]
+        threshold = max(8, int(limit * 0.55))
         for pattern in (" ", "，", "。", "；", "、", ",", ";", "/"):
             index = window.rfind(pattern)
-            if index >= max(8, int(limit * 0.55)):
-                return index + (0 if pattern == " " else 1)
-        return limit
+            candidate = index + (0 if pattern == " " else 1)
+            if index >= 0 and _display_width(window[:candidate]) >= threshold:
+                return max(1, candidate)
+        return max(1, end)
 
     def _confirm_workspace_sandbox(self) -> None:
         if not sys.stdin.isatty() or os.getenv("ERLANGSHEN_SKIP_WORKSPACE_PROMPT"):
@@ -4874,6 +4895,33 @@ class CLI:
     def _ansi_selected_style(self) -> str:
         return "30;46"
 
+    def _should_stream_llm(self) -> bool:
+        return os.getenv("ERLANGSHEN_LLM_STREAM", "on").lower() not in {"0", "off", "false", "no"}
+
+    async def _complete_llm_response(
+        self,
+        client,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        if not self._should_stream_llm() or not hasattr(client, "stream_complete"):
+            return await client.complete(messages, temperature=temperature, max_tokens=max_tokens)
+        chunks: list[str] = []
+        received = 0
+        next_refresh = 120
+        self._show_progress("正在流式接收模型输出")
+        async for chunk in client.stream_complete(messages, temperature=temperature, max_tokens=max_tokens):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            received += len(chunk)
+            if received >= next_refresh:
+                self._refresh_token_status_bar(activity=f"流式接收 {received} 字")
+                next_refresh = received + 120
+        return "".join(chunks)
+
     async def client_side_advice(self, raw_query: str) -> str:
         parsed = self._parse_client_advice_input(raw_query)
         if isinstance(parsed, str):
@@ -5001,7 +5049,9 @@ class CLI:
 
         try:
             self._show_progress(f"正在用本机 {settings.display_name} 生成分析")
-            raw_text = await LLMClient(settings, timeout=float(config.request_timeout or 30)).complete(
+            llm_client = LLMClient(settings, timeout=float(config.request_timeout or 30))
+            raw_text = await self._complete_llm_response(
+                llm_client,
                 self._client_advice_messages(
                     query=query,
                     matches=matches,
@@ -5883,6 +5933,21 @@ class CLI:
             tool_selection_source = "client_default_by_intent"
             if not tool_selection_note:
                 tool_selection_note = "本机大模型未给出具体工具，客户端按 intent/data_recipes 补齐默认 MCP 工具，避免无事实数据分析。"
+        astock_tools = self._specific_astock_tools_from_query(query)
+        if astock_tools:
+            before = list(tools)
+            tools = self._dedupe_mcp_tools(astock_tools + tools)
+            needs_mcp = True
+            if tools != before:
+                tool_selection_source = (
+                    "client_astock_guardrail"
+                    if tool_selection_source in {"none", ""}
+                    else tool_selection_source
+                    if "client_astock_guardrail" in tool_selection_source
+                    else f"{tool_selection_source}+client_astock_guardrail"
+                )
+                note = "检测到具体 A 股标的，客户端强制追加 search_astocks、实时行情和历史行情，避免只按大盘概览回答。"
+                tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
         if self._is_vague_market_query(query):
             if not tools:
                 tools = self._default_market_overview_tools(query)
@@ -6520,6 +6585,21 @@ class CLI:
             return provided
         tools = intent_plan.get("mcp_tools") if isinstance(intent_plan, dict) else []
         tools = self._dedupe_mcp_tools(tools) if isinstance(tools, list) else []
+        astock_tools = self._specific_astock_tools_from_query(query)
+        if astock_tools:
+            before = list(tools)
+            tools = self._dedupe_mcp_tools(astock_tools + tools)
+            if isinstance(intent_plan, dict):
+                intent_plan["needs_mcp"] = True
+                intent_plan["mcp_tools"] = tools
+                if tools != before:
+                    source = self._text_field(intent_plan.get("tool_selection_source") or intent_plan.get("route_source") or "local_llm")
+                    intent_plan["tool_selection_source"] = (
+                        source if "client_astock_guardrail" in source else f"{source}+client_astock_guardrail"
+                    )
+                    note = "检测到具体 A 股标的，客户端强制追加 search_astocks、实时行情和历史行情，避免只按大盘概览回答。"
+                    previous = self._text_field(intent_plan.get("tool_selection_note"))
+                    intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
         if isinstance(intent_plan, dict) and tools:
             intent_plan["mcp_tools"] = tools
             intent_plan.setdefault("tool_selection_source", intent_plan.get("route_source") or "local_llm")
@@ -6658,7 +6738,7 @@ class CLI:
         }
         window = self._recent_market_window_args(days=120)
         for key, value in list(collected.items()):
-            if not str(key).startswith("search_astocks:") or self._mcp_value_has_error(value):
+            if not str(key).startswith(("search_astocks:", "web_search:")) or self._mcp_value_has_error(value):
                 continue
             for code in self._extract_astock_codes_from_value(value):
                 if code in existing_codes:
@@ -6681,7 +6761,7 @@ class CLI:
     def _extract_astock_codes_from_value(self, value) -> list[str]:
         codes: list[str] = []
         for row in self._flatten_mcp_dict_rows(value):
-            for key in ("code", "symbol", "ts_code", "ticker", "证券代码", "股票代码", "代码"):
+            for key in ("code", "symbol", "ts_code", "ticker", "证券代码", "股票代码", "代码", "title", "snippet", "summary", "content", "text", "name", "名称"):
                 raw = row.get(key)
                 text = self._text_field(raw)
                 match = re.search(r"(?<!\d)([036]\d{5})(?:\.[A-Z]{2})?(?!\d)", text, flags=re.I)
@@ -6703,7 +6783,7 @@ class CLI:
         if not isinstance(value, dict):
             return []
         rows = [value] if any(isinstance(item, (str, int, float)) for item in value.values()) else []
-        for key in ("latest", "data", "result", "payload", "body", "records", "items", "rows", "list", "values", "history", "prices", "content"):
+        for key in ("latest", "data", "result", "results", "payload", "body", "records", "items", "rows", "list", "values", "history", "prices", "content"):
             nested = value.get(key)
             if isinstance(nested, (dict, list)):
                 rows.extend(self._flatten_mcp_dict_rows(nested, depth + 1))
@@ -6877,18 +6957,23 @@ class CLI:
             keyword = code
         if not keyword:
             astock_context_words = (
-                "股票", "个股", "股价", "财报", "公司",
+                "股票", "个股", "股价", "财报", "公司", "分析", "表现", "走势", "今年", "年内", "涨跌",
             )
             if not any(word in compact for word in astock_context_words):
                 return []
             cleaned = re.sub(
-                r"(分析一下|帮我|看一下|看看|今天|昨日|昨天|最近|近期|的|表现|走势|股价|怎么样|如何|怎么走|A股|a股|股票|个股)",
+                r"(分析一下|帮我分析|帮我|分析|看一下|看看|今天|今日|昨日|昨天|今年|年内|最近|近期|的|表现|走势|股价|涨跌|怎么样|如何|怎么走|A股|a股|股票|个股)",
                 "",
                 text,
                 flags=re.I,
             ).strip(" ，。！？?;；")
-            generic_assets = {"资产", "市场", "行情", "大盘", "股市", "股票", "个股", "公司"}
-            if cleaned and 2 <= len(cleaned) <= 12 and cleaned not in generic_assets:
+            generic_assets = {"资产", "市场", "行情", "大盘", "股市", "股票", "个股", "公司", "黄金", "原油", "美元", "美元指数"}
+            if (
+                cleaned
+                and 2 <= len(cleaned) <= 12
+                and cleaned not in generic_assets
+                and not self._canonical_index_market_label(re.sub(r"\s+", "", cleaned.lower()))
+            ):
                 keyword = cleaned
         if not keyword:
             return []
@@ -6899,6 +6984,8 @@ class CLI:
                 {"name": "get_astock_realtime", "arguments": {"code": code}},
                 {"name": "get_astock_history", "arguments": {"code": code, **window}},
             ])
+        else:
+            tools.append({"name": "web_search", "arguments": {"query": f"{keyword} 股票代码 A股 最新", "count": 5}})
         return tools
 
     def _default_tools_for_intent(self, intent: str, query: str = "") -> list[dict]:
