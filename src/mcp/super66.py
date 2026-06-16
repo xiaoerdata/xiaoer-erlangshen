@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 import httpx
 
-from src.auth.session import format_bearer_token, load_auth_session
+from src.auth.session import decrypt_auth_password, format_bearer_token, load_auth_session
 
 
 class Super66MCP:
@@ -35,6 +35,7 @@ class Super66MCP:
         self._initialized = True
         self.base_url = os.environ.get("SUPER66_MCP_URL", "https://www.xiaoerdata.site/mcp").rstrip("/")
         self.api_base = os.environ.get("SUPER66_API_URL", "https://www.xiaoerdata.site/api/v1").rstrip("/")
+        self.login_entry = os.environ.get("SUPER66_LOGIN_ENTRY", "xwab").strip().lower() or "xwab"
         self.username = os.environ.get("SUPER66_USERNAME", "小二MCP助手")
         self.password = os.environ.get("SUPER66_PASSWORD", "")
         self.timeout = float(os.environ.get("SUPER66_TIMEOUT_SECONDS", "12"))
@@ -60,6 +61,43 @@ class Super66MCP:
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+
+    async def refresh_auth_from_cli_login(
+        self,
+        *,
+        login_entry: str = "",
+        account: str = "",
+        password: str = "",
+        token: str = "",
+    ) -> bool:
+        """Synchronize the MCP session immediately after CLI auth refreshes."""
+        if login_entry:
+            self.login_entry = str(login_entry).strip().lower() or self.login_entry
+        if account:
+            self.username = str(account).strip() or self.username
+        if password:
+            self.password = str(password)
+        if token:
+            self._token_value = str(token).strip()
+            self._token_expires_at = 0 if self.password else time.time() + 3600
+        self._cache.clear()
+        if not self.password:
+            return bool(self._token_value or token)
+        return bool(await self._ensure_token(force_refresh=True))
+
+    async def refresh_auth_from_saved_session(self) -> bool:
+        session = load_auth_session()
+        password = decrypt_auth_password(session)
+        account = str(session.get("account") or session.get("username") or "").strip()
+        token = str(session.get("token") or "").strip()
+        if not password and not token:
+            return False
+        return await self.refresh_auth_from_cli_login(
+            login_entry=str(session.get("loginEntry") or session.get("login_entry") or self.login_entry),
+            account=account,
+            password=password or "",
+            token=token,
+        )
 
     async def call_tool(
         self,
@@ -124,10 +162,17 @@ class Super66MCP:
     def list_registry_tools(self) -> list[dict[str, Any]]:
         return [
             {"name": "search_astocks", "description": "搜索 A股标的"},
+            {"name": "get_hot_stocks", "description": "获取 A股热门股票、成交额或涨跌幅榜"},
+            {"name": "batch_get_astock_realtime", "description": "批量获取 A股实时/最新行情"},
             {"name": "get_astock_realtime", "description": "获取 A股实时/最新行情"},
             {"name": "get_astock_history", "description": "获取 A股历史行情"},
+            {"name": "batch_get_index_data", "description": "批量获取 A股、港股、美股等指数历史和最新行情"},
             {"name": "get_index_data", "description": "获取 A股和港股宽基指数历史数据，如沪深300、恒生科技指数、恒生指数"},
+            {"name": "batch_get_global_asset_data", "description": "批量获取黄金、美元、原油等全球资产历史数据"},
             {"name": "get_global_asset_data", "description": "获取黄金、美元、原油等全球资产历史数据；港股指数走 get_index_data"},
+            {"name": "get_macro_data", "description": "获取宏观指标目录、最新值或时序数据"},
+            {"name": "get_macro_indicator", "description": "按名称获取宏观指标最新值"},
+            {"name": "list_macro_indicators", "description": "列出宏观指标目录"},
             {"name": "get_future_market_data", "description": "获取期货行情"},
             {"name": "search_products", "description": "搜索 ETF、公募、私募等产品"},
             {"name": "get_product_detail", "description": "获取产品详情"},
@@ -144,7 +189,7 @@ class Super66MCP:
                 return self._token_value
             try:
                 response = await self.client.post(
-                    f"{self.api_base}/auth/xwab/login",
+                    f"{self.api_base}/auth/{self.login_entry}/login",
                     json={"identifier": self.username, "password": self.password},
                     headers={"Accept": "application/json", "Content-Type": "application/json"},
                 )
@@ -163,7 +208,15 @@ class Super66MCP:
                         return self._token_value
             except httpx.RequestError:
                 return ""
-        saved = load_auth_session().get("token")
+        session = load_auth_session()
+        saved_password = decrypt_auth_password(session)
+        saved_account = str(session.get("account") or session.get("username") or "").strip()
+        if saved_password and saved_account:
+            self.login_entry = str(session.get("loginEntry") or session.get("login_entry") or self.login_entry).strip().lower() or self.login_entry
+            self.username = saved_account
+            self.password = saved_password
+            return await self._ensure_token(force_refresh=True)
+        saved = session.get("token")
         return str(saved).strip() if saved else ""
 
     def _cache_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -223,6 +276,11 @@ class Super66MCP:
                     args.pop(key, None)
                 args["index_name"] = canonical_label
                 normalized_tool = "dc66_get_index_data"
+        if normalized_name == "get_macro_indicator":
+            indicator = args.get("indicator") or args.get("indicatorName") or args.get("indicator_name") or args.get("keyword")
+            if indicator:
+                normalized_tool = "dc66_get_macro_data"
+                args = {"keyword": indicator, "latestOnly": True, "limit": args.get("limit", 20)}
         normalized_arguments = self._normalize_tool_arguments(normalized_tool, args)
         return normalized_tool, normalized_arguments
 
@@ -235,7 +293,27 @@ class Super66MCP:
         }
         aliases = {
             "get_index_data": {"index_name": "indexName", "index_code": "indexName", "indexCode": "indexName"},
+            "batch_get_index_data": {"index_names": "indexNames", "index_name": "indexNames", "indices": "indexNames", "names": "indexNames"},
             "get_global_asset_data": {"asset_name": "assetName", "asset_code": "assetCode", "assetCode": "assetCode", "source_table": "sourceTable"},
+            "batch_get_global_asset_data": {"asset_names": "assetNames", "asset_name": "assetNames", "assets": "assetNames", "names": "assetNames"},
+            "batch_get_astock_realtime": {"stock_codes": "codes", "stockCodes": "codes", "code": "codes"},
+            "get_astock_realtime_batch": {"stock_codes": "codes", "stockCodes": "codes", "code": "codes"},
+            "get_macro_data": {
+                "indicator_codes": "indicatorCodes",
+                "indicatorCodes": "indicatorCodes",
+                "indicator_names": "keyword",
+                "indicatorNames": "keyword",
+                "latest_only": "latestOnly",
+                "latestOnly": "latestOnly",
+            },
+            "batch_get_macro_data": {
+                "indicator_codes": "indicatorCodes",
+                "indicatorCodes": "indicatorCodes",
+                "indicator_keywords": "indicatorKeywords",
+                "indicatorNames": "indicatorKeywords",
+                "latest_only": "latestOnly",
+                "latestOnly": "latestOnly",
+            },
             "get_future_market_data": {"contract_code": "contractCode", "contract_type": "contractType"},
             "search_products": {"product_type": "productType"},
             "get_product_detail": {"product_id": "productId", "product_type": "productType"},
@@ -247,6 +325,13 @@ class Super66MCP:
         for old, new in aliases.get(normalized_name, {}).items():
             if old in args and new not in args:
                 args[new] = args.pop(old)
+        for key in ("indexNames", "assetNames", "codes", "indicatorCodes", "indicatorKeywords"):
+            if isinstance(args.get(key), str):
+                args[key] = [
+                    item.strip()
+                    for item in re.split(r"[,，、/|;\s]+", args[key])
+                    if item.strip()
+                ]
         return args
 
     def _parse_payload(self, response: httpx.Response) -> Any:

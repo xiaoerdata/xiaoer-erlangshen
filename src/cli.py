@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from src import __version__
-from src.auth.session import load_auth_session, save_auth_session
+from src.auth.session import decrypt_auth_password, encrypt_auth_password, load_auth_session, save_auth_session
 from src.client.local_memory import LocalMemoryStore
 from src.config import get_config, get_config_path, update_config
 from src.model_presets import MODEL_PRESETS, get_provider_preset, normalize_provider
@@ -680,8 +680,14 @@ class CLI:
     async def _ensure_fresh_auth_session_interactive(self, *, reason: str = "startup") -> bool:
         session = load_auth_session()
         token = self._text_field(session.get("token"))
+        if decrypt_auth_password(session) and self._auth_account(session):
+            if await self._refresh_auth_from_saved_password(session, reason=reason, invalidate_on_failure=False):
+                return True
         if not token:
-            return await self._refresh_auth_from_env(session, reason=reason)
+            return (
+                await self._refresh_auth_from_env(session, reason=reason)
+                or await self._refresh_auth_from_saved_password(session, reason=reason)
+            )
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return False
         base_url = self._text_field(session.get("base_url")) or get_config().erlangshen_api_base_url
@@ -701,6 +707,8 @@ class CLI:
 
     async def _refresh_auth_after_unauthorized(self, session: dict, *, reason: str = "server_mapping") -> bool:
         if await self._refresh_auth_from_env(session, reason=reason):
+            return True
+        if await self._refresh_auth_from_saved_password(session, reason=reason):
             return True
 
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -746,6 +754,31 @@ class CLI:
             return False
         return await self._login_and_save_auth_session(base_url, login_entry, account, password, session, silent=True)
 
+    async def _refresh_auth_from_saved_password(
+        self,
+        session: dict,
+        *,
+        reason: str = "server_mapping",
+        invalidate_on_failure: bool = True,
+    ) -> bool:
+        password = decrypt_auth_password(session)
+        if not password:
+            return False
+        base_url = self._text_field(session.get("base_url")) or get_config().erlangshen_api_base_url
+        login_entry = self._auth_login_entry(session)
+        account = self._auth_account(session)
+        if not account:
+            return False
+        return await self._login_and_save_auth_session(
+            base_url,
+            login_entry,
+            account,
+            password,
+            session,
+            silent=True,
+            invalidate_on_failure=invalidate_on_failure,
+        )
+
     async def _login_and_save_auth_session(
         self,
         base_url: str,
@@ -755,34 +788,59 @@ class CLI:
         previous_session: dict,
         *,
         silent: bool,
+        invalidate_on_failure: bool = True,
     ) -> bool:
         try:
             from src.client.server_client import ErlangshenAPIError, ErlangshenServerClient
 
             result = await ErlangshenServerClient(base_url=base_url, timeout=20).login(login_entry, account, password)
         except ErlangshenAPIError as exc:
-            self._mark_auth_session_invalid(previous_session, f"login_failed_{exc.status_code}")
+            if invalidate_on_failure:
+                self._mark_auth_session_invalid(previous_session, f"login_failed_{exc.status_code}")
             print(_color(f"自动登录失败 ({exc.status_code}): {exc}", "31"))
             return False
         token = result.get("token") if isinstance(result, dict) else None
         if not token:
-            self._mark_auth_session_invalid(previous_session, "login_missing_token")
+            if invalidate_on_failure:
+                self._mark_auth_session_invalid(previous_session, "login_missing_token")
             print(_color("自动登录失败: 服务端未返回 token。", "31"))
             return False
         save_auth_session({
             "base_url": base_url,
             "token": token,
             "account": account,
+            "password_encrypted": encrypt_auth_password(password),
             "loginEntry": result.get("loginEntry") or login_entry,
             "expires": result.get("expires"),
             "user": self._safe_auth_user(result.get("user") or {}),
         })
+        mcp_refreshed = await self._refresh_super66_after_login(
+            login_entry=result.get("loginEntry") or login_entry,
+            account=account,
+            password=password,
+            token=token,
+        )
         if silent:
             if sys.stdout.isatty():
-                print(_color("登录态已通过 MCP 环境凭证静默刷新。", "32"))
+                suffix = "，super-66 MCP 已同步重登" if mcp_refreshed else ""
+                print(_color(f"登录态已静默刷新{suffix}。", "32"))
         else:
-            print(_color("登录态已刷新，super-66 MCP 和服务端映射将复用新 token。", "32"))
+            suffix = "，super-66 MCP 已同步重登" if mcp_refreshed else ""
+            print(_color(f"登录态已刷新{suffix}，服务端映射将复用新 token。", "32"))
         return True
+
+    async def _refresh_super66_after_login(self, *, login_entry: str, account: str, password: str, token: str) -> bool:
+        try:
+            from src.mcp.super66 import Super66MCP
+
+            return await Super66MCP().refresh_auth_from_cli_login(
+                login_entry=login_entry,
+                account=account,
+                password=password,
+                token=token,
+            )
+        except Exception:
+            return False
 
     def _auth_login_entry(self, session: dict) -> str:
         user = session.get("user") if isinstance(session.get("user"), dict) else {}
@@ -5954,10 +6012,19 @@ class CLI:
     def _allowed_super66_tools(self) -> set[str]:
         base_tools = {
             "search_astocks",
+            "get_hot_stocks",
+            "batch_get_astock_realtime",
+            "get_astock_realtime_batch",
             "get_astock_realtime",
             "get_astock_history",
+            "batch_get_index_data",
             "get_index_data",
+            "batch_get_global_asset_data",
             "get_global_asset_data",
+            "batch_get_macro_data",
+            "get_macro_data",
+            "get_macro_indicator",
+            "list_macro_indicators",
             "get_future_market_data",
             "search_products",
             "get_product_detail",
@@ -6286,10 +6353,15 @@ class CLI:
             return normalized
         return [
             {"name": "search_astocks", "description": "搜索 A股标的"},
+            {"name": "get_hot_stocks", "description": "获取 A股热门股票、成交额或涨跌幅榜"},
+            {"name": "batch_get_astock_realtime", "description": "批量获取 A股实时/最新行情"},
             {"name": "get_astock_realtime", "description": "获取 A股实时/最新行情"},
             {"name": "get_astock_history", "description": "获取 A股历史行情"},
+            {"name": "batch_get_index_data", "description": "批量获取 A股、港股、美股等指数历史和最新行情"},
             {"name": "get_index_data", "description": "获取 A股和港股宽基指数历史数据，如沪深300、恒生科技指数、恒生指数"},
+            {"name": "batch_get_global_asset_data", "description": "批量获取黄金、美元、原油等全球资产历史数据"},
             {"name": "get_global_asset_data", "description": "获取黄金、美元、原油等全球资产历史数据；港股指数走 get_index_data"},
+            {"name": "get_macro_data", "description": "获取宏观指标目录、最新值或时序数据"},
             {"name": "get_future_market_data", "description": "获取期货行情"},
             {"name": "search_products", "description": "搜索 ETF、公募、私募等产品"},
             {"name": "get_product_detail", "description": "获取产品详情"},
@@ -6393,13 +6465,74 @@ class CLI:
                 elif mcp is None:
                     collected[f"{key}:error"] = mcp_init_error or "super-66 MCP 未初始化"
                 else:
-                    collected[key] = await mcp.call_tool(name, arguments, use_cache=True)
+                    result = await mcp.call_tool(name, arguments, use_cache=True)
+                    if self._mcp_value_has_error(result) and self._batch_tool_fallback_tools(name, arguments):
+                        collected[f"{key}:error"] = result
+                        await self._collect_batch_fallback_data(collected, name, arguments, mcp)
+                    else:
+                        collected[key] = result
             except Exception as exc:
                 collected[f"{key}:error"] = self._sanitize_api_key_error(exc, "")
         await self._collect_astock_followup_data(collected, tools, mcp)
         if not collected:
             collected["note"] = "super-66 MCP / 本地网页线索暂不可用，本次仅使用用户问题和服务端场景映射。"
         return collected
+
+    async def _collect_batch_fallback_data(self, collected: dict, name: str, arguments: dict, mcp) -> None:
+        if mcp is None:
+            return
+        for fallback in self._batch_tool_fallback_tools(name, arguments):
+            fallback_name = fallback.get("name")
+            fallback_args = fallback.get("arguments") if isinstance(fallback.get("arguments"), dict) else {}
+            result_key = self._mcp_result_key(fallback_name, fallback_args, len(collected))
+            if result_key in collected:
+                continue
+            self._show_progress(f"批量接口未命中，回退读取: {self._mcp_tool_label(fallback_name, fallback_args)}")
+            try:
+                collected[result_key] = await mcp.call_tool(fallback_name, fallback_args, use_cache=True)
+            except Exception as exc:
+                collected[f"{result_key}:error"] = self._sanitize_api_key_error(exc, "")
+
+    def _batch_tool_fallback_tools(self, name: str, arguments: dict) -> list[dict]:
+        args = arguments if isinstance(arguments, dict) else {}
+        window = {
+            key: args[key]
+            for key in ("startDate", "endDate", "start_date", "end_date")
+            if key in args
+        }
+        if name == "batch_get_index_data":
+            labels = self._coerce_label_list(
+                args.get("index_names") or args.get("indexNames") or args.get("indices") or args.get("names")
+            )
+            return [{"name": "get_index_data", "arguments": {"index_name": label, **window}} for label in labels[:8]]
+        if name == "batch_get_global_asset_data":
+            labels = self._coerce_label_list(
+                args.get("asset_names") or args.get("assetNames") or args.get("assets") or args.get("names")
+            )
+            return [{"name": "get_global_asset_data", "arguments": {"asset_name": label, **window}} for label in labels[:6]]
+        if name in {"batch_get_astock_realtime", "get_astock_realtime_batch"}:
+            codes = self._coerce_label_list(args.get("codes") or args.get("stock_codes") or args.get("stockCodes"))
+            return [{"name": "get_astock_realtime", "arguments": {"code": code}} for code in codes[:12]]
+        if name in {"batch_get_macro_data", "get_macro_data", "get_macro_indicator", "list_macro_indicators"}:
+            query = self._text_field(args.get("keyword")) or "中国 宏观 PMI CPI PPI LPR 社融 M2 汇率 利率 最新"
+            return [{"name": "web_search", "arguments": {"query": query, "count": 5}}]
+        if name == "get_hot_stocks":
+            return [{"name": "web_search", "arguments": {"query": "A股 今日 热门股票 涨幅榜 成交额 主线 板块", "count": 5}}]
+        return []
+
+    def _coerce_label_list(self, value) -> list[str]:
+        if isinstance(value, list):
+            items = value
+        elif isinstance(value, str):
+            items = re.split(r"[,，、/|;\s]+", value)
+        else:
+            items = []
+        result: list[str] = []
+        for item in items:
+            text = self._text_field(item)
+            if text and text not in result:
+                result.append(text)
+        return result
 
     async def _collect_astock_followup_data(self, collected: dict, tools: list[dict], mcp) -> None:
         if not isinstance(collected, dict) or mcp is None:
@@ -6476,17 +6609,34 @@ class CLI:
         search_query = self._market_overview_search_query(query)
         macro_query = self._market_overview_macro_search_query(query)
         window = self._recent_market_window_args(days=120)
+        hot_query = self._market_hot_stock_search_query(query)
         return [
-            {"name": "get_index_data", "arguments": {"index_name": "沪深300", **window}},
-            {"name": "get_index_data", "arguments": {"index_name": "上证指数", **window}},
-            {"name": "get_index_data", "arguments": {"index_name": "创业板指", **window}},
-            {"name": "get_index_data", "arguments": {"index_name": "恒生科技指数", **window}},
-            {"name": "get_index_data", "arguments": {"index_name": "恒生指数", **window}},
-            {"name": "get_global_asset_data", "arguments": {"asset_name": "黄金", **window}},
-            {"name": "get_global_asset_data", "arguments": {"asset_name": "美元指数", **window}},
-            {"name": "get_global_asset_data", "arguments": {"asset_name": "原油", **window}},
+            {
+                "name": "batch_get_index_data",
+                "arguments": {
+                    "index_names": ["沪深300", "上证指数", "创业板指", "科创50", "中证1000", "恒生科技指数", "恒生指数"],
+                    **window,
+                },
+            },
+            {
+                "name": "batch_get_global_asset_data",
+                "arguments": {"asset_names": ["黄金", "美元指数", "原油"], **window},
+            },
+            {
+                "name": "get_macro_data",
+                "arguments": {
+                    "keyword": "PMI CPI PPI LPR 社融 M2 汇率 利率 流动性",
+                    "latest_only": True,
+                    "limit": 80,
+                },
+            },
+            {
+                "name": "get_hot_stocks",
+                "arguments": {"market": "A股", "rank_by": "amount", "limit": 12},
+            },
             {"name": "web_search", "arguments": {"query": search_query, "count": 5}},
             {"name": "web_search", "arguments": {"query": macro_query, "count": 5}},
+            {"name": "web_search", "arguments": {"query": hot_query, "count": 5}},
         ]
 
     def _recent_market_window_args(self, days: int = 45) -> dict:
@@ -6511,6 +6661,13 @@ class CLI:
         if "最近" in text or "近期" in text:
             date_hint = "近期"
         return f"中国 {date_hint} 宏观 数据 PMI CPI 利率 汇率 流动性 政策"
+
+    def _market_hot_stock_search_query(self, query: str = "") -> str:
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        date_hint = "昨日" if ("昨天" in text or "昨日" in text) else "今日"
+        if "最近" in text or "近期" in text:
+            date_hint = "近期"
+        return f"A股 {date_hint} 热门股票 涨幅榜 成交额 主线 板块"
 
     def _is_event_market_query(self, query: str) -> bool:
         text = re.sub(r"\s+", "", self._text_field(query).lower())
@@ -6684,12 +6841,22 @@ class CLI:
         label = self._text_field(label)
         if name == "get_index_data":
             return {"index_name": label}
+        if name == "batch_get_index_data":
+            return {"index_names": [item for item in label.split(",") if item]}
         if name == "get_global_asset_data":
             return {"asset_name": label}
+        if name == "batch_get_global_asset_data":
+            return {"asset_names": [item for item in label.split(",") if item]}
         if name == "web_search":
             return {"query": label}
         if name == "get_astock_realtime":
             return {"code": label}
+        if name in {"batch_get_astock_realtime", "get_astock_realtime_batch"}:
+            return {"codes": [item for item in label.split(",") if item]}
+        if name in {"get_macro_data", "get_macro_indicator", "batch_get_macro_data", "list_macro_indicators"}:
+            return {"keyword": label}
+        if name == "get_hot_stocks":
+            return {"market": "A股", "rank_by": label or "amount", "limit": 12}
         if name in {"search_astocks", "search_products"}:
             return {"keyword": label}
         if name in {"get_product_detail", "get_product_history"}:
@@ -6767,11 +6934,55 @@ class CLI:
                 "index_code": "index_name",
                 "indexCode": "index_name",
             },
+            "batch_get_index_data": {
+                "indexNames": "index_names",
+                "indices": "index_names",
+                "names": "index_names",
+                "index_name": "index_names",
+                "indexName": "index_names",
+            },
             "get_global_asset_data": {
                 "assetName": "asset_name",
                 "asset_code": "asset_code",
                 "assetCode": "asset_code",
                 "sourceTable": "source_table",
+            },
+            "batch_get_global_asset_data": {
+                "assetNames": "asset_names",
+                "assets": "asset_names",
+                "names": "asset_names",
+                "asset_name": "asset_names",
+                "assetName": "asset_names",
+            },
+            "batch_get_astock_realtime": {
+                "stockCodes": "codes",
+                "stock_codes": "codes",
+                "code": "codes",
+            },
+            "get_astock_realtime_batch": {
+                "stockCodes": "codes",
+                "stock_codes": "codes",
+                "code": "codes",
+            },
+            "get_macro_data": {
+                "indicatorCodes": "indicator_codes",
+                "indicator_names": "keyword",
+                "indicatorNames": "keyword",
+                "latestOnly": "latest_only",
+                "startDate": "start_date",
+                "endDate": "end_date",
+            },
+            "batch_get_macro_data": {
+                "indicatorCodes": "indicator_codes",
+                "indicator_names": "indicator_keywords",
+                "indicatorNames": "indicator_keywords",
+                "latestOnly": "latest_only",
+                "startDate": "start_date",
+                "endDate": "end_date",
+            },
+            "get_macro_indicator": {
+                "indicatorName": "keyword",
+                "indicator_name": "keyword",
             },
             "get_future_market_data": {
                 "contractCode": "contract_code",
@@ -7115,12 +7326,77 @@ class CLI:
             value = mcp_data.get(key)
             if self._mcp_value_has_error(value) or "error" in key_text.lower():
                 continue
-            highlights = self._extract_mcp_highlights(value)
+            highlights = self._extract_mcp_key_highlights(key_text, value)
             if highlights:
                 lines.append(f"{key_text}: " + "，".join(highlights[:5]))
             else:
                 lines.append(f"{key_text}: 已返回数据")
         return lines
+
+    def _extract_mcp_key_highlights(self, key_text: str, value) -> list[str]:
+        if key_text.startswith(("batch_get_", "get_hot_stocks:", "get_macro_data:", "batch_get_macro_data:")):
+            row_highlights = self._extract_mcp_row_highlights(value)
+            if row_highlights:
+                return row_highlights
+        return self._extract_mcp_highlights(value)
+
+    def _extract_mcp_row_highlights(self, value, limit: int = 6) -> list[str]:
+        rows = self._flatten_mcp_dict_rows(value)
+        if not rows:
+            return []
+        highlights: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            label = (
+                self._text_field(row.get("name"))
+                or self._text_field(row.get("index_name"))
+                or self._text_field(row.get("asset_name"))
+                or self._text_field(row.get("product_name"))
+                or self._text_field(row.get("security_name"))
+                or self._text_field(row.get("symbol_name"))
+                or self._text_field(row.get("code"))
+                or self._text_field(row.get("指标名称"))
+                or self._text_field(row.get("名称"))
+                or self._text_field(row.get("代码"))
+            )
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            parts = [label[:18]]
+            for title, aliases in (
+                ("日期", ("date", "trade_date", "日期", "交易日期", "period", "报告期")),
+                ("最新", ("price", "latest", "close", "close_price", "value", "指标值", "收盘", "最新价", "现价")),
+                ("涨跌幅", ("change_pct", "pct_chg", "change_percent", "涨跌幅", "涨幅", "日涨跌幅")),
+                ("成交额", ("amount", "turnover", "turnover_amount", "成交额")),
+            ):
+                for alias in aliases:
+                    if alias in row and self._is_safe_mcp_scalar(alias, row.get(alias)):
+                        parts.append(f"{title} {self._format_mcp_scalar(row.get(alias))}")
+                        break
+            highlights.append(" ".join(parts))
+            if len(highlights) >= limit:
+                break
+        return highlights
+
+    def _snapshot_markdown_table(self, snapshot_lines, limit: int = 6) -> list[str]:
+        if not isinstance(snapshot_lines, list) or not snapshot_lines:
+            return []
+        rows = []
+        for item in snapshot_lines[:limit]:
+            text = self._text_field(item)
+            if not text:
+                continue
+            source, _, detail = text.partition(": ")
+            source = self._truncate_context_text(source, 32).replace("|", "/")
+            detail = self._truncate_context_text(detail or text, 96).replace("|", "/")
+            rows.append((source, detail))
+        if not rows:
+            return []
+        return [
+            "| 数据源 | 摘要 |",
+            "| --- | --- |",
+            *[f"| {source} | {detail} |" for source, detail in rows],
+        ]
 
     def _resource_links_from_value(self, value, fallback_label: str = "资源", limit: int = 8) -> list[str]:
         if isinstance(value, str):
@@ -7392,9 +7668,14 @@ class CLI:
     def _mcp_result_key(self, name: str, arguments: dict, index: int) -> str:
         label = (
             arguments.get("index_name")
+            or ",".join(self._coerce_label_list(arguments.get("index_names") or arguments.get("indexNames"))[:4])
             or arguments.get("asset_name")
+            or ",".join(self._coerce_label_list(arguments.get("asset_names") or arguments.get("assetNames"))[:4])
             or arguments.get("code")
+            or ",".join(self._coerce_label_list(arguments.get("codes"))[:4])
             or arguments.get("keyword")
+            or arguments.get("rank_by")
+            or arguments.get("market")
             or arguments.get("contract_code")
             or arguments.get("query")
             or str(index + 1)
@@ -7405,9 +7686,14 @@ class CLI:
     def _mcp_tool_label(self, name: str, arguments: dict) -> str:
         label = (
             arguments.get("index_name")
+            or ",".join(self._coerce_label_list(arguments.get("index_names") or arguments.get("indexNames"))[:4])
             or arguments.get("asset_name")
+            or ",".join(self._coerce_label_list(arguments.get("asset_names") or arguments.get("assetNames"))[:4])
             or arguments.get("code")
+            or ",".join(self._coerce_label_list(arguments.get("codes"))[:4])
             or arguments.get("keyword")
+            or arguments.get("rank_by")
+            or arguments.get("market")
             or arguments.get("contract_code")
             or arguments.get("product_id")
             or arguments.get("query")
@@ -7731,6 +8017,9 @@ class CLI:
         if source_line:
             lines.extend(["", source_line])
         snapshot_lines = data_inputs.get("mcp_snapshot") if isinstance(data_inputs, dict) else []
+        snapshot_table = self._snapshot_markdown_table(snapshot_lines)
+        if snapshot_table and self._is_vague_market_query(query):
+            lines.extend(["", "数据快照：", *snapshot_table])
         mcp_links = data_inputs.get("mcp_links") if isinstance(data_inputs, dict) else []
         if not isinstance(mcp_links, list):
             mcp_links = []
@@ -8017,19 +8306,25 @@ class CLI:
         error_keys = [key for key in keys if "error" in str(key).lower()]
         usable = [str(key) for key in keys if key not in error_keys and str(key) != "note"]
         if usable:
-            index_count = sum(1 for key in usable if key.startswith("get_index_data:"))
+            index_count = sum(1 for key in usable if key.startswith(("get_index_data:", "batch_get_index_data:")))
             asset_count = sum(
                 1
                 for key in usable
-                if key.startswith("get_global_asset_data:") or key.startswith("get_future_market_data:")
+                if key.startswith(("get_global_asset_data:", "batch_get_global_asset_data:", "get_future_market_data:"))
             )
+            macro_count = sum(1 for key in usable if key.startswith(("get_macro_data:", "batch_get_macro_data:", "get_macro_indicator:", "list_macro_indicators:")))
+            hot_count = sum(1 for key in usable if key.startswith(("get_hot_stocks:", "batch_get_astock_realtime:", "get_astock_realtime_batch:")))
             web_count = sum(1 for key in usable if key.startswith("web_search:"))
-            other_count = max(0, len(usable) - index_count - asset_count - web_count)
+            other_count = max(0, len(usable) - index_count - asset_count - macro_count - hot_count - web_count)
             dimensions = []
             if index_count:
                 dimensions.append(f"指数 {index_count}")
             if asset_count:
                 dimensions.append(f"跨资产 {asset_count}")
+            if macro_count:
+                dimensions.append(f"宏观 {macro_count}")
+            if hot_count:
+                dimensions.append(f"热门股票 {hot_count}")
             if web_count:
                 dimensions.append(f"事件/宏观线索 {web_count}")
             if other_count:
@@ -8058,20 +8353,18 @@ class CLI:
             return []
         points = []
         for raw_label, raw_value in data.items():
-            label = self._text_field(raw_label)[:18] or "未命名"
+            label = self._text_field(raw_label)[:24] or "未命名"
             value = self._numeric_chart_value(raw_value)
             if value is None:
                 continue
             points.append((label, value))
         if not points:
             return []
-        max_abs = max(abs(value) for _, value in points) or 1.0
-        rows = []
-        for label, value in points[:6]:
-            bar_len = max(1, int(round(abs(value) / max_abs * 18)))
-            bar = "█" * bar_len
+        rows = ["| 项目 | 数值 | 方向 |", "| --- | ---: | --- |"]
+        for label, value in points[:8]:
             sign = "+" if value > 0 else ""
-            rows.append(f"{label:<18} {sign}{value:.4g} | {bar}")
+            direction = "上行" if value > 0 else "下行" if value < 0 else "持平"
+            rows.append(f"| {label.replace('|', '/')} | {sign}{value:.4g} | {direction} |")
         return rows
 
     def _numeric_chart_value(self, value) -> float | None:

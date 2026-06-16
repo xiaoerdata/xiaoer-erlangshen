@@ -4,8 +4,9 @@ import pytest
 from pathlib import Path
 
 from src import __version__
-from src.auth.session import save_auth_session
+from src.auth.session import decrypt_auth_password, encrypt_auth_password, save_auth_session
 from src.cli import CLI, _display_width, _extract_startup_workspace_args, _json_cli_envelope, _logo, _panel, _strict_exit_code, _text_panel, main
+from src.commands.auth import AuthCommand
 from src.commands.server import ServerCommand
 from src.client.server_client import _normalize_login_payload
 from src.client.chrome_search import build_search_url, _is_noise_search_result
@@ -2035,11 +2036,168 @@ async def test_auth_refresh_uses_env_password_without_prompt(monkeypatch, tmp_pa
             }
 
     monkeypatch.setattr("src.client.server_client.ErlangshenServerClient", FakeServerClient)
+    mcp_refreshes = []
+
+    class FakeSuper66MCP:
+        async def refresh_auth_from_cli_login(self, **kwargs):
+            mcp_refreshes.append(kwargs)
+            return True
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
 
     assert await CLI()._refresh_auth_after_unauthorized(session, reason="startup") is True
     saved = json.loads((tmp_path / "auth.json").read_text(encoding="utf-8"))
     assert saved["token"] == "fresh-token"
     assert saved["account"] == "小二MCP助手"
+    assert mcp_refreshes == [{
+        "login_entry": "xwab",
+        "account": "小二MCP助手",
+        "password": "secret",
+        "token": "fresh-token",
+    }]
+    reset_config()
+
+
+def test_auth_session_encrypts_password_without_plaintext(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("ERLANGSHEN_AUTH_KEY_FILE", str(tmp_path / "auth.key"))
+    encrypted = encrypt_auth_password("secret-password")
+
+    save_auth_session({
+        "token": "token",
+        "account": "user@example.com",
+        "password": "secret-password",
+        "password_encrypted": encrypted,
+    })
+
+    raw = (tmp_path / "auth.json").read_text(encoding="utf-8")
+    assert "secret-password" not in raw
+    saved = json.loads(raw)
+    assert saved["password_encrypted"]["ciphertext"]
+    assert decrypt_auth_password(saved) == "secret-password"
+
+
+@pytest.mark.asyncio
+async def test_auth_refresh_uses_saved_encrypted_password(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("ERLANGSHEN_AUTH_KEY_FILE", str(tmp_path / "auth.key"))
+    reset_config()
+    session = {
+        "base_url": "https://example.test/api/erlangshen",
+        "token": "old-token",
+        "account": "user@example.com",
+        "loginEntry": "xwab",
+        "password_encrypted": encrypt_auth_password("saved-secret"),
+    }
+    save_auth_session(session)
+
+    class FakeServerClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def login(self, login_entry, account, password):
+            assert login_entry == "xwab"
+            assert account == "user@example.com"
+            assert password == "saved-secret"
+            return {"token": "fresh-token", "loginEntry": "xwab", "user": {"email": account}}
+
+    monkeypatch.delenv("SUPER66_PASSWORD", raising=False)
+    monkeypatch.delenv("ERLANGSHEN_AUTH_PASSWORD", raising=False)
+    monkeypatch.setattr("src.client.server_client.ErlangshenServerClient", FakeServerClient)
+    mcp_refreshes = []
+
+    class FakeSuper66MCP:
+        async def refresh_auth_from_cli_login(self, **kwargs):
+            mcp_refreshes.append(kwargs)
+            return True
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    assert await CLI()._refresh_auth_after_unauthorized(session, reason="startup") is True
+    saved = json.loads((tmp_path / "auth.json").read_text(encoding="utf-8"))
+    assert saved["token"] == "fresh-token"
+    assert "saved-secret" not in json.dumps(saved, ensure_ascii=False)
+    assert decrypt_auth_password(saved) == "saved-secret"
+    assert mcp_refreshes == [{
+        "login_entry": "xwab",
+        "account": "user@example.com",
+        "password": "saved-secret",
+        "token": "fresh-token",
+    }]
+    reset_config()
+
+
+@pytest.mark.asyncio
+async def test_startup_refreshes_saved_password_before_token_reuse(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("ERLANGSHEN_AUTH_KEY_FILE", str(tmp_path / "auth.key"))
+    reset_config()
+    save_auth_session({
+        "base_url": "https://example.test/api/erlangshen",
+        "token": "old-token",
+        "account": "user@example.com",
+        "loginEntry": "xwab",
+        "password_encrypted": encrypt_auth_password("saved-secret"),
+    })
+
+    class FakeServerClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def login(self, login_entry, account, password):
+            return {"token": "startup-token", "loginEntry": login_entry, "user": {"email": account}}
+
+    class FakeSuper66MCP:
+        async def refresh_auth_from_cli_login(self, **kwargs):
+            return True
+
+    monkeypatch.setattr("src.client.server_client.ErlangshenServerClient", FakeServerClient)
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    assert await CLI()._ensure_fresh_auth_session_interactive(reason="startup") is True
+    saved = json.loads((tmp_path / "auth.json").read_text(encoding="utf-8"))
+    assert saved["token"] == "startup-token"
+    reset_config()
+
+
+@pytest.mark.asyncio
+async def test_auth_command_login_syncs_super66_mcp(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("ERLANGSHEN_AUTH_KEY_FILE", str(tmp_path / "auth.key"))
+    reset_config()
+    mcp_refreshes = []
+
+    class FakeServerClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def login(self, login_entry, account, password):
+            return {"token": "login-token", "loginEntry": login_entry, "user": {"email": account}}
+
+    class FakeSuper66MCP:
+        async def refresh_auth_from_cli_login(self, **kwargs):
+            mcp_refreshes.append(kwargs)
+            return True
+
+    monkeypatch.setattr("src.commands.auth.ErlangshenServerClient", FakeServerClient)
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    result = await AuthCommand(None, None)._login("xwab user@example.com saved-secret")
+
+    assert "登录成功" in result
+    assert "super-66 MCP: 已同步重登" in result
+    assert mcp_refreshes == [{
+        "login_entry": "xwab",
+        "account": "user@example.com",
+        "password": "saved-secret",
+        "token": "login-token",
+    }]
+    saved = json.loads((tmp_path / "auth.json").read_text(encoding="utf-8"))
+    assert saved["token"] == "login-token"
+    assert "saved-secret" not in json.dumps(saved, ensure_ascii=False)
     reset_config()
 
 
@@ -2535,6 +2693,69 @@ def test_interactive_turn_visually_separates_question_and_answer():
     assert "先看主线。" in output
 
 
+def test_market_overview_defaults_use_batch_macro_and_hot_stock_tools():
+    tools = CLI()._default_market_overview_tools("分析昨天")
+    names = [item["name"] for item in tools]
+
+    assert names[:4] == [
+        "batch_get_index_data",
+        "batch_get_global_asset_data",
+        "get_macro_data",
+        "get_hot_stocks",
+    ]
+    assert tools[0]["arguments"]["index_names"][:3] == ["沪深300", "上证指数", "创业板指"]
+    assert "黄金" in tools[1]["arguments"]["asset_names"]
+    assert "PMI" in tools[2]["arguments"]["keyword"]
+    assert any(item["name"] == "web_search" and "热门股票" in item["arguments"]["query"] for item in tools)
+
+
+@pytest.mark.asyncio
+async def test_collect_client_mcp_data_falls_back_when_batch_tool_fails(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments or {}))
+            if tool_name == "batch_get_index_data":
+                return {"error": "unknown tool"}
+            return {"tool": tool_name, "arguments": arguments}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    intent_plan = {
+        "needs_mcp": True,
+        "mcp_tools": [
+            {
+                "name": "batch_get_index_data",
+                "arguments": {"index_names": ["沪深300", "创业板指"], "startDate": "2026-01-01", "endDate": "2026-06-16"},
+            }
+        ],
+    }
+    collected = await CLI()._collect_client_mcp_data("今天市场怎么样", {}, intent_plan)
+
+    assert calls[0][0] == "batch_get_index_data"
+    assert ("get_index_data", {"index_name": "沪深300", "startDate": "2026-01-01", "endDate": "2026-06-16"}) in calls
+    assert ("get_index_data", {"index_name": "创业板指", "startDate": "2026-01-01", "endDate": "2026-06-16"}) in calls
+    assert "batch_get_index_data:沪深300,创业板指:error" in collected
+    assert "get_index_data:沪深300" in collected
+    assert "get_index_data:创业板指" in collected
+
+
+def test_mcp_snapshot_lines_expand_batch_rows_to_readable_summary():
+    lines = CLI()._mcp_snapshot_lines({
+        "batch_get_index_data:市场宽基": {
+            "rows": [
+                {"index_name": "沪深300", "date": "2026-06-16", "close": 4100, "change_pct": 1.2},
+                {"index_name": "创业板指", "date": "2026-06-16", "close": 2200, "change_pct": -0.5},
+            ]
+        }
+    })
+
+    assert "沪深300" in lines[0]
+    assert "创业板指" in lines[0]
+    assert "涨跌幅 1.2" in lines[0]
+
+
 def test_chart_terminal_preview_formats_numeric_chart_data():
     preview = CLI()._chart_terminal_preview({
         "沪深300": "1.20%",
@@ -2542,11 +2763,9 @@ def test_chart_terminal_preview_formats_numeric_chart_data():
         "说明": "not-number",
     })
 
-    assert len(preview) == 2
-    assert preview[0].startswith("沪深300")
-    assert "+1.2" in preview[0]
-    assert "黄金" in preview[1]
-    assert "-0.8" in preview[1]
+    assert preview[0] == "| 项目 | 数值 | 方向 |"
+    assert "| 沪深300 | +1.2 | 上行 |" in preview
+    assert "| 黄金 | -0.8 | 下行 |" in preview
     assert all("|" in row for row in preview)
 
 

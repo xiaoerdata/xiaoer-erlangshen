@@ -7,7 +7,7 @@ import shlex
 import sys
 from typing import Any
 
-from src.auth.session import clear_auth_session, load_auth_session, save_auth_session
+from src.auth.session import clear_auth_session, decrypt_auth_password, encrypt_auth_password, load_auth_session, save_auth_session
 from src.client.server_client import ErlangshenAPIError, ErlangshenServerClient
 from src.config import get_config
 
@@ -82,18 +82,39 @@ class AuthCommand:
             "base_url": base_url,
             "token": token,
             "account": email_or_phone,
+            "password_encrypted": encrypt_auth_password(password),
             "loginEntry": result.get("loginEntry") or login_entry,
             "expires": result.get("expires"),
             "user": self._safe_user(result.get("user") or {}),
         })
+        mcp_refreshed = await self._refresh_super66_after_login(
+            login_entry=result.get("loginEntry") or login_entry,
+            account=email_or_phone,
+            password=password,
+            token=token,
+        )
         user = result.get("user") or {}
         return "\n".join([
             "登录成功",
             f"- 服务端: {base_url}",
             f"- 账号体系: {result.get('loginEntry') or login_entry}",
             f"- 用户: {user.get('username') or user.get('email') or email_or_phone}",
+            f"- super-66 MCP: {'已同步重登' if mcp_refreshed else '将复用新 CLI token'}",
             "- 下一步: 输入 /service 查看服务端状态，或直接输入投资问题",
         ])
+
+    async def _refresh_super66_after_login(self, *, login_entry: str, account: str, password: str, token: str) -> bool:
+        try:
+            from src.mcp.super66 import Super66MCP
+
+            return await Super66MCP().refresh_auth_from_cli_login(
+                login_entry=login_entry,
+                account=account,
+                password=password,
+                token=token,
+            )
+        except Exception:
+            return False
 
     async def _status(self) -> str:
         session = load_auth_session()
@@ -103,6 +124,7 @@ class AuthCommand:
             "【二郎神 CLI 登录状态】",
             f"- 服务端: {base_url}",
             f"- 本地 token: {'已保存' if token else '未登录'}",
+            f"- 本地密码: {'已加密保存' if decrypt_auth_password(session) else '未保存'}",
         ]
 
         if not token:
