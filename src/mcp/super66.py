@@ -311,6 +311,8 @@ class Super66MCP:
             "batch_get_global_asset_data": {"asset_names": "assetNames", "asset_name": "assetNames", "assets": "assetNames", "names": "assetNames"},
             "batch_get_astock_realtime": {"stock_codes": "codes", "stockCodes": "codes", "code": "codes"},
             "get_astock_realtime_batch": {"stock_codes": "codes", "stockCodes": "codes", "code": "codes"},
+            "get_astock_realtime": {"code": "codes", "stockCode": "codes", "stock_code": "codes", "symbol": "codes"},
+            "get_astock_history": {"code": "codes", "stockCode": "codes", "stock_code": "codes", "symbol": "codes"},
             "get_macro_data": {
                 "indicator_codes": "indicatorCodes",
                 "indicatorCodes": "indicatorCodes",
@@ -338,7 +340,13 @@ class Super66MCP:
         for old, new in aliases.get(normalized_name, {}).items():
             if old in args and new not in args:
                 args[new] = args.pop(old)
+        if normalized_name == "get_astock_realtime" and args.get("codes"):
+            args.setdefault("limit", 1)
+        if normalized_name == "get_astock_history":
+            args.pop("adjust", None)
         for key in ("indexNames", "assetNames", "codes", "indicatorCodes", "indicatorKeywords"):
+            if key == "codes" and normalized_name in {"get_astock_realtime", "get_astock_history"}:
+                continue
             if isinstance(args.get(key), str):
                 args[key] = [
                     item.strip()

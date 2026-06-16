@@ -5701,6 +5701,21 @@ def test_super66_maps_mcp_arguments_to_production_schema():
         "get_global_asset_data",
         {"asset_name": "黄金", "source_table": "黄金", "start_date": "2026-05-01", "limit": 3},
     ) == {"assetName": "黄金", "sourceTable": "黄金", "startDate": "2026-05-01", "limit": 3}
+    assert mcp._normalize_tool_call(
+        "get_astock_realtime",
+        {"code": "600519"},
+    ) == ("dc66_get_astock_realtime", {"codes": "600519", "limit": 1})
+    assert mcp._normalize_tool_call(
+        "get_astock_realtime",
+        {"stockCode": "600519", "limit": 2},
+    ) == ("dc66_get_astock_realtime", {"codes": "600519", "limit": 2})
+    assert mcp._normalize_tool_call(
+        "get_astock_history",
+        {"code": "600519", "start_date": "2026-01-01", "end_date": "2026-06-16", "adjust": "qfq"},
+    ) == (
+        "dc66_get_astock_history",
+        {"codes": "600519", "startDate": "2026-01-01", "endDate": "2026-06-16"},
+    )
 
 
 @pytest.mark.asyncio
