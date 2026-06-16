@@ -1,4 +1,5 @@
 import json
+import sys
 
 import pytest
 from pathlib import Path
@@ -174,6 +175,48 @@ async def test_complete_llm_response_renders_folded_reasoning(monkeypatch, capsy
     assert "思考过程" in output
     assert "思考过程已折叠" in output
     assert "正在流式接收模型输出" not in output
+
+
+@pytest.mark.asyncio
+async def test_complete_llm_response_folds_reasoning_in_place_for_tty(monkeypatch, capsys):
+    monkeypatch.setenv("ERLANGSHEN_LLM_STREAM", "on")
+    monkeypatch.setenv("ERLANGSHEN_REASONING_STREAM", "on")
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class FakeClient:
+        async def stream_complete_events(self, messages, *, temperature, max_tokens):
+            yield {"type": "reasoning", "text": "先核对工具返回。"}
+            yield {"type": "content", "text": '{"view":"ok"}'}
+
+        async def complete(self, messages, *, temperature, max_tokens):
+            raise AssertionError("non-streaming fallback should not run")
+
+    result = await CLI()._complete_llm_response(
+        FakeClient(),
+        [{"role": "user", "content": "hello"}],
+        temperature=0.1,
+        max_tokens=32,
+    )
+
+    output = capsys.readouterr().out
+    assert result == '{"view":"ok"}'
+    assert "\r\033[2K" in output
+    assert "思考过程已折叠" in output
+
+
+def test_message_block_width_tracks_terminal(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    cli = CLI()
+    body = "这是一段很长的回答，用来验证 CLI 对话框会根据窗口宽度自动换行，而不是越过右侧边界。"
+
+    monkeypatch.setattr("src.cli._terminal_width", lambda: 48)
+    narrow = cli._message_block("二郎神", body, "32;1")
+    assert all(_display_width(line) <= 46 for line in narrow.splitlines())
+
+    monkeypatch.setattr("src.cli._terminal_width", lambda: 160)
+    wide = cli._message_block("二郎神", body, "32;1")
+    assert _display_width(wide.splitlines()[0]) == 140
 
 
 @pytest.mark.asyncio

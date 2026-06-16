@@ -94,12 +94,13 @@ class AuthCommand:
             token=token,
         )
         user = result.get("user") or {}
+        mcp_status = "已同步重登" if mcp_refreshed else "未完成重登，请检查账号密码或 SUPER66_USERNAME/SUPER66_PASSWORD"
         return "\n".join([
             "登录成功",
             f"- 服务端: {base_url}",
             f"- 账号体系: {result.get('loginEntry') or login_entry}",
             f"- 用户: {user.get('username') or user.get('email') or email_or_phone}",
-            f"- super-66 MCP: {'已同步重登' if mcp_refreshed else '将复用新 CLI token'}",
+            f"- super-66 MCP: {mcp_status}",
             "- 下一步: 输入 /service 查看服务端状态，或直接输入投资问题",
         ])
 

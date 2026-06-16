@@ -395,7 +395,9 @@ def _panel(title: str, rows: list[tuple[str, str]]) -> str:
 
 
 def _text_panel(title: str, lines: list[str], min_width: int = 72, max_width: int = 110) -> str:
-    width = min(max(min_width, *(_display_width(line) + 4 for line in lines)), max_width, max(60, _terminal_width() - 4))
+    available = max(32, _terminal_width() - 2)
+    lower = min(min_width, available)
+    width = min(max(lower, *(_display_width(line) + 4 for line in lines)), max_width, available)
     top = f"╭─ {title} " + "─" * max(0, width - _display_width(title) - 5) + "╮"
     bottom = "╰" + "─" * (width - 2) + "╯"
     body = ["│ " + _pad_display(line, width - 3) + "│" for line in lines]
@@ -954,7 +956,7 @@ class CLI:
         return _color(padded, "30;46")
 
     def _token_dialog_footer(self, activity: str = "") -> str:
-        width = min(max(64, _terminal_width() - 4), 110)
+        width = self._dialog_box_width()
         content_width = max(20, width - 4)
         text = self._token_meter_text(activity=activity or self._token_status_activity, compact=True)
         return _color("   " + _pad_display(text, content_width), "2")
@@ -1385,7 +1387,7 @@ class CLI:
         return parts[1].strip() if len(parts) > 1 else text
 
     def _message_block(self, title: str, body: str, color_code: str) -> str:
-        width = min(max(64, _terminal_width() - 4), 110)
+        width = self._dialog_box_width()
         content_width = width - 4
         top = _color(f"╭─ {title} " + "─" * max(0, width - _display_width(title) - 5) + "╮", color_code)
         bottom = _color("╰" + "─" * (width - 2) + "╯", color_code)
@@ -1398,6 +1400,11 @@ class CLI:
             for line in self._wrap_text(display_line, content_width):
                 lines.append("│ " + _pad_display(line, content_width) + " │")
         return "\n".join([top, *lines, bottom])
+
+    def _dialog_box_width(self) -> int:
+        terminal = max(32, _terminal_width())
+        available = max(32, terminal - 2)
+        return min(available, 140)
 
     def _message_display_line(self, text: str) -> str:
         line = str(text).rstrip()
@@ -4982,7 +4989,6 @@ class CLI:
     def _new_reasoning_stream_state(self) -> dict[str, object]:
         return {
             "visible": False,
-            "line_count": 0,
             "char_count": 0,
             "chunks": [],
             "started": time.perf_counter(),
@@ -4996,7 +5002,7 @@ class CLI:
         return sys.stdout.isatty() or setting in {"1", "on", "true", "yes", "force"}
 
     def _reasoning_box_width(self) -> int:
-        return min(max(64, _terminal_width() - 4), 110)
+        return self._dialog_box_width()
 
     def _write_reasoning_stream(self, state: dict[str, object], text: str) -> None:
         if not self._should_show_reasoning_stream() or state.get("closed"):
@@ -5005,18 +5011,14 @@ class CLI:
         if isinstance(chunks, list):
             chunks.append(text)
         state["char_count"] = int(state.get("char_count") or 0) + len(text)
-        width = self._reasoning_box_width()
-        content_width = width - 4
+        line = self._reasoning_live_line(state)
         try:
-            if not state.get("visible"):
-                top = _color(f"╭─ 思考过程 " + "─" * max(0, width - _display_width("思考过程") - 5) + "╮", "35")
-                print(top, flush=True)
-                state["line_count"] = int(state.get("line_count") or 0) + 1
-                state["visible"] = True
-            for raw_line in text.splitlines() or [text]:
-                for line in self._wrap_text(raw_line, content_width):
-                    print(_color("│ " + _pad_display(line, content_width) + " │", "35"), flush=True)
-                    state["line_count"] = int(state.get("line_count") or 0) + 1
+            if sys.stdout.isatty():
+                sys.stdout.write("\r\033[2K" + line)
+                sys.stdout.flush()
+            elif not state.get("visible"):
+                print(line, flush=True)
+            state["visible"] = True
         except OSError:
             state["closed"] = True
 
@@ -5024,17 +5026,27 @@ class CLI:
         if not state.get("visible") or state.get("closed"):
             return
         state["closed"] = True
-        line_count = int(state.get("line_count") or 0)
         collapsed = self._reasoning_collapsed_line(state)
         try:
             if sys.stdout.isatty():
-                sys.stdout.write(f"\033[{line_count}A\033[J")
-                sys.stdout.write(collapsed + "\n")
+                sys.stdout.write("\r\033[2K" + collapsed + "\n")
             else:
                 sys.stdout.write(collapsed + "\n")
             sys.stdout.flush()
         except OSError:
             pass
+
+    def _reasoning_live_line(self, state: dict[str, object]) -> str:
+        width = self._reasoning_box_width()
+        chunks = state.get("chunks")
+        joined = "".join(chunks if isinstance(chunks, list) else [])
+        preview = " ".join(joined.split())
+        chars = int(state.get("char_count") or 0)
+        prefix = f"◌ 思考过程 · {chars} 字 · "
+        preview_width = max(0, width - _display_width(prefix))
+        if _display_width(preview) > preview_width:
+            preview = (_clip_display(preview, max(0, preview_width - 1)) + "…") if preview_width > 0 else ""
+        return _color(_pad_display(prefix + preview, width), "35")
 
     def _reasoning_collapsed_line(self, state: dict[str, object]) -> str:
         elapsed = max(0.0, time.perf_counter() - float(state.get("started") or time.perf_counter()))
