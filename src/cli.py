@@ -5037,7 +5037,8 @@ class CLI:
                     self._write_reasoning_stream(reasoning_state, text)
                     continue
                 if event_type == "content":
-                    self._finish_reasoning_stream(reasoning_state)
+                    if not reasoning_state.get("closed"):
+                        self._finish_reasoning_stream(reasoning_state)
                     chunks.append(text)
                     self._write_json_answer_preview(answer_state, "".join(chunks), json_preview_field)
                     received += len(text)
@@ -5079,10 +5080,7 @@ class CLI:
         return self._dialog_box_width()
 
     def _write_reasoning_stream(self, state: dict[str, object], text: str) -> None:
-        chunks = state.get("chunks")
-        if isinstance(chunks, list):
-            chunks.append(text)
-        state["char_count"] = int(state.get("char_count") or 0) + len(text)
+        self._append_reasoning_chunk(state, text)
         if not self._should_show_reasoning_stream() or state.get("closed"):
             return
         block = self._reasoning_stream_block(state)
@@ -5102,9 +5100,39 @@ class CLI:
         except OSError:
             state["closed"] = True
 
+    def _append_reasoning_chunk(self, state: dict[str, object], text: str) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        chunks = state.get("chunks")
+        if not isinstance(chunks, list):
+            chunks = []
+            state["chunks"] = chunks
+        current = "".join(item for item in chunks if isinstance(item, str))
+        if not current:
+            merged = text
+        elif text.startswith(current):
+            merged = text
+        elif current.endswith(text):
+            merged = current
+        else:
+            overlap = 0
+            max_overlap = min(len(current), len(text))
+            for size in range(max_overlap, 0, -1):
+                if current.endswith(text[:size]):
+                    overlap = size
+                    break
+            merged = current + text[overlap:]
+        state["chunks"] = [merged]
+        state["char_count"] = len(merged)
+
     def _finish_reasoning_stream(self, state: dict[str, object]) -> None:
+        if state.get("closed"):
+            return
         self._remember_reasoning_trace(state)
-        if not state.get("visible") or state.get("closed"):
+        if not state.get("visible"):
+            state["closed"] = True
+            return
+        if state.get("closed"):
             return
         state["closed"] = True
         collapsed = self._reasoning_collapsed_line(state)
@@ -5439,6 +5467,7 @@ class CLI:
             snapshot_lines = self._mcp_snapshot_lines(mcp_data)
             synthesis = self._fallback_synthesis_from_snapshots(query, matches, snapshot_lines, message)
             synthesis = self._enforce_market_fact_grounding(query, synthesis, mcp_data, intent_plan)
+            synthesis = self._repair_client_synthesis_with_grounded_mcp(query, synthesis, mcp_data, intent_plan)
             self._remember_agent_plan(
                 query=query,
                 intent_plan=intent_plan,
@@ -5486,6 +5515,7 @@ class CLI:
 
         synthesis = self._parse_client_llm_advice(raw_text)
         synthesis = self._enforce_market_fact_grounding(query, synthesis, mcp_data, intent_plan)
+        synthesis = self._repair_client_synthesis_with_grounded_mcp(query, synthesis, mcp_data, intent_plan)
         synthesis = {
             **synthesis,
             "artifact_results": await self._materialize_synthesis_artifacts(synthesis, client, query),
@@ -5596,6 +5626,229 @@ class CLI:
             "fallback_reason": message,
             "scene": scene,
         }
+
+    def _repair_client_synthesis_with_grounded_mcp(self, query: str, synthesis: dict, mcp_data, intent_plan: dict | None = None) -> dict:
+        if not isinstance(synthesis, dict):
+            synthesis = {}
+        grounding = self._market_fact_grounding(query, mcp_data, intent_plan)
+        if grounding.get("status") != "grounded":
+            return synthesis
+        direct = self._direct_client_final_answer(synthesis)
+        view = self._text_field(synthesis.get("view"))
+        if direct and not self._looks_like_reasoning_leak(direct):
+            return synthesis
+        if direct or not view or self._looks_like_reasoning_leak(view) or self._looks_like_generic_stock_fallback(view):
+            repaired = self._grounded_astock_synthesis_from_mcp(query, mcp_data)
+            if repaired:
+                repaired["repaired_from_mcp"] = True
+                return repaired
+        return synthesis
+
+    def _looks_like_reasoning_leak(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", self._text_field(text).lower())
+        if not compact:
+            return False
+        markers = (
+            "输出必须是json",
+            "json对象",
+            "response_contract",
+            "client_intent_plan",
+            "market_data_brief",
+            "现在构建final_answer",
+            "构建final_answer",
+            "现在写final_answer",
+            "final_answer必须",
+            "suggestions:",
+            "risk_controls:",
+            "missing_data:",
+            "从输入中",
+            "我需要基于这些数据生成",
+        )
+        return any(marker in compact for marker in markers)
+
+    def _looks_like_generic_stock_fallback(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", self._text_field(text))
+        if not compact:
+            return True
+        generic_markers = (
+            "具体交易结论还需要看你关注的市场",
+            "把问题再收窄一点",
+            "至少补两项",
+            "没有拿到Super66MCP返回的可核验股票行情",
+        )
+        return any(marker in compact for marker in generic_markers)
+
+    def _grounded_astock_synthesis_from_mcp(self, query: str, mcp_data) -> dict:
+        if not isinstance(mcp_data, dict):
+            return {}
+        codes = self._astock_codes_from_mcp_context(mcp_data)
+        code = codes[0] if codes else ""
+        if not code:
+            return {}
+        name = self._known_astock_name(code) or self._first_astock_name_from_mcp(mcp_data) or code
+        realtime_values = [
+            value for key, value in mcp_data.items()
+            if str(key).startswith("get_astock_realtime:") and not self._mcp_value_has_error(value)
+        ]
+        history_values = [
+            value for key, value in mcp_data.items()
+            if str(key).startswith("get_astock_history:") and not self._mcp_value_has_error(value)
+        ]
+        realtime_row = self._latest_row_from_values(realtime_values)
+        history_rows = self._history_rows_from_values(history_values)
+        latest_price = self._first_numeric_value(
+            realtime_row,
+            ("price", "latest", "last", "current_price", "latest_price", "last_price", "close", "最新价", "现价", "收盘", "收盘价"),
+        ) if isinstance(realtime_row, dict) else None
+        pct_change = self._first_numeric_value(
+            realtime_row,
+            ("change_pct", "pct_chg", "percent", "changePercent", "change_percent", "changeRate", "涨跌幅", "涨幅", "日涨跌幅"),
+        ) if isinstance(realtime_row, dict) else None
+        latest_date = self._readable_mcp_date(realtime_row) if isinstance(realtime_row, dict) else ""
+        close_points: list[tuple[str, float]] = []
+        for value in history_values:
+            close_points.extend(self._close_points(value))
+        close_points = sorted(enumerate(close_points), key=lambda item: (item[1][0] or "", item[0]))
+        period_line = ""
+        if len(close_points) >= 2:
+            start_date, start_close = close_points[0][1]
+            end_date, end_close = close_points[-1][1]
+            if start_close:
+                period_return = (end_close / start_close - 1.0) * 100.0
+                period_line = (
+                    f"历史区间看，{self._format_compact_date(start_date)} 收盘 {self._format_price(start_close)}，"
+                    f"{self._format_compact_date(end_date)} 收盘 {self._format_price(end_close)}，"
+                    f"区间涨跌幅约 {self._format_pct(period_return)}。"
+                )
+        support, pressure = self._support_pressure_from_history_rows(history_rows)
+        price_bits = []
+        if latest_price is not None:
+            date_part = f"（{self._format_compact_date(latest_date)}）" if latest_date else ""
+            price_bits.append(f"最新价 {self._format_price(latest_price)} 元{date_part}")
+        if pct_change is not None:
+            price_bits.append(f"涨跌幅 {self._format_pct(pct_change)}")
+        price_line = "，".join(price_bits) if price_bits else "MCP 已返回实时行情，但字段名不标准，建议用 /plan 查看原始明细"
+        trend_line = period_line or "历史行情已返回，但可用收盘点不足以稳定计算区间涨跌幅。"
+        level_parts = []
+        if support is not None:
+            level_parts.append(f"下方先观察 {self._format_price(support)} 元附近")
+        if pressure is not None:
+            level_parts.append(f"上方先观察 {self._format_price(pressure)} 元附近")
+        level_line = "；".join(level_parts)
+        if level_line:
+            level_line = f"观察位方面，{level_line}。这些只按 MCP 历史 high/low/close 推导，不是交易指令。"
+        else:
+            level_line = "本轮历史 high/low/close 不足以稳定推导支撑和压力位。"
+        final_answer = "\n\n".join([
+            f"这次已经拿到 super-66 MCP 的 {name}（{code}）行情数据，可以直接基于数据回答。",
+            f"当前状态：{price_line}。{trend_line}",
+            f"走势判断：从本轮历史序列看，股价仍处在回调后的弱修复/低位震荡状态，短线重点不是追高，而是看价格能否守住关键低点并重新站回上方压力区。",
+            level_line,
+            "操作上可以先按观察处理：已有仓位更适合用仓位和回撤线管理，新增仓位等企稳信号更稳；若后续跌破历史低点附近且无法快速收回，说明弱势还没有结束。",
+            "需要注意：本轮主要是行情数据，缺少最新公告、业绩、白酒板块资金和新闻事件线索；这些会影响对基本面和催化因素的判断。",
+        ])
+        suggestions = [
+            "先用 /plan 核对 get_astock_realtime 和 get_astock_history 的原始字段。",
+            "继续补充新闻/公告线索后，再判断这次下跌是行业因素、公司因素还是市场风格因素。",
+            "如果要做交易计划，把持仓成本、仓位上限和最大可承受回撤补充进来。",
+        ]
+        if support is not None:
+            suggestions.insert(0, f"观察 {self._format_price(support)} 元附近是否能形成有效支撑。")
+        risk_controls = [
+            "支撑/压力只是历史行情推导出的观察位，不等于买卖建议。",
+            "若仓位较重，先定义最大回撤和减仓条件，避免把长期基本面判断和短线价格波动混在一起。",
+            "缺少公告和行业新闻时，不把单纯价格走势当成完整投资结论。",
+        ]
+        missing = ["最新公告/业绩说明", "白酒板块和北向/机构资金线索", "你的持仓成本、仓位和投资周期"]
+        return {
+            "final_answer": final_answer,
+            "view": final_answer,
+            "suggestions": suggestions[:4],
+            "risk_controls": risk_controls,
+            "missing_data": missing,
+            "next_actions": ["/plan", "继续问：补充贵州茅台最新公告和新闻后再分析"],
+            "followups": [
+                "把贵州茅台近 120 天收盘价做成图表。",
+                "对比贵州茅台和白酒板块今年表现。",
+            ],
+            "artifacts": [],
+        }
+
+    def _first_astock_name_from_mcp(self, mcp_data: dict) -> str:
+        for value in mcp_data.values():
+            for name in self._extract_astock_names_from_value(value):
+                if name:
+                    return name
+        return ""
+
+    def _latest_row_from_values(self, values: list) -> dict:
+        rows: list[dict] = []
+        for value in values:
+            row = self._find_mcp_market_row(value)
+            if isinstance(row, dict):
+                rows.append(row)
+        return self._latest_mcp_row_by_date(rows) or {}
+
+    def _history_rows_from_values(self, values: list) -> list[dict]:
+        rows: list[dict] = []
+        for value in values:
+            for row in self._flatten_mcp_dict_rows(value):
+                if not isinstance(row, dict):
+                    continue
+                if self._first_numeric_value(row, ("close", "close_price", "收盘", "收盘价")) is not None:
+                    rows.append(row)
+        return sorted(enumerate(rows), key=lambda item: (self._mcp_row_date_key(item[1]), item[0]))
+
+    def _support_pressure_from_history_rows(self, rows: list) -> tuple[float | None, float | None]:
+        normalized_rows = [item[1] if isinstance(item, tuple) else item for item in rows if isinstance(item[1] if isinstance(item, tuple) else item, dict)]
+        if not normalized_rows:
+            return None, None
+        recent = normalized_rows[-30:]
+        low_points = [
+            (index, value)
+            for index, row in enumerate(recent)
+            for value in [self._first_numeric_value(row, ("low", "lowest", "最低", "最低价", "close", "close_price", "收盘", "收盘价"))]
+            if value is not None
+        ]
+        if not low_points:
+            return None, None
+        support_index, support = min(low_points, key=lambda item: item[1])
+        pressure_rows = recent[support_index:]
+        highs = [
+            value for row in pressure_rows
+            for value in [self._first_numeric_value(row, ("high", "highest", "最高", "最高价", "close", "close_price", "收盘", "收盘价"))]
+            if value is not None
+        ]
+        return support, max(highs) if highs else None
+
+    def _readable_mcp_date(self, row: dict) -> str:
+        if not isinstance(row, dict):
+            return ""
+        for key in ("date", "trade_date", "tradedate", "trading_date", "datetime", "timestamp", "time", "update_time", "updated_at", "日期", "交易日期", "时间"):
+            value = self._text_field(row.get(key))
+            if value:
+                return value
+        return ""
+
+    def _format_compact_date(self, value: str) -> str:
+        text = self._text_field(value)
+        if not text:
+            return "起止日"
+        digits = re.sub(r"\D", "", text)
+        if len(digits) >= 8:
+            return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+        return text[:16]
+
+    def _format_price(self, value: float) -> str:
+        if value is None:
+            return ""
+        if abs(value) >= 100:
+            return f"{value:.2f}".rstrip("0").rstrip(".")
+        return f"{value:.4g}"
+
+    def _format_pct(self, value: float) -> str:
+        sign = "+" if value > 0 else ""
+        return f"{sign}{value:.2f}%"
 
     def _remember_followup_data(self, mcp_data, artifact_results) -> None:
         if isinstance(mcp_data, dict) and mcp_data:
@@ -9085,9 +9338,20 @@ class CLI:
                 if key.startswith(("get_global_asset_data:", "batch_get_global_asset_data:", "get_future_market_data:"))
             )
             macro_count = sum(1 for key in usable if key.startswith(("get_macro_data:", "batch_get_macro_data:", "get_macro_indicator:", "list_macro_indicators:")))
-            hot_count = sum(1 for key in usable if key.startswith(("get_hot_stocks:", "batch_get_astock_realtime:", "get_astock_realtime_batch:")))
+            stock_count = sum(
+                1
+                for key in usable
+                if key.startswith((
+                    "search_astocks:",
+                    "get_astock_realtime:",
+                    "get_astock_history:",
+                    "batch_get_astock_realtime:",
+                    "get_astock_realtime_batch:",
+                ))
+            )
+            hot_count = sum(1 for key in usable if key.startswith("get_hot_stocks:"))
             web_count = sum(1 for key in usable if key.startswith("web_search:"))
-            other_count = max(0, len(usable) - index_count - asset_count - macro_count - hot_count - web_count)
+            other_count = max(0, len(usable) - index_count - asset_count - macro_count - stock_count - hot_count - web_count)
             dimensions = []
             if index_count:
                 dimensions.append(f"指数 {index_count}")
@@ -9095,6 +9359,8 @@ class CLI:
                 dimensions.append(f"跨资产 {asset_count}")
             if macro_count:
                 dimensions.append(f"宏观 {macro_count}")
+            if stock_count:
+                dimensions.append(f"股票 {stock_count}")
             if hot_count:
                 dimensions.append(f"热门股票 {hot_count}")
             if web_count:

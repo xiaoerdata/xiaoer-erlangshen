@@ -215,6 +215,34 @@ async def test_complete_llm_response_folds_reasoning_in_place_for_tty(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_complete_llm_response_dedupes_cumulative_reasoning(monkeypatch, capsys):
+    monkeypatch.setenv("ERLANGSHEN_LLM_STREAM", "on")
+    monkeypatch.setenv("ERLANGSHEN_REASONING_STREAM", "force")
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    class FakeClient:
+        async def stream_complete_events(self, messages, *, temperature, max_tokens):
+            yield {"type": "reasoning", "text": "先核对工具返回。"}
+            yield {"type": "reasoning", "text": "先核对工具返回。再检查行情字段。"}
+            yield {"type": "content", "text": '{"view":"ok"}'}
+
+        async def complete(self, messages, *, temperature, max_tokens):
+            raise AssertionError("non-streaming fallback should not run")
+
+    cli = CLI()
+    await cli._complete_llm_response(
+        FakeClient(),
+        [{"role": "user", "content": "hello"}],
+        temperature=0.1,
+        max_tokens=32,
+    )
+
+    expanded = cli.thinking_text()
+    assert expanded.count("先核对工具返回。") == 1
+    assert expanded.count("再检查行情字段。") == 1
+
+
+@pytest.mark.asyncio
 async def test_complete_llm_response_streams_json_view_preview(monkeypatch, capsys):
     monkeypatch.setenv("ERLANGSHEN_LLM_STREAM", "on")
     monkeypatch.setenv("ERLANGSHEN_ANSWER_STREAM", "force")
@@ -4903,6 +4931,54 @@ async def test_collect_astock_followup_restores_previous_stock_and_refetches(mon
     assert "get_astock_realtime:600519" in data
 
 
+def test_grounded_astock_mcp_repairs_incomplete_model_answer():
+    cli = CLI()
+    mcp_data = {
+        "search_astocks:贵州茅台": {"rows": [{"code": "600519", "name": "贵州茅台"}]},
+        "get_astock_realtime:600519": {
+            "latest": {
+                "code": "600519",
+                "name": "贵州茅台",
+                "price": 1255.67,
+                "change_pct": -1.21,
+                "date": "2026-06-16",
+            }
+        },
+        "get_astock_history:600519": {
+            "records": [
+                {"date": "2026-02-24", "close": 1466.8, "high": 1488.0, "low": 1450.0},
+                {"date": "2026-05-27", "close": 1260.0, "high": 1280.0, "low": 1250.1},
+                {"date": "2026-06-12", "close": 1288.0, "high": 1295.0, "low": 1268.0},
+                {"date": "2026-06-15", "close": 1271.1, "high": 1282.0, "low": 1262.0},
+            ]
+        },
+    }
+    plan = {
+        "mcp_tools": [
+            {"name": "get_astock_realtime", "arguments": {"code": "600519"}},
+            {"name": "get_astock_history", "arguments": {"code": "600519"}},
+        ]
+    }
+
+    repaired = cli._repair_client_synthesis_with_grounded_mcp(
+        "分析贵州茅台",
+        {"view": "结合本轮已读取的行情快照和网页线索，我先给一个方向性判断；具体交易结论还需要看你关注的市场、周期和仓位。"},
+        mcp_data,
+        plan,
+    )
+
+    answer = repaired["final_answer"]
+    assert "贵州茅台（600519）" in answer
+    assert "1255.67" in answer
+    assert "-1.21%" in answer
+    assert "2026-02-24 收盘 1466.8" in answer
+    assert "2026-06-15 收盘 1271.1" in answer
+    assert "-13.34%" in answer
+    assert "1250.1" in answer
+    assert "1295" in answer
+    assert "具体交易结论还需要看你关注的市场" not in answer
+
+
 def test_global_index_daily_table_name_does_not_trigger_ai_event_defaults():
     plan = CLI()._normalize_intent_plan(
         {"intent": "data_lookup", "needs_mcp": False, "mcp_tools": []},
@@ -5454,6 +5530,19 @@ def test_client_side_advice_uses_final_answer_without_reformatting():
     assert result == final_answer
     assert "我先按" not in result
     assert "可以先这样做" not in result
+
+
+def test_mcp_source_line_classifies_astock_sources():
+    line = CLI()._mcp_source_line({
+        "mcp_data": [
+            "search_astocks:贵州茅台",
+            "get_astock_realtime:600519",
+            "get_astock_history:600519",
+        ]
+    })
+
+    assert "我已读取 3 个数据源（股票 3）" in line
+    assert "其他 3" not in line
 
 
 def test_client_side_advice_formats_object_sections_as_natural_items():
