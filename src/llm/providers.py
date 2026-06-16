@@ -257,6 +257,34 @@ class LLMClient:
         finally:
             type(self)._active_request = {}
 
+    async def stream_complete_events(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[dict[str, str]]:
+        if not self.settings.has_api_key:
+            raise RuntimeError(
+                f"{self.settings.display_name} API Key 未配置，请设置 "
+                f"{' 或 '.join(self.settings.api_key_envs)}"
+            )
+        if not self.settings.base_url:
+            raise RuntimeError(
+                f"{self.settings.display_name} API Base URL 未配置，请设置对应 BASE_URL 环境变量"
+            )
+
+        started = self._mark_request_started(messages)
+        try:
+            if self.settings.protocol == ANTHROPIC_MESSAGES:
+                async for event in self._stream_anthropic_events(messages, temperature=temperature, max_tokens=max_tokens, started=started):
+                    yield event
+            else:
+                async for event in self._stream_openai_compatible_events(messages, temperature=temperature, max_tokens=max_tokens, started=started):
+                    yield event
+        finally:
+            type(self)._active_request = {}
+
     async def _complete_openai_compatible(
         self,
         messages: list[dict[str, str]],
@@ -333,6 +361,23 @@ class LLMClient:
         max_tokens: int,
         started: float,
     ) -> AsyncIterator[str]:
+        async for event in self._stream_openai_compatible_events(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            started=started,
+        ):
+            if event.get("type") == "content" and event.get("text"):
+                yield event["text"]
+
+    async def _stream_openai_compatible_events(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        started: float,
+    ) -> AsyncIterator[dict[str, str]]:
         payload = {
             "model": self.settings.model,
             "messages": messages,
@@ -346,6 +391,7 @@ class LLMClient:
         headers = _api_key_headers(self.settings)
         url = _join_openai_url(self.settings.base_url or "", "chat/completions")
         parts: list[str] = []
+        reasoning_parts: list[str] = []
         usage: Any = None
         async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
@@ -370,15 +416,24 @@ class LLMClient:
                         if not isinstance(choice, dict):
                             continue
                         delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+                        reasoning = _coerce_event_text(
+                            delta.get("reasoning_content")
+                            or delta.get("reasoning")
+                            or delta.get("thinking")
+                            or choice.get("reasoning_content")
+                        )
+                        if reasoning:
+                            reasoning_parts.append(reasoning)
+                            yield {"type": "reasoning", "text": reasoning}
                         chunk = delta.get("content") or choice.get("text") or ""
                         if not isinstance(chunk, str) or not chunk:
                             continue
                         parts.append(chunk)
-                        yield chunk
+                        yield {"type": "content", "text": chunk}
         response_text = "".join(parts)
         self._record_usage(
             messages=messages,
-            response_text=response_text,
+            response_text="".join(reasoning_parts) + response_text,
             usage=usage,
             started=started,
             protocol=OPENAI_COMPATIBLE,
@@ -392,6 +447,23 @@ class LLMClient:
         max_tokens: int,
         started: float,
     ) -> AsyncIterator[str]:
+        async for event in self._stream_anthropic_events(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            started=started,
+        ):
+            if event.get("type") == "content" and event.get("text"):
+                yield event["text"]
+
+    async def _stream_anthropic_events(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        started: float,
+    ) -> AsyncIterator[dict[str, str]]:
         system, conversation = _split_anthropic_messages(messages)
         payload: dict[str, Any] = {
             "model": self.settings.model,
@@ -406,6 +478,7 @@ class LLMClient:
         headers["anthropic-version"] = "2023-06-01"
         url = _join_anthropic_url(self.settings.base_url or "")
         parts: list[str] = []
+        reasoning_parts: list[str] = []
         usage: dict[str, Any] = {}
         async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
@@ -425,18 +498,29 @@ class LLMClient:
                     for source in (message.get("usage"), delta.get("usage"), event.get("usage")):
                         if isinstance(source, dict):
                             usage.update(source)
-                    if event.get("type") != "content_block_delta":
+                    event_type = str(event.get("type") or "")
+                    if event_type in {"thinking_delta", "content_block_delta"}:
+                        reasoning = ""
+                        if delta.get("type") in {"thinking_delta", "reasoning_delta"}:
+                            reasoning = _coerce_event_text(delta.get("thinking") or delta.get("text"))
+                        elif "thinking" in delta or "reasoning" in delta:
+                            reasoning = _coerce_event_text(delta.get("thinking") or delta.get("reasoning"))
+                        if reasoning:
+                            reasoning_parts.append(reasoning)
+                            yield {"type": "reasoning", "text": reasoning}
+                            continue
+                    if event_type != "content_block_delta":
                         continue
                     chunk_delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
                     chunk = chunk_delta.get("text") or ""
                     if not isinstance(chunk, str) or not chunk:
                         continue
                     parts.append(chunk)
-                    yield chunk
+                    yield {"type": "content", "text": chunk}
         response_text = "".join(parts)
         self._record_usage(
             messages=messages,
-            response_text=response_text,
+            response_text="".join(reasoning_parts) + response_text,
             usage=usage or None,
             started=started,
             protocol=ANTHROPIC_MESSAGES,
@@ -572,6 +656,19 @@ def _extract_usage_tokens(
     input_tokens = _estimate_messages_tokens(messages)
     output_tokens = _estimate_text_tokens(response_text)
     return input_tokens, output_tokens, input_tokens + output_tokens, True
+
+
+def _coerce_event_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "content", "reasoning", "reasoning_content", "thinking"):
+            text = _coerce_event_text(value.get(key))
+            if text:
+                return text
+    if isinstance(value, list):
+        return "".join(_coerce_event_text(item) for item in value)
+    return ""
 
 
 def _coerce_token_int(value: Any) -> int:

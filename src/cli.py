@@ -4945,21 +4945,103 @@ class CLI:
         temperature: float,
         max_tokens: int,
     ) -> str:
-        if not self._should_stream_llm() or not hasattr(client, "stream_complete"):
+        if not self._should_stream_llm() or not (hasattr(client, "stream_complete_events") or hasattr(client, "stream_complete")):
             return await client.complete(messages, temperature=temperature, max_tokens=max_tokens)
         chunks: list[str] = []
+        reasoning_state = self._new_reasoning_stream_state()
         received = 0
         next_refresh = 120
-        self._show_progress("正在流式接收模型输出")
+        if hasattr(client, "stream_complete_events"):
+            async for event in client.stream_complete_events(messages, temperature=temperature, max_tokens=max_tokens):
+                event_type = self._text_field(event.get("type") if isinstance(event, dict) else "")
+                text = event.get("text") if isinstance(event, dict) else ""
+                if not isinstance(text, str) or not text:
+                    continue
+                if event_type == "reasoning":
+                    self._write_reasoning_stream(reasoning_state, text)
+                    continue
+                if event_type == "content":
+                    self._finish_reasoning_stream(reasoning_state)
+                    chunks.append(text)
+                    received += len(text)
+                    if received >= next_refresh:
+                        self._refresh_token_status_bar(activity=f"模型输出 {received} 字")
+                        next_refresh = received + 120
+            self._finish_reasoning_stream(reasoning_state)
+            return "".join(chunks)
         async for chunk in client.stream_complete(messages, temperature=temperature, max_tokens=max_tokens):
             if not chunk:
                 continue
             chunks.append(chunk)
             received += len(chunk)
             if received >= next_refresh:
-                self._refresh_token_status_bar(activity=f"流式接收 {received} 字")
+                self._refresh_token_status_bar(activity=f"模型输出 {received} 字")
                 next_refresh = received + 120
         return "".join(chunks)
+
+    def _new_reasoning_stream_state(self) -> dict[str, object]:
+        return {
+            "visible": False,
+            "line_count": 0,
+            "char_count": 0,
+            "chunks": [],
+            "started": time.perf_counter(),
+            "closed": False,
+        }
+
+    def _should_show_reasoning_stream(self) -> bool:
+        setting = os.getenv("ERLANGSHEN_REASONING_STREAM", "on").lower()
+        if setting in {"0", "off", "false", "no"}:
+            return False
+        return sys.stdout.isatty() or setting in {"1", "on", "true", "yes", "force"}
+
+    def _reasoning_box_width(self) -> int:
+        return min(max(64, _terminal_width() - 4), 110)
+
+    def _write_reasoning_stream(self, state: dict[str, object], text: str) -> None:
+        if not self._should_show_reasoning_stream() or state.get("closed"):
+            return
+        chunks = state.get("chunks")
+        if isinstance(chunks, list):
+            chunks.append(text)
+        state["char_count"] = int(state.get("char_count") or 0) + len(text)
+        width = self._reasoning_box_width()
+        content_width = width - 4
+        try:
+            if not state.get("visible"):
+                top = _color(f"╭─ 思考过程 " + "─" * max(0, width - _display_width("思考过程") - 5) + "╮", "35")
+                print(top, flush=True)
+                state["line_count"] = int(state.get("line_count") or 0) + 1
+                state["visible"] = True
+            for raw_line in text.splitlines() or [text]:
+                for line in self._wrap_text(raw_line, content_width):
+                    print(_color("│ " + _pad_display(line, content_width) + " │", "35"), flush=True)
+                    state["line_count"] = int(state.get("line_count") or 0) + 1
+        except OSError:
+            state["closed"] = True
+
+    def _finish_reasoning_stream(self, state: dict[str, object]) -> None:
+        if not state.get("visible") or state.get("closed"):
+            return
+        state["closed"] = True
+        line_count = int(state.get("line_count") or 0)
+        collapsed = self._reasoning_collapsed_line(state)
+        try:
+            if sys.stdout.isatty():
+                sys.stdout.write(f"\033[{line_count}A\033[J")
+                sys.stdout.write(collapsed + "\n")
+            else:
+                sys.stdout.write(collapsed + "\n")
+            sys.stdout.flush()
+        except OSError:
+            pass
+
+    def _reasoning_collapsed_line(self, state: dict[str, object]) -> str:
+        elapsed = max(0.0, time.perf_counter() - float(state.get("started") or time.perf_counter()))
+        chars = int(state.get("char_count") or 0)
+        summary = f"▸ 思考过程已折叠 · {chars} 字 · {self._format_seconds(elapsed)}"
+        width = self._reasoning_box_width()
+        return _color(_pad_display(summary, width), "35")
 
     async def client_side_advice(self, raw_query: str) -> str:
         parsed = self._parse_client_advice_input(raw_query)
@@ -6680,6 +6762,15 @@ class CLI:
                 from src.mcp.super66 import Super66MCP
 
                 mcp = Super66MCP()
+                if hasattr(mcp, "ensure_fresh_login"):
+                    self._show_progress("正在重新登录 super-66 MCP 获取新 token")
+                    if not await mcp.ensure_fresh_login():
+                        mcp_init_error = (
+                            "super-66 MCP 需要重新登录获取新 token；请执行 /login xwab <账号> 保存加密密码，"
+                            "或设置 SUPER66_USERNAME/SUPER66_PASSWORD。"
+                        )
+                        collected["super66_auth:error"] = mcp_init_error
+                        mcp = None
             except Exception as exc:
                 mcp_init_error = self._sanitize_api_key_error(exc, "")
                 collected["super66_error"] = mcp_init_error

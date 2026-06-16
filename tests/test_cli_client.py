@@ -149,6 +149,34 @@ async def test_complete_llm_response_uses_streaming_when_enabled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_complete_llm_response_renders_folded_reasoning(monkeypatch, capsys):
+    monkeypatch.setenv("ERLANGSHEN_LLM_STREAM", "on")
+    monkeypatch.setenv("ERLANGSHEN_REASONING_STREAM", "force")
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    class FakeClient:
+        async def stream_complete_events(self, messages, *, temperature, max_tokens):
+            yield {"type": "reasoning", "text": "先核对工具返回。"}
+            yield {"type": "content", "text": '{"view":"ok"}'}
+
+        async def complete(self, messages, *, temperature, max_tokens):
+            raise AssertionError("non-streaming fallback should not run")
+
+    result = await CLI()._complete_llm_response(
+        FakeClient(),
+        [{"role": "user", "content": "hello"}],
+        temperature=0.1,
+        max_tokens=32,
+    )
+
+    output = capsys.readouterr().out
+    assert result == '{"view":"ok"}'
+    assert "思考过程" in output
+    assert "思考过程已折叠" in output
+    assert "正在流式接收模型输出" not in output
+
+
+@pytest.mark.asyncio
 async def test_print_interactive_turn_streams_when_forced(monkeypatch, capsys):
     monkeypatch.setenv("ERLANGSHEN_STREAM_RENDER", "force")
     monkeypatch.setenv("ERLANGSHEN_STREAM_RENDER_DELAY", "0")
@@ -2435,6 +2463,7 @@ async def test_client_side_advice_uses_local_intent_to_fetch_super66_mcp(monkeyp
     assert "产物计划: chart / 指数快照对比 / 沪深300涨跌幅 / 保存到授权项目文件夹" in plan
     assert "路由层认为还缺:" in plan
     assert "- 用户持仓" in plan
+
     assert "建议下一步:" in plan
     assert "继续说“把指数快照对比做成图表”" in plan
     assert "补充路由层认为还缺的信息后继续追问" in plan
@@ -2455,6 +2484,28 @@ async def test_client_side_advice_uses_local_intent_to_fetch_super66_mcp(monkeyp
     assert "DeepSeek / deepseek-v4-flash" in plan
     assert "API Key 仅本机直连供应商" in plan
     reset_config()
+
+
+@pytest.mark.asyncio
+async def test_collect_client_mcp_data_stops_when_super66_relogin_is_missing(monkeypatch):
+    class FakeSuper66MCP:
+        async def ensure_fresh_login(self):
+            return False
+
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            raise AssertionError("MCP tools should not run without a fresh login")
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    intent_plan = {
+        "needs_mcp": True,
+        "mcp_tools": [{"name": "get_index_data", "arguments": {"index_name": "沪深300"}}],
+    }
+    result = await CLI()._collect_client_mcp_data("今天市场怎么样", {}, intent_plan)
+
+    assert "super66_auth:error" in result
+    assert "重新登录获取新 token" in result["super66_auth:error"]
+    assert any(key.startswith("get_index_data:沪深300:error") for key in result)
 
 
 @pytest.mark.asyncio
@@ -5536,6 +5587,8 @@ async def test_super66_call_tool_redirects_hk_index_to_index_payload(monkeypatch
             return FakeResponse()
 
     monkeypatch.setenv("SUPER66_MCP_TOKEN", "token")
+    monkeypatch.setenv("SUPER66_ALLOW_STATIC_TOKEN", "true")
+    Super66MCP._instance = None
     mcp = Super66MCP()
     mcp._client = FakeClient()
     mcp._cache.clear()
@@ -5563,6 +5616,33 @@ async def test_super66_call_tool_redirects_hk_index_to_index_payload(monkeypatch
     assert result["tool"] == "dc66_get_index_data"
     assert result["arguments"]["indexName"] == "恒生科技指数"
     assert result["latest"]["date"] == "2026-06-10"
+    Super66MCP._instance = None
+
+
+@pytest.mark.asyncio
+async def test_super66_does_not_reuse_saved_auth_token_without_relogin_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.delenv("SUPER66_MCP_TOKEN", raising=False)
+    monkeypatch.delenv("SUPER66_TOKEN", raising=False)
+    monkeypatch.delenv("SUPER66_PASSWORD", raising=False)
+    monkeypatch.delenv("SUPER66_ALLOW_STATIC_TOKEN", raising=False)
+    save_auth_session({"token": "old-token", "account": "user@example.com", "loginEntry": "xwab"})
+    Super66MCP._instance = None
+
+    class FakeClient:
+        is_closed = False
+
+        async def post(self, url, json=None, headers=None):
+            raise AssertionError("MCP must not call production with a saved stale token")
+
+    mcp = Super66MCP()
+    mcp._client = FakeClient()
+
+    result = await mcp.call_tool("get_index_data", {"indexName": "沪深300"}, use_cache=False)
+
+    assert result["auth"] == "missing_relogin_credentials"
+    assert "重新登录获取新 token" in result["error"]
+    Super66MCP._instance = None
 
 
 @pytest.mark.asyncio

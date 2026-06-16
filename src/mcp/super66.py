@@ -1,8 +1,9 @@
 """
 Lightweight Super-66 MCP client for the npm CLI package.
 
-The client can refresh its own MCP token from SUPER66_USERNAME/SUPER66_PASSWORD,
-or fall back to the Erlangshen/XWAB/XCZT auth token saved by `/login`.
+The client refreshes its MCP token by logging in with SUPER66_USERNAME /
+SUPER66_PASSWORD or the encrypted password saved by `/login`. Saved auth tokens
+are treated as stale across CLI starts and are not reused for MCP calls.
 """
 
 from __future__ import annotations
@@ -45,10 +46,18 @@ class Super66MCP:
             "yes",
             "on",
         }
+        self.allow_static_token = os.environ.get("SUPER66_ALLOW_STATIC_TOKEN", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         self._client: Optional[httpx.AsyncClient] = None
         env_token = os.environ.get("SUPER66_MCP_TOKEN") or os.environ.get("SUPER66_TOKEN")
-        self._token_value: str = env_token.strip() if env_token else ""
-        self._token_expires_at: float = 0 if (env_token and self.password) else (float("inf") if env_token else 0)
+        self._token_value: str = env_token.strip() if env_token and (self.password or self.allow_static_token) else ""
+        self._token_expires_at: float = (
+            0 if (env_token and self.password) else (float("inf") if (env_token and self.allow_static_token) else 0)
+        )
         self._cache: dict[str, tuple[Any, float]] = {}
         self.cache_ttl = int(os.environ.get("SUPER66_CACHE_TTL_SECONDS", "60"))
 
@@ -82,7 +91,7 @@ class Super66MCP:
             self._token_expires_at = 0 if self.password else time.time() + 3600
         self._cache.clear()
         if not self.password:
-            return bool(self._token_value or token)
+            return bool((self._token_value or token) and self.allow_static_token)
         return bool(await self._ensure_token(force_refresh=True))
 
     async def refresh_auth_from_saved_session(self) -> bool:
@@ -90,14 +99,19 @@ class Super66MCP:
         password = decrypt_auth_password(session)
         account = str(session.get("account") or session.get("username") or "").strip()
         token = str(session.get("token") or "").strip()
-        if not password and not token:
+        if not password:
             return False
         return await self.refresh_auth_from_cli_login(
             login_entry=str(session.get("loginEntry") or session.get("login_entry") or self.login_entry),
             account=account,
-            password=password or "",
+            password=password,
             token=token,
         )
+
+    async def ensure_fresh_login(self) -> bool:
+        """Force a new MCP login before data calls when credentials are available."""
+        self._cache.clear()
+        return bool(await self._ensure_token(force_refresh=True))
 
     async def call_tool(
         self,
@@ -117,8 +131,8 @@ class Super66MCP:
         token = await self._ensure_token()
         if not token:
             return {
-                "error": "未登录，super-66 MCP 需要 SUPER66_USERNAME/SUPER66_PASSWORD、SUPER66_MCP_TOKEN 或 CLI 登录态",
-                "auth": "missing_token",
+                "error": "super-66 MCP 需要重新登录获取新 token；请执行 /login xwab <账号> 保存加密密码，或设置 SUPER66_USERNAME/SUPER66_PASSWORD",
+                "auth": "missing_relogin_credentials",
             }
 
         try:
@@ -181,7 +195,7 @@ class Super66MCP:
 
     async def _ensure_token(self, *, force_refresh: bool = False) -> str:
         token = os.environ.get("SUPER66_MCP_TOKEN") or os.environ.get("SUPER66_TOKEN")
-        if token and not self.password:
+        if token and not self.password and self.allow_static_token:
             return token.strip()
         now = time.time()
         if self.password:
@@ -216,8 +230,7 @@ class Super66MCP:
             self.username = saved_account
             self.password = saved_password
             return await self._ensure_token(force_refresh=True)
-        saved = session.get("token")
-        return str(saved).strip() if saved else ""
+        return ""
 
     def _cache_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
         return f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
