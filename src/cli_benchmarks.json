@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-06-16",
+  "selection_rule": "GitHub star snapshot; primary interface is CLI, TUI, shell, or terminal workflow.",
+  "source": {
+    "provider": "GitHub REST API",
+    "field": "stargazers_count",
+    "checked_with": "https://api.github.com/repos/{owner}/{repo}"
+  },
+  "projects": [
+    {
+      "rank": 1,
+      "repo": "ohmyzsh/ohmyzsh",
+      "stars": 188037,
+      "lesson": "插件/主题生态、安装引导、跨平台 shell 体验",
+      "source_url": "https://github.com/ohmyzsh/ohmyzsh"
+    },
+    {
+      "rank": 2,
+      "repo": "ollama/ollama",
+      "stars": 174262,
+      "lesson": "本地模型运行体验、最短命令路径、默认值清晰",
+      "source_url": "https://github.com/ollama/ollama"
+    },
+    {
+      "rank": 3,
+      "repo": "yt-dlp/yt-dlp",
+      "stars": 170843,
+      "lesson": "复杂参数体系、可脚本化输出、失败恢复",
+      "source_url": "https://github.com/yt-dlp/yt-dlp"
+    },
+    {
+      "rank": 4,
+      "repo": "denoland/deno",
+      "stars": 107093,
+      "lesson": "安全默认值、单二进制体验、机器友好命令",
+      "source_url": "https://github.com/denoland/deno"
+    },
+    {
+      "rank": 5,
+      "repo": "google-gemini/gemini-cli",
+      "stars": 105307,
+      "lesson": "终端原生 AI Agent、上下文解释和工具编排",
+      "source_url": "https://github.com/google-gemini/gemini-cli"
+    },
+    {
+      "rank": 6,
+      "repo": "neovim/neovim",
+      "stars": 100420,
+      "lesson": "键盘优先、可扩展内核、快速反馈循环",
+      "source_url": "https://github.com/neovim/neovim"
+    },
+    {
+      "rank": 7,
+      "repo": "oven-sh/bun",
+      "stars": 93222,
+      "lesson": "速度优先、一体化工具链、静默可组合输出",
+      "source_url": "https://github.com/oven-sh/bun"
+    },
+    {
+      "rank": 8,
+      "repo": "junegunn/fzf",
+      "stars": 80982,
+      "lesson": "模糊查找、增量过滤、轻量交互",
+      "source_url": "https://github.com/junegunn/fzf"
+    },
+    {
+      "rank": 9,
+      "repo": "jesseduffield/lazygit",
+      "stars": 79317,
+      "lesson": "TUI 工作台、状态即导航、动作可发现",
+      "source_url": "https://github.com/jesseduffield/lazygit"
+    },
+    {
+      "rank": 10,
+      "repo": "BurntSushi/ripgrep",
+      "stars": 65082,
+      "lesson": "高性能搜索、尊重忽略规则、稳定退出码",
+      "source_url": "https://github.com/BurntSushi/ripgrep"
+    }
+  ],
+  "optimization_points": [
+    {
+      "rank": 1,
+      "name": "命令发现",
+      "inspired_by": "fzf / lazygit",
+      "implemented": "输入 / 或 /commands <关键词> 后用 fuzzy 排序找命令"
+    },
+    {
+      "rank": 2,
+      "name": "脚本友好",
+      "inspired_by": "deno / gh / yt-dlp",
+      "implemented": "新增 --json 与 --plain，输出可被自动化消费"
+    },
+    {
+      "rank": 3,
+      "name": "静默包装器",
+      "inspired_by": "bun / ripgrep",
+      "implemented": "npm wrapper 不再污染子命令输出，支持 --quiet"
+    },
+    {
+      "rank": 4,
+      "name": "历史记忆",
+      "inspired_by": "ohmyzsh / neovim",
+      "implemented": "交互模式持久化命令历史，Tab 补全复用历史上下文"
+    },
+    {
+      "rank": 5,
+      "name": "诊断路径",
+      "inspired_by": "gh / deno",
+      "implemented": "/doctor 暴露工作区、账号、模型、资源和输出模式检查"
+    },
+    {
+      "rank": 6,
+      "name": "Agent 轨迹",
+      "inspired_by": "gemini-cli / aider",
+      "implemented": "/plan 保留意图、工具、映射、产物和失败阶段"
+    },
+    {
+      "rank": 7,
+      "name": "资源出口",
+      "inspired_by": "lazygit / gh",
+      "implemented": "/links 与 /open 统一网页、图片、HTML/PDF、图表和报告"
+    },
+    {
+      "rank": 8,
+      "name": "沙箱边界",
+      "inspired_by": "deno",
+      "implemented": "工作区授权后才写入 .erlangshen，避免越界访问"
+    },
+    {
+      "rank": 9,
+      "name": "错误恢复",
+      "inspired_by": "yt-dlp",
+      "implemented": "未知命令给相近建议，并提示可执行下一步"
+    },
+    {
+      "rank": 10,
+      "name": "路线沉淀",
+      "inspired_by": "ohmyzsh",
+      "implemented": "README_CLI 记录对标来源、已落地点和后续开发方向"
+    }
+  ]
+}

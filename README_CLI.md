@@ -54,6 +54,45 @@ erlangshen /map 全球流动性转向时风险资产怎么看
 erlangshen /advice 利率下行时A股红利资产怎么看
 ```
 
+## CLI 交互优化与脚本模式
+
+本轮 CLI 优化参考了 GitHub star 数量最高的一组开源 CLI/TUI 项目，数据固化在 `src/cli_benchmarks.json`：
+
+```bash
+erlangshen /benchmarks
+erlangshen /benchmarks json
+erlangshen /benchmarks checklist
+python3 scripts/update_cli_benchmarks.py
+```
+
+已落地能力包括 `/commands <关键词>` 模糊命令搜索、`/commands usage` 命令热度面板、交互命令历史、命令使用频次排序、`/plan` 授权工作区持久化、`/plan diff` 失败恢复提示、`/links`/`/open` 统一资源出口，以及适合自动化的输出模式：
+
+```bash
+erlangshen --json /benchmarks
+erlangshen --plain /help
+erlangshen --strict /doctor
+erlangshen --quiet /status
+erlangshen /plan history
+erlangshen /plan diff
+erlangshen /plan history export
+erlangshen /plan history prune 20
+erlangshen /plan history prune 7d
+erlangshen /commands usage
+erlangshen /commands usage export
+erlangshen /commands usage reset
+python3 scripts/smoke_cli_strict.py
+python3 scripts/smoke_cli_npm.py
+python3 scripts/release_check.py
+npm run release:check
+npm run release:check:refresh
+```
+
+命令热度可通过 `ERLANGSHEN_COMMAND_USAGE_SCOPE=global|project|off` 控制：默认全局记录，`project` 写入授权工作区，`off` 完全关闭记录。
+
+`/commands usage json` 可输出结构化热度数据，便于脚本读取当前 scope、文件和 top commands；`/commands usage export/reset` 可导出或清空当前热度快照。
+
+`--strict` 退出码约定：`64` 未知命令/参数错误，`65` 工作区问题，`66` 账号或鉴权问题，`67` 本机模型/API Key 问题，`68` 服务端问题，`69` 本地分析模块缺失，`70` 图表或资源产物问题。
+
 ## 大模型 API Key 安全边界
 
 用户的大模型 API Key 只在客户端使用：
@@ -125,7 +164,12 @@ node bin/cli.js --help
 npm 发布包只包含客户端必要文件：
 
 - `bin/cli.js`
+- `scripts/update_cli_benchmarks.py`
+- `scripts/smoke_cli_strict.py`
+- `scripts/smoke_cli_npm.py`
+- `scripts/release_check.py`
 - `src/cli.py`
+- `src/cli_benchmarks.json`
 - `src/auth/*`
 - `src/client/*`
 - `src/commands/auth.py`

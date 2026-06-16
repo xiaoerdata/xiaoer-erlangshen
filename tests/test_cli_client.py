@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 
 from src import __version__
-from src.cli import CLI, _display_width, _extract_startup_workspace_args, _logo, _panel, _text_panel, main
+from src.cli import CLI, _display_width, _extract_startup_workspace_args, _json_cli_envelope, _logo, _panel, _strict_exit_code, _text_panel, main
 from src.commands.server import ServerCommand
 from src.client.server_client import _normalize_login_payload
 from src.client.chrome_search import build_search_url, _is_noise_search_result
@@ -17,6 +17,7 @@ from src.workspace import approve_workspace, recent_workspaces, workspace_status
 @pytest.fixture(autouse=True)
 def isolate_local_memory(monkeypatch, tmp_path):
     monkeypatch.setenv("ERLANGSHEN_MEMORY_FILE", str(tmp_path / "memory.json"))
+    monkeypatch.setenv("ERLANGSHEN_COMMAND_USAGE_FILE", str(tmp_path / "command_usage.json"))
 
 
 @pytest.mark.asyncio
@@ -120,6 +121,106 @@ async def test_command_palette_and_command_suggestion():
     assert "未知命令: /statsu" in typo
     assert "你是不是想输入: /status" in typo
 
+    searched = await cli.dispatch("/commands work")
+    assert "二郎神命令搜索" in searched
+    assert "/workspace" in searched
+    assert "匹配:" in searched
+
+    benchmark = await cli.dispatch("/benchmarks")
+    assert "CLI 对标与优化落地" in benchmark
+    assert "ohmyzsh/ohmyzsh" in benchmark
+    assert "BurntSushi/ripgrep" in benchmark
+    assert "已提炼并落地的 10 个优化点" in benchmark
+
+    benchmark_json = await cli.dispatch("/benchmarks json")
+    payload = json.loads(benchmark_json)
+    assert payload["checked_at"] == "2026-06-16"
+    assert payload["schema_version"] == 1
+    assert payload["source"]["field"] == "stargazers_count"
+    assert len(payload["projects"]) == 10
+    assert payload["projects"][0]["source_url"].startswith("https://github.com/")
+    assert len(payload["optimization_points"]) == 10
+
+    checklist = await cli.dispatch("/benchmarks checklist")
+    assert "【CLI 开发清单】" in checklist
+    assert "[done] 命令发现" in checklist
+    assert "[done] 计划复盘" in checklist
+    assert "[done] 命令热度面板" in checklist
+    assert "[done] release check" in checklist
+    assert "[next] ci release" in checklist
+
+
+@pytest.mark.asyncio
+async def test_command_usage_ranks_recent_commands(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_COMMAND_USAGE_FILE", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("ERLANGSHEN_RECORD_NON_TTY_COMMANDS", "1")
+    monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("ERLANGSHEN_WORKSPACE_FILE", str(tmp_path / "workspaces.json"))
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    reset_config()
+
+    cli = CLI()
+    await cli.dispatch("/doctor")
+    await cli.dispatch("/doctor")
+
+    usage = json.loads((tmp_path / "usage.json").read_text(encoding="utf-8"))
+    assert usage["commands"]["doctor"]["count"] == 2
+
+    getting_started = [
+        item[1]
+        for item in cli._filter_palette("")
+        if cli._palette_group_title(item[0]) == "Getting Started"
+    ]
+    assert getting_started[0] == "/doctor"
+    panel = await cli.dispatch("/commands")
+    assert "used 2x" in panel
+    searched = await cli.dispatch("/commands doctor")
+    assert "used 2x" in searched
+    usage_panel = await cli.dispatch("/commands usage")
+    assert "【命令使用热度】" in usage_panel
+    assert "/doctor" in usage_panel
+    usage_json = json.loads(await cli.dispatch("/commands usage json"))
+    assert usage_json["ok"] is True
+    assert usage_json["scope"] == "global"
+    assert any(item["command_id"] == "doctor" for item in usage_json["commands"])
+    export_json = json.loads(await cli.dispatch("/commands usage export json"))
+    assert export_json["ok"] is True
+    assert Path(export_json["export_path"]).exists()
+    assert export_json["count"] >= 1
+    reset_json = json.loads(await cli.dispatch("/commands usage reset json"))
+    assert reset_json["ok"] is True
+    assert reset_json["removed"] >= 1
+    assert json.loads(cli.command_usage_text("json"))["count"] == 0
+    reset_config()
+
+
+def test_command_usage_scope_can_be_project_or_off(monkeypatch, tmp_path):
+    monkeypatch.delenv("ERLANGSHEN_COMMAND_USAGE_FILE", raising=False)
+    monkeypatch.setenv("ERLANGSHEN_COMMAND_USAGE_SCOPE", "off")
+    monkeypatch.setenv("ERLANGSHEN_RECORD_NON_TTY_COMMANDS", "1")
+    cli = CLI()
+
+    assert cli._command_usage_path() is None
+    cli._record_command_usage("doctor", "")
+    assert cli._load_command_usage()["commands"] == {}
+    assert "未记录" in cli.command_usage_text()
+    assert json.loads(cli.command_usage_text("reset json"))["reason"] == "usage_disabled"
+    assert json.loads(cli.command_usage_text("export json"))["reason"] == "usage_disabled"
+
+    monkeypatch.setenv("ERLANGSHEN_COMMAND_USAGE_SCOPE", "project")
+    monkeypatch.setenv("ERLANGSHEN_WORKSPACE_FILE", str(tmp_path / "workspaces.json"))
+    project = tmp_path / "project"
+    project.mkdir()
+    approve_workspace(project)
+    cli = CLI()
+    path = cli._command_usage_path()
+
+    assert path == project / ".erlangshen" / "artifacts" / "command_usage.json"
+    cli._record_command_usage("doctor", "")
+    assert path.exists()
+    usage = json.loads(path.read_text(encoding="utf-8"))
+    assert usage["commands"]["doctor"]["count"] == 1
+
 
 def test_slash_picker_helpers_cover_all_commands():
     cli = CLI()
@@ -128,6 +229,7 @@ def test_slash_picker_helpers_cover_all_commands():
     assert {f"/{name}" for name in cli.COMMANDS}.issubset(shortcuts)
     assert {f"/{name}" for name in cli.ALIASES}.issubset(shortcuts)
     assert cli._filter_palette("cognition")[0][1] == "/cognition <cmd>"
+    assert cli._filter_palette("wrk")[0][1].startswith("/workspace")
     assert cli._input_from_shortcut("/login xwab <账号>") == ("/login xwab ", True)
     assert cli._input_from_shortcut("/status") == ("/status", False)
     login_detail = cli._slash_selection_detail(cli._filter_palette("login xwab"), 0)
@@ -197,6 +299,33 @@ def test_slash_picker_helpers_cover_all_commands():
     plan_detail = cli._slash_selection_detail(cli._filter_palette("plan"), 0)
     assert "复盘最近一次分析的意图和工具链路" in plan_detail
     assert "路由来源、工具理由、MCP 快照、服务端映射、资源链接和产物计划" in plan_detail
+
+
+def test_json_cli_envelope_and_history_path(monkeypatch, tmp_path):
+    cli = CLI()
+    history_path = tmp_path / "history"
+    monkeypatch.setenv("ERLANGSHEN_HISTORY_FILE", str(history_path))
+
+    payload = json.loads(_json_cli_envelope(cli, "/benchmarks", "ok", exit_code=0))
+
+    assert payload["ok"] is True
+    assert payload["exit_code"] == 0
+    assert payload["command"] == "/benchmarks"
+    assert payload["text"] == "ok"
+    assert payload["resources"] == []
+    assert cli._history_path() == history_path
+
+
+def test_strict_exit_code_classifies_cli_failures():
+    assert _strict_exit_code("/statsu", "未知命令: /statsu") == 64
+    assert _strict_exit_code("/chart", "请提供图表标题和 JSON 数据。") == 64
+    assert _strict_exit_code("/analyze", "当前安装包不包含 /analyze 的本地分析模块") == 69
+    assert _strict_exit_code("/doctor", "NEED workspace\nfix   workspace") == 65
+    assert _strict_exit_code("/status", "未登录") == 66
+    assert _strict_exit_code("/model", "missing key") == 67
+    assert _strict_exit_code("/server status", "服务端连接失败") == 68
+    assert _strict_exit_code("/chart", "图表生成失败") == 70
+    assert _strict_exit_code("/benchmarks", "OK") == 0
 
 
 def test_slash_picker_groups_commands_for_dropdown_rendering():
@@ -775,12 +904,17 @@ async def test_doctor_command_reports_local_readiness(monkeypatch, tmp_path):
     assert "资源索引会保存为 resources.json" in result
     assert "Agent UX:" in result
     assert "slash picker" in result
+    assert "fuzzy command search" in result
+    assert "usage-aware ranking" in result
+    assert "script output modes" in result
+    assert "persistent history" in result
+    assert "cli benchmarks" in result
     assert "workspace browser" in result
     assert "context memory" in result
     assert "agent trace" in result
     assert "chart preview" in result
     assert "server panels" in result
-    assert "交互能力: 6/6 项可用" in result
+    assert "交互能力: 11/11 项可用" in result
     assert "/setup run" in result
     reset_config()
 
@@ -866,7 +1000,8 @@ async def test_examples_command_teaches_natural_language_prompts():
 
 
 @pytest.mark.asyncio
-async def test_plan_command_shows_empty_state_before_analysis():
+async def test_plan_command_shows_empty_state_before_analysis(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_WORKSPACE_FILE", str(tmp_path / "workspaces.json"))
     result = await CLI().dispatch("/plan")
 
     assert "【最近一次分析计划】" in result
@@ -919,6 +1054,121 @@ async def test_plan_command_shows_recent_resource_links():
     assert "工具链: get_index_data: 沪深300/上证指数/创业板指/恒生科技指数 -> get_global_asset_data" in result
     assert "新闻、政策原文、图片、图表页面必须转成 resource_links" in result
     assert "/links 查看最近网页、图片、图表和报告名称链接；/links open 1 直接打开第一个资源" in result
+
+
+def test_agent_plan_persists_to_authorized_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_WORKSPACE_FILE", str(tmp_path / "workspaces.json"))
+    project = tmp_path / "project"
+    project.mkdir()
+    approve_workspace(project)
+
+    cli = CLI()
+    cli._remember_agent_plan(
+        query="测试计划持久化",
+        intent_plan={
+            "intent": "market_overview",
+            "tone": "concise",
+            "rewritten_query": "测试计划持久化",
+            "needs_mcp": False,
+            "needs_server_mapping": True,
+        },
+        mapping_query="测试计划持久化",
+        mcp_data={},
+        matches=[{"scene": "测试场景"}],
+        synthesis={"artifact_results": []},
+        provider="openai",
+        model="gpt-test",
+    )
+
+    latest = project / ".erlangshen" / "artifacts" / "agent_plan.json"
+    history = project / ".erlangshen" / "artifacts" / "agent_plans.jsonl"
+    assert latest.exists()
+    assert history.exists()
+    payload = json.loads(latest.read_text(encoding="utf-8"))
+    assert payload["query"] == "测试计划持久化"
+    assert payload["server_scenes"] == ["测试场景"]
+    assert payload["persisted_path"] == str(latest)
+
+    reloaded = CLI().plan_text()
+    assert "测试计划持久化" in reloaded
+    assert "持久化文件" in reloaded
+    history_text = CLI().plan_text("history")
+    assert "【最近计划历史】" in history_text
+    assert "测试计划持久化" in history_text
+    history_json = json.loads(CLI().plan_text("history json"))
+    assert history_json["ok"] is True
+    assert history_json["count"] == 1
+    assert history_json["history"][0]["query"] == "测试计划持久化"
+
+    cli._remember_agent_plan(
+        query="第二次计划",
+        intent_plan={
+            "intent": "single_asset",
+            "tone": "detailed",
+            "rewritten_query": "第二次计划",
+            "needs_mcp": True,
+            "needs_server_mapping": False,
+            "mcp_tools": [{"name": "search_astocks", "arguments": {"query": "茅台"}}],
+            "composition_patterns_used": ["name_to_realtime_snapshot"],
+        },
+        mapping_query="第二次计划",
+        mcp_data={"search_astocks:茅台": {"items": []}},
+        matches=[],
+        synthesis={"artifact_results": [{"title": "第二次图表"}]},
+        provider="openai",
+        model="gpt-test",
+    )
+
+    diff_text = CLI().plan_text("diff")
+    assert "【计划差异】" in diff_text
+    assert "工具选择发生变化" in diff_text
+    assert "恢复建议" in diff_text
+    assert "MCP 工具和数据键" in diff_text
+    assert "search_astocks" in diff_text
+    diff_json = json.loads(CLI().plan_text("diff json"))
+    assert diff_json["ok"] is True
+    assert any(item["field"] == "mcp_tools" for item in diff_json["diff"]["list_changes"])
+    assert diff_json["diff"]["recommendations"]
+
+    export_json = json.loads(CLI().plan_text("history export json"))
+    assert export_json["ok"] is True
+    assert Path(export_json["export_path"]).exists()
+    assert export_json["count"] == 2
+
+    history_items = cli._read_agent_plan_history(history)
+    history_items.insert(0, {"query": "旧计划", "persisted_at": "2000-01-01T00:00:00", "intent": "old"})
+    cli._write_agent_plan_history(history, history_items)
+    days_prune = json.loads(CLI().plan_text("history prune 1d json"))
+    assert days_prune["ok"] is True
+    assert days_prune["mode"] == "最近 1 天"
+    assert days_prune["removed"] == 1
+
+    prune_json = json.loads(CLI().plan_text("history prune 1 json"))
+    assert prune_json["ok"] is True
+    assert prune_json["kept"] == 1
+    assert prune_json["removed"] == 1
+    pruned = json.loads(CLI().plan_text("history json"))
+    assert pruned["count"] == 1
+    assert pruned["history"][0]["query"] == "第二次计划"
+
+    cli._remember_agent_failure_plan(
+        query="失败计划",
+        intent_plan={"intent": "market_overview", "rewritten_query": "失败计划"},
+        mapping_query="失败计划",
+        mcp_data={},
+        matches=[],
+        provider="openai",
+        model="gpt-test",
+        failure_stage="server_mapping",
+        failure_message="服务端连接失败",
+    )
+    failure_text = CLI().plan_text()
+    assert "/plan diff 对比本次失败" in failure_text
+    assert "第二次计划" in failure_text
+    failure_diff = CLI().plan_text("diff")
+    assert "基准:" in failure_diff and "第二次计划" in failure_diff
+    assert "最新:" in failure_diff and "失败计划" in failure_diff
+    assert "/service 检查服务端健康" in failure_diff
 
 
 @pytest.mark.asyncio

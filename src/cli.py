@@ -4,6 +4,7 @@
 """
 
 import sys
+import atexit
 import asyncio
 import difflib
 import getpass
@@ -45,6 +46,7 @@ LOGO_COMPACT = [
 ]
 
 COMMAND_PALETTE = [
+    ("benchmarks", "/benchmarks", "查看本轮对标的高 star CLI 项目、10 个优化点和后续路线"),
     ("setup", "/setup", "初始化向导；/setup run 可选择项目文件夹并授权沙箱"),
     ("setup-run", "/setup run", "执行式初始化：选择项目文件夹、授权沙箱、检查账号和模型"),
     ("setup-workspace", "/setup workspace", "重新打开项目文件夹选择器并授权本地沙箱"),
@@ -113,7 +115,7 @@ COMMAND_PALETTE = [
 ]
 
 COMMAND_GROUPS = [
-    ("Getting Started", {"setup", "setup-run", "setup-workspace", "init", "brief", "doctor"}),
+    ("Getting Started", {"benchmarks", "setup", "setup-run", "setup-workspace", "init", "brief", "doctor"}),
     ("Account & Model", {"login", "logout", "status", "whoami", "model", "model-select", "model-key"}),
     ("Server & Mapping", {
         "service", "health", "me", "map", "advice", "auth", "server",
@@ -240,6 +242,7 @@ SERVER_COMMAND_DETAILS = {
 }
 
 COMMAND_NEXT_HINTS = {
+    "/benchmarks": "/commands <关键词> 或直接输入投资问题",
     "/setup": "/setup run",
     "/setup run": "/workspace browse 或 /workspace path <路径>",
     "/setup workspace": "/setup run 或直接输入投资问题",
@@ -291,6 +294,35 @@ COMMAND_GROUP_NEXT_HINTS = {
     "Market Intelligence": "直接输入问题或 /plan",
     "Session": "/help",
 }
+
+CLI_BENCHMARK_CHECKED_AT = "2026-06-16"
+CLI_BENCHMARK_PROJECTS = [
+    ("ohmyzsh/ohmyzsh", "188,037", "插件/主题生态、安装引导、跨平台 shell 体验"),
+    ("ollama/ollama", "174,262", "本地模型运行体验、最短命令路径、默认值清晰"),
+    ("yt-dlp/yt-dlp", "170,843", "复杂参数体系、可脚本化输出、失败恢复"),
+    ("denoland/deno", "107,093", "安全默认值、单二进制体验、机器友好命令"),
+    ("google-gemini/gemini-cli", "105,307", "终端原生 AI Agent、上下文解释和工具编排"),
+    ("neovim/neovim", "100,420", "键盘优先、可扩展内核、快速反馈循环"),
+    ("oven-sh/bun", "93,222", "速度优先、一体化工具链、静默可组合输出"),
+    ("junegunn/fzf", "80,982", "模糊查找、增量过滤、轻量交互"),
+    ("jesseduffield/lazygit", "79,317", "TUI 工作台、状态即导航、动作可发现"),
+    ("BurntSushi/ripgrep", "65,082", "高性能搜索、尊重忽略规则、稳定退出码"),
+]
+
+CLI_OPTIMIZATION_POINTS = [
+    ("命令发现", "fzf / lazygit", "输入 / 或 /commands <关键词> 后用 fuzzy 排序找命令"),
+    ("脚本友好", "deno / gh / yt-dlp", "新增 --json 与 --plain，输出可被自动化消费"),
+    ("静默包装器", "bun / ripgrep", "npm wrapper 不再污染子命令输出，支持 --quiet"),
+    ("历史记忆", "ohmyzsh / neovim", "交互模式持久化命令历史，Tab 补全复用历史上下文"),
+    ("诊断路径", "gh / deno", "/doctor 暴露工作区、账号、模型、资源和输出模式检查"),
+    ("Agent 轨迹", "gemini-cli / aider", "/plan 保留意图、工具、映射、产物和失败阶段"),
+    ("资源出口", "lazygit / gh", "/links 与 /open 统一网页、图片、HTML/PDF、图表和报告"),
+    ("沙箱边界", "deno", "工作区授权后才写入 .erlangshen，避免越界访问"),
+    ("错误恢复", "yt-dlp", "未知命令给相近建议，并提示可执行下一步"),
+    ("路线沉淀", "ohmyzsh", "README_CLI 记录对标来源、已落地点和后续开发方向"),
+]
+
+CLI_BENCHMARK_DATA_FILE = Path(__file__).with_name("cli_benchmarks.json")
 
 PROVIDER_KEY_HINTS = {
     "openai": ("OPENAI_API_KEY", "OPENAI_MODEL"),
@@ -424,7 +456,7 @@ class CLI:
         "map": ("server", "map"),
         "init": ("setup", ""),
     }
-    LOCAL_COMMANDS = {"commands", "cmd", "?", "model", "models", "config", "setup", "tools", "mcp", "plan", "context", "memory", "mem", "clear", "doctor", "brief", "examples", "links"}
+    LOCAL_COMMANDS = {"benchmarks", "benchmark", "cli-benchmarks", "commands", "cmd", "?", "model", "models", "config", "setup", "tools", "mcp", "plan", "context", "memory", "mem", "clear", "doctor", "brief", "examples", "links"}
 
     def __init__(self):
         self.brain = None
@@ -440,6 +472,7 @@ class CLI:
         self._last_mcp_data: dict | None = None
         self._last_artifact_results: list[dict] = []
         self._last_resource_links: list[dict[str, object]] = []
+        self._command_usage_cache: dict[str, object] | None = None
         self._memory = LocalMemoryStore()
 
     async def dispatch(self, user_input: str) -> str:
@@ -455,6 +488,7 @@ class CLI:
             command = parts[0].strip()
             args = parts[1].strip() if len(parts) > 1 else ""
             command, args = self._resolve_alias(command, args)
+            self._record_command_usage(command, args)
             return await self.run_command(command, args)
         return await self.client_side_advice(user_input)
 
@@ -471,7 +505,9 @@ class CLI:
         if command in {"help", "h"}:
             return self.help_text()
         if command in {"commands", "cmd", "?"}:
-            return self.command_palette_text()
+            return self.command_palette_text(args)
+        if command in {"benchmarks", "benchmark", "cli-benchmarks", "对标", "优化"}:
+            return self.benchmarks_text(args)
         if command in {"setup", "init", "初始化", "向导"}:
             setup_args = args.strip().lower().split()
             if setup_args and setup_args[0] in {"workspace", "project", "folder", "path", "workdir", "目录", "项目", "文件夹"}:
@@ -489,7 +525,7 @@ class CLI:
         if command in {"examples", "example", "prompts", "提问", "示例"}:
             return self.examples_text()
         if command in {"plan", "计划", "trace", "过程"}:
-            return self.plan_text()
+            return self.plan_text(args)
         if command in {"context", "ctx", "上下文"}:
             return self.context_text(args)
         if command in {"memory", "mem", "记忆", "长期记忆"}:
@@ -530,7 +566,14 @@ class CLI:
             except Exception as exc:
                 return self._missing_local_module_message(command, exc)
         suggestion = self._command_suggestion(command)
-        aliases = ", ".join(f"/{item[0]}" for item in COMMAND_PALETTE[:7])
+        common_shortcuts: list[str] = []
+        for _, shortcut, _ in COMMAND_PALETTE[:12]:
+            command_shortcut = shortcut.split()[0]
+            if command_shortcut not in common_shortcuts:
+                common_shortcuts.append(command_shortcut)
+            if len(common_shortcuts) >= 7:
+                break
+        aliases = ", ".join(common_shortcuts)
         lines = [f"未知命令: /{command}"]
         if suggestion:
             lines.append(f"你是不是想输入: /{suggestion}")
@@ -1338,6 +1381,8 @@ class CLI:
 二郎神 - 服务端优先 CLI
 
 常用命令:
+  /benchmarks                 查看高 star CLI 对标、已落地优化点和路线
+  /benchmarks checklist       查看 CLI 优化开发清单和下一步路线
   /login [xwab|xczt] [账号]    登录核心服务端
   /logout                     清除本地登录状态
   /status                     查看登录状态
@@ -1350,8 +1395,11 @@ class CLI:
   /doctor                     本地诊断工作区、登录、大模型、MCP 与产物链路
   /tools                      查看 MCP、web_search 和图表 artifact 能力地图
   /plan                       查看最近一次分析的意图、工具调用和产物计划
+  /plan history               查看授权工作区里的历史分析计划
+  /plan diff                  对比最近两次分析计划
   /context                    查看最近对话上下文；/context clear 清空
-  /commands                   打开命令面板
+  /commands [关键词]           打开命令面板；可按关键词搜索
+  /commands usage             查看命令热度、scope 和存储文件
   /service                    查看服务端状态
   /health                     服务端健康检查
   /map <问题>                 映射服务端认知场景
@@ -1359,6 +1407,11 @@ class CLI:
   <自然语言问题>              等同于 /advice <问题>
   /clear                      清屏并开启干净上下文
   /exit                       退出
+
+全局选项:
+  --json                      输出机器可读 envelope
+  --plain / --no-color        禁用颜色和 OSC8 链接
+  --strict / --exit-code      未就绪、未知命令或参数错误时返回非零退出码
 
 完整命令:
   /auth <cmd>                 登录、账号、服务端地址
@@ -1391,6 +1444,12 @@ class CLI:
   erlangshen /auth server https://xiaoerdata.site/api/erlangshen
   erlangshen /login xwab user@example.com
   erlangshen /model
+  erlangshen /benchmarks
+  erlangshen /benchmarks checklist
+  erlangshen /plan history
+  erlangshen /plan diff
+  erlangshen /commands work
+  erlangshen /commands usage
   erlangshen /model select
   erlangshen /model key
   erlangshen --cd /path/to/project
@@ -1406,8 +1465,39 @@ class CLI:
   erlangshen 利率下行时A股红利资产怎么看
 """
 
-    def command_palette_text(self) -> str:
+    def command_palette_text(self, query: str = "") -> str:
         """Return a compact slash-command palette."""
+        query = (query or "").strip()
+        if query.lower().split()[:1] in (["usage"], ["stats"], ["热度"], ["统计"]):
+            return self.command_usage_text(query)
+        if query:
+            matches = self._filter_palette(query)
+            lines = [
+                "【二郎神命令搜索】",
+                f"- 查询: {query}",
+                f"- 匹配: {len(matches)} 个",
+                "- 规则: 精确/前缀优先，随后按 token、子序列、相似度和使用频次排序",
+                "",
+            ]
+            if not matches:
+                suggestion = self._command_suggestion(query.split()[0])
+                if suggestion:
+                    lines.append(f"没有直接匹配。你是不是想输入: /{suggestion}")
+                else:
+                    lines.append("没有匹配命令。输入 /commands 查看完整命令面板。")
+                return "\n".join(lines)
+            rows = ["command                          what it does"]
+            for command_id, shortcut, description in matches[:16]:
+                group = self._palette_group_title(command_id)
+                usage = self._command_usage_summary(command_id)
+                meta = (f"{usage} · " if usage else "") + f"{description} · {group}"
+                rows.append(f"{shortcut:<32} {meta}")
+            lines.append(_text_panel("Command Search", rows, min_width=88, max_width=120))
+            if len(matches) > 16:
+                lines.append(f"... 还有 {len(matches) - 16} 个匹配；继续输入更具体的关键词可收窄结果。")
+            lines.append("")
+            lines.append("提示: 也可以在交互模式输入 / 后直接键入关键词，↑↓ 选择，Enter 确认。")
+            return "\n".join(lines)
         by_id = {item[0]: item for item in COMMAND_PALETTE}
         lines = [
             "【二郎神命令面板】",
@@ -1427,7 +1517,9 @@ class CLI:
             group_lines = ["command                          what it does"]
             for command_id, shortcut, description in COMMAND_PALETTE:
                 if command_id in command_ids:
-                    group_lines.append(f"{shortcut:<32} {description}")
+                    usage = self._command_usage_summary(command_id)
+                    meta = (f"{usage} · " if usage else "") + description
+                    group_lines.append(f"{shortcut:<32} {meta}")
                     seen.add(command_id)
             if len(group_lines) > 1:
                 lines.append(_text_panel(title, group_lines, min_width=88, max_width=120))
@@ -1435,11 +1527,173 @@ class CLI:
         remaining = [item for item in COMMAND_PALETTE if item[0] not in seen and item[0] in by_id]
         if remaining:
             group_lines = ["command                          what it does"]
-            group_lines.extend(f"{shortcut:<32} {description}" for _, shortcut, description in remaining)
+            for command_id, shortcut, description in remaining:
+                usage = self._command_usage_summary(command_id)
+                meta = (f"{usage} · " if usage else "") + description
+                group_lines.append(f"{shortcut:<32} {meta}")
             lines.append(_text_panel("More", group_lines, min_width=88, max_width=120))
             lines.append("")
         lines.append("提示: 在交互模式下输入 / 会弹出可选择命令列表；输入字母可过滤，↑↓ 选择，Enter 确认。")
         return "\n".join(lines)
+
+    def command_usage_text(self, args: str = "") -> str:
+        tokens = (args or "").strip().split()
+        lowered = {token.lower() for token in tokens}
+        output_json = any(token in {"json", "--json"} for token in lowered)
+        if lowered & {"reset", "clear", "clean", "清空", "重置"}:
+            return self.command_usage_reset_text(output_json=output_json)
+        if lowered & {"export", "dump", "导出"}:
+            return self.command_usage_export_text(output_json=output_json)
+        usage = self._load_command_usage()
+        commands = usage.get("commands") if isinstance(usage, dict) else {}
+        rows = self._command_usage_rows(commands if isinstance(commands, dict) else {})
+        path = self._command_usage_path()
+        payload = {
+            "ok": True,
+            "scope": self._command_usage_scope(),
+            "path": str(path) if path else None,
+            "updated_at": usage.get("updated_at") if isinstance(usage, dict) else None,
+            "count": len(rows),
+            "commands": rows,
+        }
+        if output_json:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        lines = [
+            "【命令使用热度】",
+            f"- 策略: {payload['scope']}",
+            f"- 文件: {payload['path'] or '未记录'}",
+            f"- 更新时间: {payload['updated_at'] or '暂无'}",
+            f"- 命令数: {len(rows)}",
+            "- 配置: ERLANGSHEN_COMMAND_USAGE_SCOPE=global|project|off",
+        ]
+        if payload["scope"] == "project" and not payload["path"]:
+            lines.append("- 提示: project 策略需要先 /workspace allow 授权项目文件夹。")
+        if not rows:
+            lines.extend([
+                "",
+                "暂无命令使用记录。交互模式下执行命令后会自动记录；脚本测试可设置 ERLANGSHEN_RECORD_NON_TTY_COMMANDS=1。",
+            ])
+            return "\n".join(lines)
+        lines.extend(["", "Top commands:"])
+        for index, item in enumerate(rows[:12], 1):
+            last = item.get("last_used") or "unknown"
+            lines.append(f"{index}. {item.get('shortcut')} · {item.get('count')} 次 · last {last}")
+        lines.extend([
+            "",
+            "命令:",
+            "  /commands usage json  输出结构化热度数据",
+            "  /commands usage export 导出当前热度快照",
+            "  /commands usage reset  清空当前热度记录",
+            "  /commands <关键词>     按关键词搜索并参考使用热度排序",
+        ])
+        return "\n".join(lines)
+
+    def command_usage_reset_text(self, *, output_json: bool = False) -> str:
+        scope = self._command_usage_scope()
+        path = self._command_usage_path()
+        commands = self._load_command_usage().get("commands") if path else {}
+        removed = len(self._command_usage_rows(commands if isinstance(commands, dict) else {}))
+        if path is None:
+            payload = {
+                "ok": False,
+                "reason": "usage_disabled" if scope == "off" else "usage_path_unavailable",
+                "scope": scope,
+                "path": None,
+                "removed": 0,
+            }
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return "\n".join([
+                "【命令热度清空】",
+                "- 当前策略未提供可清空的 usage 文件。",
+                "- 配置: ERLANGSHEN_COMMAND_USAGE_SCOPE=global|project|off",
+            ])
+        try:
+            if path.exists():
+                path.unlink()
+            self._command_usage_cache = {"commands": {}}
+        except OSError as exc:
+            payload = {"ok": False, "error": str(exc), "scope": scope, "path": str(path), "removed": 0}
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return f"【命令热度清空】\n- 清空失败: {exc}"
+        payload = {"ok": True, "scope": scope, "path": str(path), "removed": removed}
+        if output_json:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        return "\n".join([
+            "【命令热度清空】",
+            f"- 文件: {path}",
+            f"- 已移除命令: {removed}",
+            "- 后续命令会重新开始累计热度。",
+        ])
+
+    def command_usage_export_text(self, *, output_json: bool = False) -> str:
+        scope = self._command_usage_scope()
+        path = self._command_usage_path()
+        if path is None:
+            payload = {
+                "ok": False,
+                "reason": "usage_disabled" if scope == "off" else "usage_path_unavailable",
+                "scope": scope,
+                "path": None,
+                "export_path": None,
+                "count": 0,
+            }
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return "\n".join([
+                "【命令热度导出】",
+                "- 当前策略未提供可导出的 usage 文件。",
+                "- project 策略需要先 /workspace allow 授权项目文件夹。",
+            ])
+        usage = self._load_command_usage()
+        commands = usage.get("commands") if isinstance(usage, dict) else {}
+        rows = self._command_usage_rows(commands if isinstance(commands, dict) else {})
+        export_path = path.parent / f"command_usage_export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        payload = {
+            "ok": True,
+            "scope": scope,
+            "source_path": str(path),
+            "export_path": str(export_path),
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "count": len(rows),
+            "commands": rows,
+            "usage": usage,
+        }
+        try:
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(export_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            payload = {"ok": False, "error": str(exc), "scope": scope, "path": str(path), "export_path": None, "count": len(rows)}
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return f"【命令热度导出】\n- 导出失败: {exc}"
+        if output_json:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        return "\n".join([
+            "【命令热度导出】",
+            f"- 来源文件: {path}",
+            f"- 导出文件: {export_path}",
+            f"- 命令数: {len(rows)}",
+        ])
+
+    def _command_usage_rows(self, commands: dict) -> list[dict[str, object]]:
+        by_id = {command_id: shortcut for command_id, shortcut, _ in COMMAND_PALETTE}
+        rows = []
+        for command_id, item in commands.items():
+            if not isinstance(item, dict):
+                continue
+            count = max(0, int(item.get("count") or 0))
+            if not count:
+                continue
+            rows.append({
+                "command_id": command_id,
+                "shortcut": by_id.get(command_id, f"/{command_id}"),
+                "count": count,
+                "last_used": self._text_field(item.get("last_used")),
+            })
+        return sorted(rows, key=lambda item: (-int(item.get("count") or 0), str(item.get("last_used") or ""), str(item.get("shortcut") or "")))
 
     def workspace_text(self, args: str = "") -> str:
         raw = (args or "").strip()
@@ -2162,6 +2416,163 @@ class CLI:
         ])
         return "\n".join(lines)
 
+    def benchmarks_text(self, args: str = "") -> str:
+        output = (args or "").strip().lower()
+        payload = self._benchmarks_payload()
+        if output in {"json", "--json"}:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        if output in {"checklist", "status", "todo", "路线", "清单"}:
+            return self.benchmark_checklist_text()
+
+        projects = payload.get("projects") if isinstance(payload.get("projects"), list) else []
+        optimizations = payload.get("optimization_points") if isinstance(payload.get("optimization_points"), list) else []
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        lines = [
+            "【CLI 对标与优化落地】",
+            f"- 检索日期: {payload.get('checked_at') or CLI_BENCHMARK_CHECKED_AT}",
+            f"- 数据文件: {CLI_BENCHMARK_DATA_FILE}",
+            f"- 数据来源: {source.get('provider') or 'GitHub REST API'} / {source.get('field') or 'stargazers_count'}",
+            f"- 口径: {payload.get('selection_rule') or 'GitHub 当前 star 快照；筛掉仅带 cli topic 但主体不是命令行/TUI/终端工作流的项目。'}",
+            "- 用法: /commands <关键词> 搜命令；--json 输出机器可读结果；--plain 输出无颜色文本。",
+            "",
+            "Star Top 10 参考项目:",
+        ]
+        for index, item in enumerate(projects, 1):
+            if not isinstance(item, dict):
+                continue
+            repo = self._text_field(item.get("repo"))
+            stars = self._format_star_count(item.get("stars"))
+            lesson = self._text_field(item.get("lesson"))
+            source_url = self._text_field(item.get("source_url"))
+            lines.append(f"{index}. {repo} · {stars} stars · {lesson}" + (f" · {source_url}" if source_url else ""))
+        lines.extend(["", "已提炼并落地的 10 个优化点:"])
+        for index, item in enumerate(optimizations, 1):
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"{index}. {self._text_field(item.get('name'))} · "
+                f"借鉴 {self._text_field(item.get('inspired_by'))} · "
+                f"{self._text_field(item.get('implemented'))}"
+            )
+        lines.extend([
+            "",
+            "本轮可验证入口:",
+            "- /benchmarks json        查看结构化对标数据",
+            "- /commands work          模糊搜索工作区相关命令",
+            "- /commands               查看命令使用次数和最近使用时间",
+            "- /commands usage         查看 usage scope、存储文件和 top commands",
+            "- /plan history           查看授权工作区里的历史计划",
+            "- /plan history prune 7d  按天数清理历史计划",
+            "- /benchmarks checklist   查看开发清单和下一步路线",
+            "- erlangshen --json /benchmarks   机器可读输出",
+            "- erlangshen --plain /help         无颜色/无 OSC8 链接输出",
+            "- erlangshen --quiet /status       npm wrapper 静默启动",
+            "- erlangshen --strict /doctor      未就绪时返回非零退出码",
+            "- python3 scripts/update_cli_benchmarks.py  刷新版本化 star 快照",
+            "- python3 scripts/smoke_cli_strict.py       检查 strict 退出码分类",
+            "- python3 scripts/smoke_cli_npm.py          检查 npm wrapper 输出模式",
+            "- python3 scripts/release_check.py          发版前本地 smoke 聚合入口",
+            "",
+            "后续方向:",
+            "- 继续把 /plan diff 的恢复建议接入更细的 playbook 和自动排障入口。",
+            "- 将 release:check 接入 CI 或发布流水线，正式发布时加 --refresh-benchmarks。",
+        ])
+        return "\n".join(lines)
+
+    def benchmark_checklist_text(self) -> str:
+        done_items = [
+            ("命令发现", "/commands <关键词> fuzzy 搜索 + 使用热度排序"),
+            ("脚本友好", "--json / --plain / --strict 输出模式"),
+            ("静默包装器", "npm wrapper 支持 --quiet，避免污染脚本输出"),
+            ("历史记忆", "readline 历史写入 ~/.erlangshen/history"),
+            ("诊断路径", "/doctor 展示 11 项 Agent UX 与本机链路检查"),
+            ("Agent 轨迹", "/plan 持久化 latest + history JSONL"),
+            ("计划复盘", "/plan diff、/plan history export/prune 支持对比、导出和清理"),
+            ("历史留存策略", "/plan history prune 支持保留最近 N 条或最近 Nd 天"),
+            ("热度策略", "ERLANGSHEN_COMMAND_USAGE_SCOPE 支持 global/project/off"),
+            ("命令热度面板", "/commands usage 展示当前 scope、文件和 top commands"),
+            ("命令热度迁移", "/commands usage export/reset 支持导出和清空热度快照"),
+            ("失败恢复提示", "失败计划会提示 /plan diff 回看上一条成功计划"),
+            ("Diff 恢复建议", "/plan diff 输出 route/tool/artifact 变化对应的恢复建议"),
+            ("资源出口", "/links 与 /open 统一资源入口"),
+            ("沙箱边界", "授权工作区后才写入 .erlangshen/artifacts"),
+            ("错误恢复", "未知命令给相近建议，strict 退出码细分"),
+            ("严格退出码 smoke", "scripts/smoke_cli_strict.py 覆盖 64-70 分类"),
+            ("npm wrapper smoke", "scripts/smoke_cli_npm.py 覆盖 --quiet/--plain/--json"),
+            ("release check", "scripts/release_check.py 聚合 benchmark 刷新和 smoke 检查"),
+            ("路线沉淀", "/benchmarks + README_CLI 固化对标与路线"),
+        ]
+        next_items = [
+            ("plan playbook", "把 /plan diff 的建议进一步接入自动排障 playbook"),
+            ("ci release", "把 npm run release:check:refresh 接入 CI 或发布流水线"),
+        ]
+        lines = [
+            "【CLI 开发清单】",
+            "- 来源: /benchmarks 对标的 10 个高 star CLI/TUI 项目",
+            "- 状态: 核心优化点已落地并继续细化；下一轮聚焦发布、smoke test 和数据迁移",
+            "",
+            "已完成:",
+        ]
+        for index, (name, detail) in enumerate(done_items, 1):
+            lines.append(f"{index}. [done] {name} · {detail}")
+        lines.extend(["", "下一步:"])
+        for index, (name, detail) in enumerate(next_items, 1):
+            lines.append(f"{index}. [next] {name} · {detail}")
+        lines.extend([
+            "",
+            "验证入口:",
+            "- /benchmarks json",
+            "- /commands work",
+            "- /commands usage",
+            "- /plan history",
+            "- erlangshen --strict /doctor",
+        ])
+        return "\n".join(lines)
+
+    def _benchmarks_payload(self) -> dict[str, object]:
+        try:
+            with open(CLI_BENCHMARK_DATA_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict) and isinstance(payload.get("projects"), list):
+                return payload
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+        return {
+            "schema_version": 1,
+            "checked_at": CLI_BENCHMARK_CHECKED_AT,
+            "selection_rule": "GitHub star snapshot; primary interface is CLI, TUI, shell, or terminal workflow.",
+            "source": {
+                "provider": "GitHub REST API",
+                "field": "stargazers_count",
+                "checked_with": "https://api.github.com/repos/{owner}/{repo}",
+            },
+            "projects": [
+                {
+                    "rank": index,
+                    "repo": repo,
+                    "stars": int(str(stars).replace(",", "")),
+                    "lesson": lesson,
+                    "source_url": f"https://github.com/{repo}",
+                }
+                for index, (repo, stars, lesson) in enumerate(CLI_BENCHMARK_PROJECTS, 1)
+            ],
+            "optimization_points": [
+                {"rank": index, "name": name, "inspired_by": source, "implemented": implementation}
+                for index, (name, source, implementation) in enumerate(CLI_OPTIMIZATION_POINTS, 1)
+            ],
+        }
+
+    def _format_star_count(self, value) -> str:
+        if isinstance(value, (int, float)):
+            return f"{int(value):,}"
+        text = self._text_field(value)
+        if not text:
+            return "unknown"
+        try:
+            return f"{int(text.replace(',', '')):,}"
+        except ValueError:
+            return text
+
     def _doctor_primary_fix(self, checks: list[tuple[str, bool, str, str]]) -> str:
         for name, ok, _, action in checks:
             if not ok:
@@ -2183,6 +2594,11 @@ class CLI:
     def _doctor_ux_checks(self) -> list[tuple[str, str]]:
         return [
             ("slash picker", "输入 / 后可按分组选择命令，支持 /server flow /context /clear"),
+            ("fuzzy command search", "/commands <关键词> 支持前缀、token、子序列和相似度排序"),
+            ("usage-aware ranking", f"命令热度策略: {self._command_usage_location_label()}，高频/最近命令在同组内靠前"),
+            ("script output modes", "--json 返回稳定 envelope；--plain 禁用颜色和 OSC8 链接"),
+            ("persistent history", f"交互历史保存到 {self._history_path()}，可用 ERLANGSHEN_HISTORY_FILE 覆盖"),
+            ("cli benchmarks", "/benchmarks 展示高 star CLI 对标和本轮优化落地点"),
             ("workspace browser", "/workspace browse 和 /setup run 可用方向键选择项目文件夹"),
             ("context memory", "最近对话上下文会进入本机大模型；/context 可查看或清空"),
             ("agent trace", "回答和 /plan 会展示本轮理解、取数、映射、生成过程"),
@@ -2324,8 +2740,17 @@ class CLI:
         ])
         return "\n".join(lines)
 
-    def plan_text(self) -> str:
-        plan = self._last_agent_plan
+    def plan_text(self, args: str = "") -> str:
+        action = (args or "").strip().lower()
+        if action in {"json", "--json"}:
+            plan = self._last_agent_plan or self._load_persisted_agent_plan()
+            payload = {"ok": bool(plan), "plan": plan}
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        if action.startswith(("history", "hist", "历史")):
+            return self.plan_history_text(action)
+        if action.startswith(("diff", "compare", "对比", "比较")):
+            return self.plan_diff_text(action)
+        plan = self._last_agent_plan or self._load_persisted_agent_plan()
         if not plan:
             return "\n".join([
                 "【最近一次分析计划】",
@@ -2365,6 +2790,10 @@ class CLI:
             "",
             "计划调用工具:",
         ]
+        if plan.get("persisted_at"):
+            lines.insert(2, f"- 持久化时间: {plan.get('persisted_at')}")
+        if plan.get("persisted_path"):
+            lines.insert(3, f"- 持久化文件: {plan.get('persisted_path')}")
         if plan.get("status") == "failure":
             lines.insert(4, f"- 状态: 失败 / {plan.get('failure_stage') or 'unknown'}")
             if plan.get("failure_message"):
@@ -2444,8 +2873,396 @@ class CLI:
         lines.extend([
             "",
             "说明: /plan 只保留最近一次过程摘要，不保存大模型 API Key，不展示原始敏感数据。",
+            "历史: /plan history 查看最近计划；/plan history json 输出结构化历史。",
         ])
         return "\n".join(lines)
+
+    def plan_history_text(self, args: str = "") -> str:
+        tokens = (args or "").strip().split()
+        output_json = any(token in {"json", "--json"} for token in tokens)
+        if any(token in {"prune", "trim", "清理"} for token in tokens):
+            return self.plan_history_prune_text(tokens)
+        if any(token in {"export", "导出"} for token in tokens):
+            return self.plan_history_export_text(tokens)
+        limit = 8
+        for token in tokens:
+            if token.isdigit():
+                limit = max(1, min(50, int(token)))
+                break
+        status, path, history = self._plan_history_snapshot()
+        if not status.get("allowed"):
+            payload = {
+                "ok": False,
+                "reason": "workspace_not_allowed",
+                "history": [],
+                "path": None,
+            }
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return "\n".join([
+                "【最近计划历史】",
+                "- 工作区未授权，无法读取计划历史。",
+                "- 下一步: /workspace browse 或 /workspace path <路径> && /workspace allow",
+            ])
+        recent = list(reversed(history[-limit:]))
+        if output_json:
+            return json.dumps({
+                "ok": True,
+                "path": str(path) if path else None,
+                "count": len(history),
+                "history": recent,
+            }, ensure_ascii=False, indent=2)
+        lines = [
+            "【最近计划历史】",
+            f"- 工作区: {status.get('path')}",
+            f"- 历史文件: {path}",
+            f"- 总数: {len(history)}",
+        ]
+        if not recent:
+            lines.extend([
+                "",
+                "暂无历史。直接输入投资问题后，/plan 会自动保存到授权工作区。",
+            ])
+            return "\n".join(lines)
+        lines.extend(["", "最近记录:"])
+        for index, item in enumerate(recent, 1):
+            query = self._text_field(item.get("query")) or "未命名问题"
+            when = self._text_field(item.get("persisted_at")) or self._text_field(item.get("created_at")) or "unknown"
+            status_text = self._text_field(item.get("status")) or "success"
+            intent = self._text_field(item.get("intent")) or "unknown"
+            scenes = ", ".join(item.get("server_scenes") or []) if isinstance(item.get("server_scenes"), list) else ""
+            tools = item.get("mcp_tools") if isinstance(item.get("mcp_tools"), list) else []
+            artifacts = item.get("artifact_titles") if isinstance(item.get("artifact_titles"), list) else []
+            lines.append(f"{index}. {when} · {status_text} · {query}")
+            lines.append(f"   意图: {intent} · 工具 {len(tools)} · 产物 {len(artifacts)}" + (f" · 场景: {scenes}" if scenes else ""))
+        lines.extend([
+            "",
+            "命令:",
+            "  /plan              查看最近一次完整计划",
+            "  /plan history json 输出结构化历史",
+            "  /plan diff         对比最近两次计划",
+            "  /plan history export 导出全部历史 JSON",
+            "  /plan history prune 20 只保留最近 20 条",
+            "  /plan history prune 7d 只保留最近 7 天",
+        ])
+        return "\n".join(lines)
+
+    def plan_history_prune_text(self, tokens: list[str]) -> str:
+        output_json = any(token in {"json", "--json"} for token in tokens)
+        keep = 20
+        days: int | None = None
+        for token in tokens:
+            lowered = token.lower()
+            if lowered.endswith("d") and lowered[:-1].isdigit():
+                days = max(0, min(3650, int(lowered[:-1])))
+                break
+            if token.isdigit():
+                keep = max(0, min(50, int(token)))
+                break
+        for index, token in enumerate(tokens):
+            if token.lower() in {"day", "days", "天", "日"}:
+                for neighbor in (index - 1, index + 1):
+                    if 0 <= neighbor < len(tokens) and tokens[neighbor].isdigit():
+                        days = max(0, min(3650, int(tokens[neighbor])))
+                        break
+                if days is not None:
+                    break
+        status, path, history = self._plan_history_snapshot()
+        if not status.get("allowed") or path is None:
+            payload = {"ok": False, "reason": "workspace_not_allowed", "path": None, "kept": 0, "removed": 0}
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return "\n".join([
+                "【计划历史清理】",
+                "- 工作区未授权，无法清理计划历史。",
+                "- 下一步: /workspace browse 或 /workspace path <路径> && /workspace allow",
+            ])
+        if days is not None:
+            cutoff = datetime.now() - timedelta(days=days)
+            kept = [
+                item for item in history
+                if (self._plan_datetime(item) is None or self._plan_datetime(item) >= cutoff)
+            ]
+            mode = f"最近 {days} 天"
+        else:
+            kept = history[-keep:] if keep else []
+            mode = f"最近 {keep} 条"
+        removed = max(0, len(history) - len(kept))
+        self._write_agent_plan_history(path, kept)
+        payload = {"ok": True, "path": str(path), "mode": mode, "kept": len(kept), "removed": removed}
+        if output_json:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        return "\n".join([
+            "【计划历史清理】",
+            f"- 历史文件: {path}",
+            f"- 清理模式: {mode}",
+            f"- 已保留: {len(kept)} 条",
+            f"- 已移除: {removed} 条",
+            "- 提示: 最近一次 agent_plan.json 不受 prune 影响。",
+        ])
+
+    def plan_history_export_text(self, tokens: list[str]) -> str:
+        output_json = any(token in {"json", "--json"} for token in tokens)
+        status, path, history = self._plan_history_snapshot()
+        if not status.get("allowed") or path is None:
+            payload = {"ok": False, "reason": "workspace_not_allowed", "path": None, "export_path": None, "count": 0}
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return "\n".join([
+                "【计划历史导出】",
+                "- 工作区未授权，无法导出计划历史。",
+                "- 下一步: /workspace browse 或 /workspace path <路径> && /workspace allow",
+            ])
+        try:
+            root = resolve_workspace_path(str(status.get("path") or ""))
+            export_path = ensure_inside_workspace(
+                root / ".erlangshen" / "artifacts" / f"agent_plans_export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json",
+                root,
+            )
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "ok": True,
+                "exported_at": datetime.now().isoformat(timespec="seconds"),
+                "source_path": str(path),
+                "export_path": str(export_path),
+                "count": len(history),
+                "history": history,
+            }
+            with open(export_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except (OSError, PermissionError, TypeError, ValueError) as exc:
+            payload = {"ok": False, "error": str(exc), "path": str(path), "export_path": None, "count": len(history)}
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return f"【计划历史导出】\n- 导出失败: {exc}"
+        if output_json:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        return "\n".join([
+            "【计划历史导出】",
+            f"- 历史文件: {path}",
+            f"- 导出文件: {payload.get('export_path')}",
+            f"- 条数: {len(history)}",
+        ])
+
+    def plan_diff_text(self, args: str = "") -> str:
+        tokens = (args or "").strip().split()
+        output_json = any(token in {"json", "--json"} for token in tokens)
+        status, path, history = self._plan_history_snapshot()
+        if not status.get("allowed"):
+            payload = {"ok": False, "reason": "workspace_not_allowed", "path": None, "diff": None}
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return "\n".join([
+                "【计划差异】",
+                "- 工作区未授权，无法读取计划历史。",
+                "- 下一步: /workspace browse 或 /workspace path <路径> && /workspace allow",
+            ])
+        if len(history) < 2:
+            payload = {"ok": False, "reason": "not_enough_history", "path": str(path) if path else None, "count": len(history), "diff": None}
+            if output_json:
+                return json.dumps(payload, ensure_ascii=False, indent=2)
+            return "\n".join([
+                "【计划差异】",
+                f"- 历史文件: {path}",
+                f"- 当前只有 {len(history)} 条记录，至少需要 2 条。",
+                "- 下一步: 完成两次分析后再执行 /plan diff。",
+            ])
+        before = history[-2]
+        after = history[-1]
+        diff = self._agent_plan_diff(before, after)
+        payload = {"ok": True, "path": str(path) if path else None, "diff": diff}
+        if output_json:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        lines = [
+            "【计划差异】",
+            f"- 历史文件: {path}",
+            f"- 基准: {diff['before'].get('persisted_at')} · {diff['before'].get('query')}",
+            f"- 最新: {diff['after'].get('persisted_at')} · {diff['after'].get('query')}",
+            "",
+            "字段变化:",
+        ]
+        if diff["scalar_changes"]:
+            for item in diff["scalar_changes"]:
+                lines.append(f"- {item['label']}: {item['before'] or '空'} -> {item['after'] or '空'}")
+        else:
+            lines.append("- 无")
+        lines.extend(["", "集合变化:"])
+        has_list_change = False
+        for item in diff["list_changes"]:
+            if item["added"] or item["removed"]:
+                has_list_change = True
+                lines.append(f"- {item['label']}: +{', '.join(item['added']) or '无'} / -{', '.join(item['removed']) or '无'}")
+        if not has_list_change:
+            lines.append("- 无")
+        lines.extend([
+            "",
+            f"结论: {diff['summary']}",
+            "",
+            "恢复建议:",
+        ])
+        for item in diff.get("recommendations") or []:
+            lines.append(f"- {item}")
+        lines.extend([
+            "命令: /plan history 查看上下文；/plan diff json 输出结构化差异。",
+        ])
+        return "\n".join(lines)
+
+    def _plan_history_snapshot(self) -> tuple[dict, Path | None, list[dict]]:
+        status = workspace_status()
+        if not status.get("allowed"):
+            return status, None, []
+        try:
+            path = self._agent_plan_history_path(str(status.get("path") or ""))
+        except (OSError, PermissionError, ValueError):
+            return status, None, []
+        return status, path, self._read_agent_plan_history(path)
+
+    def _write_agent_plan_history(self, path: Path, history: list[dict]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for item in history:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    def _agent_plan_diff(self, before: dict, after: dict) -> dict[str, object]:
+        scalar_fields = [
+            ("query", "问题"),
+            ("intent", "意图"),
+            ("route_source", "路由来源"),
+            ("tool_selection_source", "工具来源"),
+            ("data_confidence", "数据充分度"),
+            ("needs_mcp", "是否需要 MCP"),
+            ("needs_server_mapping", "是否需要服务端映射"),
+            ("status", "状态"),
+            ("failure_stage", "失败阶段"),
+        ]
+        scalar_changes = []
+        for field, label in scalar_fields:
+            before_value = self._plan_value_for_diff(before.get(field))
+            after_value = self._plan_value_for_diff(after.get(field))
+            if before_value != after_value:
+                scalar_changes.append({"field": field, "label": label, "before": before_value, "after": after_value})
+        list_specs = [
+            ("mcp_tools", "MCP 工具", self._plan_tool_names),
+            ("mcp_data_keys", "MCP 数据键", self._plan_text_list),
+            ("server_scenes", "服务端场景", self._plan_text_list),
+            ("artifact_titles", "图表/产物", self._plan_text_list),
+            ("missing_inputs", "缺失输入", self._plan_text_list),
+            ("composition_patterns_used", "组合模式", self._plan_text_list),
+        ]
+        list_changes = []
+        for field, label, getter in list_specs:
+            before_items = getter(before.get(field))
+            after_items = getter(after.get(field))
+            before_set = set(before_items)
+            after_set = set(after_items)
+            list_changes.append({
+                "field": field,
+                "label": label,
+                "before": before_items,
+                "after": after_items,
+                "added": sorted(after_set - before_set),
+                "removed": sorted(before_set - after_set),
+                "common": sorted(before_set & after_set),
+            })
+        change_count = len(scalar_changes) + sum(1 for item in list_changes if item["added"] or item["removed"])
+        if change_count == 0:
+            summary = "两次计划核心字段基本一致。"
+        elif any(item["field"] == "mcp_tools" and (item["added"] or item["removed"]) for item in list_changes):
+            summary = "工具选择发生变化，建议重点检查 tool_rationale、数据充分度和输出产物。"
+        elif scalar_changes:
+            summary = "路由或状态字段发生变化，建议查看意图、数据策略和失败阶段。"
+        else:
+            summary = "上下文集合发生变化，建议查看场景、产物和缺失输入。"
+        recommendations = self._plan_diff_recommendations(before, after, scalar_changes, list_changes)
+        return {
+            "before": self._plan_diff_header(before),
+            "after": self._plan_diff_header(after),
+            "scalar_changes": scalar_changes,
+            "list_changes": list_changes,
+            "summary": summary,
+            "recommendations": recommendations,
+        }
+
+    def _plan_diff_recommendations(
+        self,
+        before: dict,
+        after: dict,
+        scalar_changes: list[dict],
+        list_changes: list[dict],
+    ) -> list[str]:
+        recommendations: list[str] = []
+        after_status = self._text_field(after.get("status"))
+        failure_stage = self._text_field(after.get("failure_stage"))
+        if after_status == "failure":
+            if failure_stage == "server_mapping":
+                recommendations.append("/service 检查服务端健康与反向代理，再用 /login xwab <账号> 刷新鉴权。")
+            elif failure_stage == "local_llm_synthesis":
+                recommendations.append("/model key 重新测试本机大模型 Key，或 /model select 临时切换供应商。")
+            else:
+                recommendations.append("/doctor 先检查工作区、账号、本机模型、MCP 和资源保存链路。")
+        changed_fields = {self._text_field(item.get("field")) for item in scalar_changes}
+        changed_lists = {
+            self._text_field(item.get("field")): item
+            for item in list_changes
+            if item.get("added") or item.get("removed")
+        }
+        if "mcp_tools" in changed_lists or "mcp_data_keys" in changed_lists:
+            recommendations.append("对照新增/移除的 MCP 工具和数据键，确认本轮是否缺少行情、搜索或产品快照。")
+        if "artifact_titles" in changed_lists:
+            recommendations.append("/artifacts 或 /open 检查产物是否生成；如果最新计划移除了产物，重新明确“做成图表/报告”。")
+        if "missing_inputs" in changed_lists:
+            recommendations.append("优先补齐新增的缺失输入，再继续追问，避免下一轮继续走降级路径。")
+        if {"intent", "route_source", "tool_selection_source", "data_confidence"} & changed_fields:
+            recommendations.append("查看 route_summary、tool_rationale 和 data_strategy，确认是意图变化还是数据不足导致改路由。")
+        if not recommendations:
+            recommendations.append("核心字段差异很小；继续看 /plan history 的完整上下文，重点排查外部服务和实时数据状态。")
+        return recommendations[:4]
+
+    def _plan_diff_header(self, plan: dict) -> dict[str, str]:
+        return {
+            "query": self._text_field(plan.get("query")),
+            "persisted_at": self._text_field(plan.get("persisted_at")) or self._text_field(plan.get("created_at")) or "unknown",
+            "intent": self._text_field(plan.get("intent")),
+            "status": self._text_field(plan.get("status")) or "success",
+        }
+
+    def _plan_value_for_diff(self, value) -> str:
+        if isinstance(value, bool):
+            return "是" if value else "否"
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return self._text_field(value)
+
+    def _plan_datetime(self, plan: dict) -> datetime | None:
+        raw = self._text_field(plan.get("persisted_at") or plan.get("created_at"))
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _plan_text_list(self, value) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [self._text_field(item) for item in value if self._text_field(item)]
+
+    def _plan_tool_names(self, value) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        names = []
+        for item in value:
+            if isinstance(item, dict):
+                name = self._text_field(item.get("name") or item.get("tool"))
+                if name:
+                    names.append(name)
+            else:
+                text = self._text_field(item)
+                if text:
+                    names.append(text)
+        return names
 
     def _plan_orchestration_audit_lines(self, plan: dict) -> list[str]:
         route_source = self._text_field(plan.get("route_source"))
@@ -2531,6 +3348,10 @@ class CLI:
                 actions.append("/model key 重新测试本机大模型 API Key，或 /model select 切换供应商。")
             else:
                 actions.append("/doctor 检查账号、本机模型、super-66 MCP、web_search 和服务端连通性。")
+            previous = self._previous_successful_plan(plan)
+            if previous:
+                query = self._text_field(previous.get("query")) or "上一条成功计划"
+                actions.append(f"/plan diff 对比本次失败和上一条成功计划（{query}），定位路由、工具或产物变化。")
         artifact_plan = plan.get("artifact_plan") if isinstance(plan.get("artifact_plan"), dict) else {}
         planned_type = self._text_field(artifact_plan.get("type")).lower()
         if planned_type in {"chart", "report"} and not plan.get("artifact_titles"):
@@ -2553,6 +3374,19 @@ class CLI:
         if not actions:
             actions.append("直接继续追问，或输入 /clear 开启一个干净的新会话。")
         return actions[:4]
+
+    def _previous_successful_plan(self, current: dict | None = None) -> dict | None:
+        _, _, history = self._plan_history_snapshot()
+        current_query = self._text_field(current.get("query")) if isinstance(current, dict) else ""
+        for item in reversed(history):
+            if not isinstance(item, dict):
+                continue
+            if self._text_field(item.get("status")) == "failure":
+                continue
+            if current_query and self._text_field(item.get("query")) == current_query:
+                continue
+            return item
+        return None
 
     def _format_artifact_plan(self, artifact_plan) -> str:
         if not isinstance(artifact_plan, dict):
@@ -2748,6 +3582,7 @@ class CLI:
         synthesis: dict | None,
         provider: str,
         model: str,
+        persist: bool = True,
     ) -> None:
         artifact_results = synthesis.get("artifact_results") if isinstance(synthesis, dict) else []
         self._last_agent_plan = {
@@ -2794,6 +3629,8 @@ class CLI:
             "model": model,
             "key_boundary": "API Key 仅本机直连供应商，未发送给二郎神服务端",
         }
+        if persist:
+            self._persist_agent_plan()
 
     def _remember_agent_failure_plan(
         self,
@@ -2818,6 +3655,7 @@ class CLI:
             synthesis={},
             provider=provider,
             model=model,
+            persist=False,
         )
         if isinstance(self._last_agent_plan, dict):
             self._last_agent_plan.update({
@@ -2826,6 +3664,76 @@ class CLI:
                 "failure_message": self._text_field(failure_message),
                 "route_warning": self._text_field(failure_message) or self._last_agent_plan.get("route_warning"),
             })
+            self._persist_agent_plan()
+
+    def _agent_plan_path(self, workspace: str | Path | None = None) -> Path:
+        root = resolve_workspace_path(str(workspace) if workspace else None)
+        return ensure_inside_workspace(root / ".erlangshen" / "artifacts" / "agent_plan.json", root)
+
+    def _agent_plan_history_path(self, workspace: str | Path | None = None) -> Path:
+        root = resolve_workspace_path(str(workspace) if workspace else None)
+        return ensure_inside_workspace(root / ".erlangshen" / "artifacts" / "agent_plans.jsonl", root)
+
+    def _persist_agent_plan(self) -> None:
+        if not isinstance(self._last_agent_plan, dict):
+            return
+        status = workspace_status()
+        if not status.get("allowed"):
+            return
+        workspace = str(status.get("path") or "")
+        try:
+            latest_path = self._agent_plan_path(workspace)
+            history_path = self._agent_plan_history_path(workspace)
+            now = datetime.now().isoformat(timespec="seconds")
+            payload = {
+                **self._last_agent_plan,
+                "persisted_at": now,
+                "persisted_path": str(latest_path),
+                "recent_resources": self._recent_resource_context(limit=8),
+            }
+            latest_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(latest_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            history = self._read_agent_plan_history(history_path)
+            history.append(payload)
+            with open(history_path, "w", encoding="utf-8") as f:
+                for item in history[-50:]:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            self._last_agent_plan.update({
+                "persisted_at": now,
+                "persisted_path": str(latest_path),
+            })
+        except (OSError, PermissionError, TypeError, ValueError):
+            return
+
+    def _load_persisted_agent_plan(self) -> dict | None:
+        status = workspace_status()
+        if not status.get("allowed"):
+            return None
+        try:
+            path = self._agent_plan_path(str(status.get("path") or ""))
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except (OSError, PermissionError, json.JSONDecodeError, TypeError, ValueError):
+            return None
+
+    def _read_agent_plan_history(self, path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        items: list[dict] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(item, dict):
+                        items.append(item)
+        except OSError:
+            return []
+        return items
 
     def _tool_plan_explanations(self, intent_plan: dict, mcp_data) -> list[dict]:
         tools = self._dedupe_mcp_tools(intent_plan.get("mcp_tools") or []) if isinstance(intent_plan, dict) else []
@@ -7890,12 +8798,68 @@ class CLI:
         contextual = self._contextual_palette_items(lowered, palette)
         if contextual is not None:
             return contextual
-        return [
-            item for item in palette
-            if lowered in item[0].lower()
-            or lowered in item[1].lower()
-            or lowered in item[2].lower()
+        scored: list[tuple[float, int, tuple[str, str, str]]] = []
+        for index, item in enumerate(palette):
+            score = self._palette_match_score(lowered, item)
+            if score is not None:
+                scored.append((score, index, item))
+        return [item for _, _, item in sorted(scored, key=lambda row: (-row[0], row[1]))]
+
+    def _palette_match_score(self, query: str, item: tuple[str, str, str]) -> float | None:
+        command_id, shortcut, description = item
+        haystacks = [
+            command_id.lower(),
+            shortcut.lower().lstrip("/"),
+            shortcut.lower(),
+            description.lower(),
         ]
+        compact_query = query.replace("/", "").strip()
+        if not compact_query:
+            return 100.0
+        if compact_query in {command_id.lower(), shortcut.lower().lstrip("/")}:
+            return 120.0 + self._command_usage_boost(command_id)
+        if any(text.startswith(compact_query) for text in haystacks[:3]):
+            return 110.0 + self._command_usage_boost(command_id)
+        tokens = [part for part in re.split(r"\s+", compact_query) if part]
+        joined = " ".join(haystacks)
+        if tokens and all(token in joined for token in tokens):
+            return 92.0 + min(7.0, sum(len(token) for token in tokens) / 4) + self._command_usage_boost(command_id)
+        if any(compact_query in text for text in haystacks):
+            return 82.0 + min(8.0, len(compact_query) / 3) + self._command_usage_boost(command_id)
+        acronym = "".join(part[0] for part in re.split(r"[-_/ <]+", shortcut.lower().lstrip("/")) if part)
+        if acronym and compact_query == acronym[:len(compact_query)]:
+            return 74.0 + self._command_usage_boost(command_id)
+        subsequence_scores = [
+            score
+            for text in haystacks[:3]
+            for score in [self._subsequence_score(compact_query, text)]
+            if score is not None
+        ]
+        if subsequence_scores:
+            return max(subsequence_scores) + self._command_usage_boost(command_id)
+        best_ratio = max(difflib.SequenceMatcher(None, compact_query, text).ratio() for text in haystacks[:3])
+        if best_ratio >= 0.54:
+            return 52.0 * best_ratio + self._command_usage_boost(command_id)
+        return None
+
+    def _subsequence_score(self, needle: str, haystack: str) -> float | None:
+        if not needle:
+            return 100.0
+        position = 0
+        gaps = 0
+        last_index = -1
+        first_index = None
+        for char in needle:
+            found = haystack.find(char, position)
+            if found < 0:
+                return None
+            if first_index is None:
+                first_index = found
+            if last_index >= 0:
+                gaps += max(0, found - last_index - 1)
+            last_index = found
+            position = found + 1
+        return max(36.0, 68.0 - gaps * 1.3 - (first_index or 0) * 0.8)
 
     def _contextual_palette_items(
         self,
@@ -7948,7 +8912,13 @@ class CLI:
         ordered = []
         seen: set[str] = set()
         for _, command_ids in COMMAND_GROUPS:
-            for item in COMMAND_PALETTE:
+            group_items = [
+                (index, item)
+                for index, item in enumerate(COMMAND_PALETTE)
+                if item[0] in command_ids and item[0] not in seen
+            ]
+            group_items.sort(key=lambda row: (-self._command_usage_boost(row[1][0]), row[0]))
+            for _, item in group_items:
                 if item[0] in command_ids and item[0] not in seen:
                     ordered.append(item)
                     seen.add(item[0])
@@ -8167,6 +9137,20 @@ class CLI:
         except ImportError:
             return
 
+        history_path = self._history_path()
+        try:
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            readline.read_history_file(str(history_path))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        try:
+            readline.set_history_length(1000)
+            atexit.register(readline.write_history_file, str(history_path))
+        except OSError:
+            pass
+
         commands = sorted({f"/{item[0]}" for item in COMMAND_PALETTE} | {f"/{name}" for name in self.ALIASES})
 
         def complete(text: str, state: int):
@@ -8176,24 +9160,287 @@ class CLI:
         readline.set_completer(complete)
         readline.parse_and_bind("tab: complete")
 
+    def _history_path(self) -> Path:
+        env_path = os.getenv("ERLANGSHEN_HISTORY_FILE")
+        if env_path:
+            return Path(env_path).expanduser()
+        return Path("~/.erlangshen/history").expanduser()
+
+    def _command_usage_scope(self) -> str:
+        if os.getenv("ERLANGSHEN_DISABLE_COMMAND_USAGE"):
+            return "off"
+        scope = (os.getenv("ERLANGSHEN_COMMAND_USAGE_SCOPE") or "global").strip().lower()
+        if scope in {"off", "none", "disabled", "disable", "0", "false"}:
+            return "off"
+        if scope in {"project", "workspace", "local"}:
+            return "project"
+        return "global"
+
+    def _command_usage_path(self) -> Path | None:
+        scope = self._command_usage_scope()
+        if scope == "off":
+            return None
+        env_path = os.getenv("ERLANGSHEN_COMMAND_USAGE_FILE")
+        if env_path:
+            return Path(env_path).expanduser()
+        if scope == "project":
+            status = workspace_status()
+            if not status.get("allowed"):
+                return None
+            try:
+                root = resolve_workspace_path(str(status.get("path") or ""))
+                return ensure_inside_workspace(root / ".erlangshen" / "artifacts" / "command_usage.json", root)
+            except (OSError, PermissionError, ValueError):
+                return None
+        return Path("~/.erlangshen/command_usage.json").expanduser()
+
+    def _command_usage_location_label(self) -> str:
+        scope = self._command_usage_scope()
+        path = self._command_usage_path()
+        if path is None:
+            if scope == "project":
+                return "project / waiting for workspace authorization"
+            return "off"
+        return f"{scope} / {path}"
+
+    def _load_command_usage(self) -> dict[str, object]:
+        if self._command_usage_cache is not None:
+            return self._command_usage_cache
+        path = self._command_usage_path()
+        if path is None:
+            self._command_usage_cache = {"commands": {}}
+            return self._command_usage_cache
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._command_usage_cache = data if isinstance(data, dict) else {"commands": {}}
+        except (OSError, json.JSONDecodeError):
+            self._command_usage_cache = {"commands": {}}
+        return self._command_usage_cache
+
+    def _save_command_usage(self, usage: dict[str, object]) -> None:
+        path = self._command_usage_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(usage, f, ensure_ascii=False, indent=2)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        except OSError:
+            return
+
+    def _record_command_usage(self, command: str, args: str) -> None:
+        if self._command_usage_scope() == "off":
+            return
+        if not (sys.stdin.isatty() or os.getenv("ERLANGSHEN_RECORD_NON_TTY_COMMANDS")):
+            return
+        if self._command_usage_path() is None:
+            return
+        command_id = self._command_id_for_input(command, args)
+        if not command_id:
+            return
+        usage = self._load_command_usage()
+        commands = usage.setdefault("commands", {})
+        if not isinstance(commands, dict):
+            commands = {}
+            usage["commands"] = commands
+        item = commands.get(command_id) if isinstance(commands.get(command_id), dict) else {}
+        item["count"] = int(item.get("count") or 0) + 1
+        item["last_used"] = datetime.now().isoformat(timespec="seconds")
+        commands[command_id] = item
+        usage["updated_at"] = item["last_used"]
+        self._save_command_usage(usage)
+
+    def _command_id_for_input(self, command: str, args: str = "") -> str | None:
+        normalized = f"/{command}".lower()
+        if args:
+            first_arg = args.strip().split(maxsplit=1)[0].lower()
+            if first_arg:
+                normalized = f"{normalized} {first_arg}"
+        best: tuple[int, str] | None = None
+        for command_id, shortcut, _ in COMMAND_PALETTE:
+            concrete, _ = self._input_from_shortcut(shortcut)
+            concrete = concrete.rstrip().lower()
+            if normalized == concrete or normalized.startswith(concrete + " "):
+                size = len(concrete)
+                if best is None or size > best[0]:
+                    best = (size, command_id)
+        if best:
+            return best[1]
+        if command in self.LOCAL_COMMANDS or command in self.COMMANDS:
+            return command
+        return None
+
+    def _command_usage_summary(self, command_id: str) -> str:
+        usage = self._load_command_usage()
+        commands = usage.get("commands") if isinstance(usage, dict) else {}
+        item = commands.get(command_id) if isinstance(commands, dict) else None
+        if not isinstance(item, dict):
+            return ""
+        count = max(0, int(item.get("count") or 0))
+        if not count:
+            return ""
+        last_used = self._text_field(item.get("last_used"))
+        if last_used:
+            return f"used {count}x · last {last_used}"
+        return f"used {count}x"
+
+    def _command_usage_boost(self, command_id: str) -> float:
+        usage = self._load_command_usage()
+        commands = usage.get("commands") if isinstance(usage, dict) else {}
+        item = commands.get(command_id) if isinstance(commands, dict) else None
+        if not isinstance(item, dict):
+            return 0.0
+        count = max(0, int(item.get("count") or 0))
+        boost = min(8.0, count * 1.5)
+        last_used = self._text_field(item.get("last_used"))
+        if last_used:
+            try:
+                age_days = max(0, (datetime.now() - datetime.fromisoformat(last_used)).days)
+                boost += max(0.0, 6.0 - min(6.0, age_days / 5))
+            except ValueError:
+                pass
+        return boost
+
+
+def _parse_global_flags(argv: list[str]) -> tuple[list[str], str, bool]:
+    output_mode = "text"
+    strict_exit = False
+    remaining: list[str] = []
+    for arg in argv:
+        if arg in {"--json", "--output=json"}:
+            output_mode = "json"
+            continue
+        if arg in {"--strict", "--exit-code"}:
+            strict_exit = True
+            continue
+        if arg in {"--plain", "--no-color"}:
+            output_mode = "plain" if output_mode != "json" else output_mode
+            os.environ["NO_COLOR"] = "1"
+            os.environ["ERLANGSHEN_NO_OSC8"] = "1"
+            continue
+        remaining.append(arg)
+    return remaining, output_mode, strict_exit
+
+
+def _json_cli_envelope(
+    cli: CLI,
+    command: str,
+    text: str,
+    *,
+    ok: bool = True,
+    error: str | None = None,
+    exit_code: int = 0,
+) -> str:
+    payload = {
+        "ok": ok,
+        "exit_code": exit_code,
+        "command": command,
+        "text": text,
+        "resources": cli._recent_resource_context(limit=24),
+        "plan": cli._last_agent_plan,
+    }
+    if error:
+        payload["error"] = error
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _strict_exit_code(command: str, result: str, error: str | None = None) -> int:
+    if error:
+        return 1
+    text = result or ""
+    lowered = text.lower()
+    if text.startswith("未知命令"):
+        return 64
+    if text.startswith("请提供") or "需要是 JSON 对象" in text:
+        return 64
+    if "当前安装包不包含" in text or "local analysis disabled" in text:
+        return 69
+    if (
+        "NEED workspace" in text
+        or "workspace ->" in text
+        or "workspace_not_allowed" in lowered
+        or "工作区未授权" in text
+        or "项目文件夹不存在" in text
+        or "无法切换项目文件夹" in text
+    ):
+        return 65
+    if (
+        "NEED account" in text
+        or "account ->" in text
+        or "未登录" in text
+        or "鉴权" in text and ("失败" in text or "错误" in text or "NEED" in text)
+    ):
+        return 66
+    if (
+        "NEED model" in text
+        or "model ->" in text
+        or "missing key" in lowered
+        or "未配置" in text
+        or "api key" in lowered and ("missing" in lowered or "invalid" in lowered or "错误" in text)
+    ):
+        return 67
+    if (
+        "NEED server" in text
+        or "server ->" in text
+        or "service unavailable" in lowered
+        or "连接失败" in text
+        or ("服务端" in text and ("失败" in text or "错误" in text or "不可用" in text))
+    ):
+        return 68
+    if (
+        "artifact ->" in text
+        or ("chart artifact" in lowered and ("失败" in text or "错误" in text or "failed" in lowered))
+        or ("图表" in text and ("失败" in text or "错误" in text))
+    ):
+        return 70
+    if command.startswith("/doctor") and ("NEED " in text or "fix   " in text):
+        return 2
+    if "错误:" in text or text.startswith("错误"):
+        return 1
+    return 0
+
 
 def main():
     """主入口"""
-    args = sys.argv[1:]
+    argv, output_mode, strict_exit = _parse_global_flags(sys.argv[1:])
+    args = argv
     startup_workspace, args = _extract_startup_workspace_args(args)
     if args == ["__ERLANGSHEN_MISSING_WORKSPACE_PATH__"]:
-        print("--cd / --workspace 需要提供项目文件夹路径")
+        message = "--cd / --workspace 需要提供项目文件夹路径"
+        if output_mode == "json":
+            print(json.dumps({"ok": False, "exit_code": 64, "command": "", "text": "", "error": message}, ensure_ascii=False, indent=2))
+        else:
+            print(message)
+        if strict_exit:
+            sys.exit(64)
         return
     if startup_workspace:
         try:
             workspace = Path(startup_workspace).expanduser().resolve()
             if not workspace.exists() or not workspace.is_dir():
-                print(f"项目文件夹不存在或不是目录: {workspace}")
+                message = f"项目文件夹不存在或不是目录: {workspace}"
+                if output_mode == "json":
+                    print(json.dumps({"ok": False, "exit_code": 1, "command": "", "text": "", "error": message}, ensure_ascii=False, indent=2))
+                else:
+                    print(message)
+                if strict_exit:
+                    sys.exit(1)
                 return
             os.chdir(workspace)
             select_workspace(workspace)
         except OSError as exc:
-            print(f"无法切换项目文件夹: {exc}")
+            message = f"无法切换项目文件夹: {exc}"
+            if output_mode == "json":
+                print(json.dumps({"ok": False, "exit_code": 1, "command": "", "text": "", "error": message}, ensure_ascii=False, indent=2))
+            else:
+                print(message)
+            if strict_exit:
+                sys.exit(1)
             return
 
     cli = CLI()
@@ -8214,9 +9461,26 @@ def main():
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("\n再见!")
             return
+        except Exception as exc:
+            if output_mode == "json":
+                print(_json_cli_envelope(cli, raw, "", ok=False, error=str(exc), exit_code=1))
+                sys.exit(1 if strict_exit else 0)
+            if strict_exit:
+                print(f"错误: {exc}")
+                sys.exit(1)
+            raise
 
-        print(result)
+        exit_code = _strict_exit_code(raw, result) if strict_exit else 0
+        if output_mode == "json":
+            print(_json_cli_envelope(cli, raw, result, ok=exit_code == 0, exit_code=exit_code))
+        else:
+            print(result)
+        if strict_exit and exit_code:
+            sys.exit(exit_code)
     else:
+        if output_mode == "json":
+            print(_json_cli_envelope(cli, "", cli.help_text()))
+            return
         # 交互模式
         try:
             asyncio.run(cli.interactive_mode())

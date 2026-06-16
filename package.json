@@ -26,10 +26,15 @@
   },
   "files": [
     "bin/cli.js",
+    "scripts/update_cli_benchmarks.py",
+    "scripts/smoke_cli_strict.py",
+    "scripts/smoke_cli_npm.py",
+    "scripts/release_check.py",
     "scripts/postinstall.js",
     "scripts/preuninstall.js",
     "src/__init__.py",
     "src/cli.py",
+    "src/cli_benchmarks.json",
     "src/auth/__init__.py",
     "src/auth/session.py",
     "src/client/__init__.py",
@@ -52,6 +57,10 @@
   ],
   "scripts": {
     "test": "python3 -m pytest -q",
+    "smoke:strict": "python3 scripts/smoke_cli_strict.py",
+    "smoke:npm": "python3 scripts/smoke_cli_npm.py",
+    "release:check": "python3 scripts/release_check.py",
+    "release:check:refresh": "python3 scripts/release_check.py --refresh-benchmarks",
     "postinstall": "node scripts/postinstall.js",
     "preuninstall": "node scripts/preuninstall.js"
   },
