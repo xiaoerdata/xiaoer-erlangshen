@@ -9556,6 +9556,9 @@ class CLI:
                 if matches:
                     _, shortcut, _ = matches[clamp_selected(matches)]
                     command, needs_more = cli._input_from_shortcut(shortcut)
+                    if not cli._should_accept_slash_shortcut(text_area.text, command, needs_more):
+                        event.app.exit(result=text_area.text)
+                        return
                     text_area.text = command
                     text_area.buffer.cursor_position = len(command)
                     if needs_more:
@@ -10202,6 +10205,13 @@ class CLI:
         if needs_more:
             command += " "
         return command, needs_more
+
+    def _should_accept_slash_shortcut(self, typed_text: str, command: str, needs_more: bool) -> bool:
+        if not needs_more:
+            return True
+        typed = " ".join(self._text_field(typed_text).strip().split())
+        base = " ".join(self._text_field(command).strip().split())
+        return not (base and typed.startswith(base + " "))
 
     def _clear_screen(self) -> None:
         sys.stdout.write("\033[2J\033[H")

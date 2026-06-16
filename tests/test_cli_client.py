@@ -530,7 +530,10 @@ def test_slash_picker_helpers_cover_all_commands():
     assert {f"/{name}" for name in cli.ALIASES}.issubset(shortcuts)
     assert cli._filter_palette("cognition")[0][1] == "/cognition <cmd>"
     assert cli._filter_palette("wrk")[0][1].startswith("/workspace")
-    assert cli._input_from_shortcut("/login xwab <账号>") == ("/login xwab ", True)
+    login_command, login_needs_more = cli._input_from_shortcut("/login xwab <账号>")
+    assert (login_command, login_needs_more) == ("/login xwab ", True)
+    assert cli._should_accept_slash_shortcut("/login xwab", login_command, login_needs_more) is True
+    assert cli._should_accept_slash_shortcut("/login xwab 小二MCP助手", login_command, login_needs_more) is False
     assert cli._input_from_shortcut("/status") == ("/status", False)
     login_detail = cli._slash_selection_detail(cli._filter_palette("login xwab"), 0)
     assert "登录 XWAB/XCZT 账号体系" in login_detail
