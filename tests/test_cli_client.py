@@ -217,7 +217,7 @@ async def test_complete_llm_response_folds_reasoning_in_place_for_tty(monkeypatc
 @pytest.mark.asyncio
 async def test_complete_llm_response_streams_json_view_preview(monkeypatch, capsys):
     monkeypatch.setenv("ERLANGSHEN_LLM_STREAM", "on")
-    monkeypatch.setenv("ERLANGSHEN_ANSWER_STREAM", "on")
+    monkeypatch.setenv("ERLANGSHEN_ANSWER_STREAM", "force")
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -239,10 +239,52 @@ async def test_complete_llm_response_streams_json_view_preview(monkeypatch, caps
 
     output = capsys.readouterr().out
     assert result == '{"view":"先看主线，不要追高。","suggestions":[]}'
-    assert "二郎神 · 生成中" in output
+    assert "╭─ 二郎神" in output
     assert "先看主线" in output
     assert '{"view"' not in output
     assert "\033[J" in output
+
+
+@pytest.mark.asyncio
+async def test_live_answer_stream_finalizes_in_place_and_suppresses_duplicate(monkeypatch, capsys):
+    monkeypatch.setenv("ERLANGSHEN_LLM_STREAM", "on")
+    monkeypatch.setenv("ERLANGSHEN_ANSWER_STREAM", "on")
+    monkeypatch.setenv("ERLANGSHEN_STREAM_RENDER", "off")
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    class FakeClient:
+        async def stream_complete_events(self, messages, *, temperature, max_tokens):
+            yield {"type": "content", "text": '{"view":"先看主线，'}
+            yield {"type": "content", "text": '不要追高。","suggestions":[]}'}
+
+        async def complete(self, messages, *, temperature, max_tokens):
+            raise AssertionError("non-streaming fallback should not run")
+
+    cli = CLI()
+    cli._interactive_question_printed = True
+    result = await cli._complete_llm_response(
+        FakeClient(),
+        [{"role": "user", "content": "hello"}],
+        temperature=0.1,
+        max_tokens=32,
+        json_preview_field="view",
+    )
+
+    assert result == '{"view":"先看主线，不要追高。","suggestions":[]}'
+    assert cli._finalize_live_answer_stream("最终回答\n\n可以先这样做：\n- 控制仓位") is True
+
+    output = capsys.readouterr().out
+    assert "先看主线" in output
+    assert "最终回答" in output
+    assert "可以先这样做" in output
+    assert "\033[J" in output
+
+    await cli._print_interactive_turn("分析贵州茅台", "最终回答\n\n可以先这样做：\n- 控制仓位")
+
+    assert capsys.readouterr().out == ""
+    assert cli._live_answer_finalized is False
+    assert cli._live_answer_state is None
 
 
 def test_partial_json_string_field_extracts_incomplete_view():

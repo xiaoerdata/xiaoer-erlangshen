@@ -482,6 +482,8 @@ class CLI:
         self._token_status_visible = False
         self._token_status_activity = "ready"
         self._interactive_question_printed = False
+        self._live_answer_state: dict[str, object] | None = None
+        self._live_answer_finalized = False
 
     async def dispatch(self, user_input: str) -> str:
         """把交互输入或一次性参数分发到对应命令。"""
@@ -1343,6 +1345,10 @@ class CLI:
         ])
 
     async def _print_interactive_turn(self, user_input: str, result: str) -> None:
+        if self._live_answer_finalized and self._is_advice_turn(user_input):
+            self._live_answer_finalized = False
+            self._live_answer_state = None
+            return
         if self._interactive_question_printed and self._is_advice_turn(user_input):
             output = self._format_interactive_answer(result)
         else:
@@ -4001,6 +4007,8 @@ class CLI:
         self._last_reasoning_trace = None
         self._last_artifact_results = []
         self._last_resource_links = []
+        self._live_answer_state = None
+        self._live_answer_finalized = False
         if clear_plan:
             self._last_agent_plan = None
 
@@ -5009,6 +5017,8 @@ class CLI:
         json_preview_field: str = "",
         preview_title: str = "二郎神",
     ) -> str:
+        self._live_answer_state = None
+        self._live_answer_finalized = False
         if not self._should_stream_llm() or not (hasattr(client, "stream_complete_events") or hasattr(client, "stream_complete")):
             return await client.complete(messages, temperature=temperature, max_tokens=max_tokens)
         chunks: list[str] = []
@@ -5143,6 +5153,8 @@ class CLI:
             "title": self._text_field(title) or "二郎神",
             "visible": False,
             "closed": False,
+            "stream_done": False,
+            "finalized": False,
             "line_count": 0,
             "preview": "",
             "started": time.perf_counter(),
@@ -5152,7 +5164,9 @@ class CLI:
         setting = os.getenv("ERLANGSHEN_ANSWER_STREAM", "on").lower()
         if setting in {"0", "off", "false", "no"}:
             return False
-        return sys.stdout.isatty() or setting in {"1", "on", "true", "yes", "force"}
+        if setting in {"1", "force"}:
+            return True
+        return self._interactive_question_printed and sys.stdout.isatty()
 
     def _write_json_answer_preview(self, state: dict[str, object], raw_text: str, field: str) -> None:
         if not field or not self._should_show_answer_stream() or state.get("closed"):
@@ -5161,13 +5175,14 @@ class CLI:
         if not preview or preview == state.get("preview"):
             return
         state["preview"] = preview
+        self._live_answer_state = state
         self._render_answer_stream(state, preview)
 
-    def _render_answer_stream(self, state: dict[str, object], preview: str) -> None:
-        body = self._compact_answer_stream_preview(preview)
+    def _render_answer_stream(self, state: dict[str, object], preview: str, *, final: bool = False) -> None:
+        body = preview.strip() if final else self._answer_stream_preview_body(preview)
         elapsed = self._format_seconds(time.perf_counter() - float(state.get("started") or time.perf_counter()))
-        footer = self._token_dialog_footer(activity=f"生成中 {elapsed}")
-        title = f"{state.get('title') or '二郎神'} · 生成中"
+        footer = self._token_dialog_footer(activity="ready" if final else f"生成中 {elapsed}")
+        title = self._text_field(state.get("title")) or "二郎神"
         block = "\n".join([self._message_block(title, body or "正在组织回答...", "32;1"), footer])
         lines = block.splitlines()
         try:
@@ -5179,20 +5194,35 @@ class CLI:
             sys.stdout.flush()
             state["visible"] = True
             state["line_count"] = len(lines)
+            if final:
+                state["finalized"] = True
+                self._live_answer_finalized = True
         except OSError:
             state["closed"] = True
 
     def _finish_answer_stream(self, state: dict[str, object]) -> None:
-        if not state.get("visible") or state.get("closed"):
+        if state.get("closed"):
             return
+        state["stream_done"] = True
+
+    def _finalize_live_answer_stream(self, final_text: str) -> bool:
+        state = self._live_answer_state
+        if not isinstance(state, dict) or not state.get("visible") or state.get("closed"):
+            return False
+        self._render_answer_stream(state, final_text, final=True)
         state["closed"] = True
-        try:
-            count = int(state.get("line_count") or 0)
-            if count > 0:
-                sys.stdout.write(f"\033[{count}A\033[J")
-                sys.stdout.flush()
-        except OSError:
-            pass
+        return bool(state.get("finalized"))
+
+    def _answer_stream_preview_body(self, text: str) -> str:
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        width = max(20, self._dialog_box_width() - 4)
+        max_width = width * 16
+        if _display_width(text) <= max_width:
+            return text
+        suffix = _clip_display(text[::-1], max_width - 2)[::-1] if max_width > 2 else ""
+        return "…" + suffix.lstrip()
 
     def _compact_answer_stream_preview(self, text: str) -> str:
         text = " ".join(str(text or "").split())
@@ -5450,6 +5480,7 @@ class CLI:
                 })
             self._remember_followup_data(mcp_data, synthesis.get("artifact_results"))
             self._remember_conversation_turn(query, formatted)
+            self._finalize_live_answer_stream(formatted)
             return formatted
 
         synthesis = self._parse_client_llm_advice(raw_text)
@@ -5510,6 +5541,7 @@ class CLI:
             self._last_agent_plan["resource_links"] = turn_resource_links
         self._remember_followup_data(mcp_data, synthesis.get("artifact_results"))
         self._remember_conversation_turn(query, formatted)
+        self._finalize_live_answer_stream(formatted)
         return formatted
 
     def _format_agent_failure(self, headline: str, next_steps: list[str] | None = None) -> str:
