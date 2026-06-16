@@ -5172,7 +5172,14 @@ class CLI:
     def _write_json_answer_preview(self, state: dict[str, object], raw_text: str, field: str) -> None:
         if not field or not self._should_show_answer_stream() or state.get("closed"):
             return
-        preview = self._extract_partial_json_string_field(raw_text, field).strip()
+        preview = ""
+        for field_name in re.split(r"[,|]\s*", field):
+            field_name = field_name.strip()
+            if not field_name:
+                continue
+            preview = self._extract_partial_json_string_field(raw_text, field_name).strip()
+            if preview:
+                break
         if not preview or preview == state.get("preview"):
             return
         state["preview"] = preview
@@ -5216,14 +5223,7 @@ class CLI:
 
     def _answer_stream_preview_body(self, text: str) -> str:
         text = str(text or "").strip()
-        if not text:
-            return ""
-        width = max(20, self._dialog_box_width() - 4)
-        max_width = width * 16
-        if _display_width(text) <= max_width:
-            return text
-        suffix = _clip_display(text[::-1], max_width - 2)[::-1] if max_width > 2 else ""
-        return "…" + suffix.lstrip()
+        return text
 
     def _compact_answer_stream_preview(self, text: str) -> str:
         text = " ".join(str(text or "").split())
@@ -5430,7 +5430,7 @@ class CLI:
                 ),
                 temperature=0.35,
                 max_tokens=min(int(config.llm_max_tokens or 4096), 1600),
-                json_preview_field="view",
+                json_preview_field="final_answer|view",
                 preview_title="二郎神",
             )
             self._refresh_token_status_bar(activity="analysis ready")
@@ -5925,8 +5925,10 @@ class CLI:
             "不会接收用户的大模型 API Key。你必须基于服务端返回的公开映射、用户数据和 MCP 数据生成投资分析，"
             "不能声称看到了完整服务端认知库或内部案例全文。"
             "你的语气要像一位克制、可靠、会和用户自然沟通的投资分析师，不要机械套模板。"
-            "输出 JSON 对象，字段为 view, suggestions, risk_controls, missing_data，可选 followups, next_actions, artifacts；"
-            "必须把 view 作为 JSON 对象的第一个字段，view 的值必须是可直接展示给用户的自然语言正文；"
+            "输出 JSON 对象，字段为 final_answer, view, suggestions, risk_controls, missing_data，可选 followups, next_actions, artifacts；"
+            "必须把 final_answer 作为 JSON 对象的第一个字段，final_answer 的值必须是完整、可直接展示给用户的自然语言最终回答；"
+            "客户端会实时流式展示 final_answer，并在结束后原样作为最终回答，不会再替你二次汇总，所以建议、风控、缺失数据也要自然写进 final_answer；"
+            "view 可以是 final_answer 的同文副本或一句摘要，用于兼容旧客户端；"
             "suggestions、risk_controls、missing_data、followups、next_actions 优先返回字符串数组；"
             "如需保留原因、条件、阈值或命令，也可以返回对象数组，例如 {\"action\":\"...\",\"reason\":\"...\",\"condition\":\"...\"}。"
             "artifacts 如需图表，使用数组: [{\"type\":\"chart\",\"chart_type\":\"bar\",\"title\":\"标题\",\"data\":{\"A股\":1.2}}]。"
@@ -5944,6 +5946,7 @@ class CLI:
             "client_intent_plan_summary": self._intent_plan_summary(intent_plan or {}),
             "fact_grounding": self._market_fact_grounding(query, mcp_data or {}, intent_plan or {}),
             "response_contract": {
+                "final_answer": "完整最终回答，必须包含自然语言结论、关键依据、可执行建议、风控和必要的缺失数据说明",
                 "view": "自然语言综合判断",
                 "suggestions": ["字符串，或包含 action/reason/condition 的对象"],
                 "risk_controls": ["字符串，或包含 risk/threshold/reason 的对象"],
@@ -5978,6 +5981,7 @@ class CLI:
                 "如果用户只是打招呼或问题过于泛泛，要自然追问，不要强行生成投资结论",
                 "如果 local_memory 已提供相关历史偏好、关注资产或上一阶段判断，要自然承接；不要逐条复述记忆，也不要把记忆当成实时数据",
                 "如果用户是“做成图表/继续/那它呢/详细说说”这类短追问，必须结合 recent_conversation 判断承接对象",
+                "如果用户问“分析的结果是/结论呢/结果呢”这类追问，要承接上一轮标的和数据上下文，不要把这句话当成一个新的泛泛问题",
                 "如果用户是图表、报告或承接上一轮的追问，必须参考 previous_mcp_context 和 recent_artifacts；但不能编造其中不存在的数值",
                 "如果用户提到“刚才那个网页/图片/图/链接/报告”，必须参考 recent_resources 和 recent_artifacts，并用自然语言说明可通过 /links 或 /open 重新打开",
                 "市场分析默认不是单点快照：要综合指数、港股/美股联动、黄金/美元/原油等跨资产、成交与事件线索，有条件时用 120 天窗口观察趋势和相对强弱",
@@ -6959,6 +6963,10 @@ class CLI:
         tools = intent_plan.get("mcp_tools") if isinstance(intent_plan, dict) else []
         tools = self._dedupe_mcp_tools(tools) if isinstance(tools, list) else []
         astock_tools = self._specific_astock_tools_from_query(query)
+        astock_guardrail = "client_astock_guardrail"
+        if not astock_tools:
+            astock_tools = self._specific_astock_tools_from_followup_context(query, intent_plan)
+            astock_guardrail = "client_astock_followup_guardrail"
         if astock_tools:
             before = list(tools)
             tools = self._dedupe_mcp_tools(astock_tools + tools)
@@ -6968,9 +6976,12 @@ class CLI:
                 if tools != before:
                     source = self._text_field(intent_plan.get("tool_selection_source") or intent_plan.get("route_source") or "local_llm")
                     intent_plan["tool_selection_source"] = (
-                        source if "client_astock_guardrail" in source else f"{source}+client_astock_guardrail"
+                        source if astock_guardrail in source else f"{source}+{astock_guardrail}"
                     )
-                    note = "检测到具体 A 股标的，客户端强制追加 search_astocks、实时行情和历史行情，避免只按大盘概览回答。"
+                    if astock_guardrail == "client_astock_followup_guardrail":
+                        note = "检测到承接上一轮 A 股标的的追问，客户端从上下文恢复标的并追加 search_astocks、实时行情和历史行情。"
+                    else:
+                        note = "检测到具体 A 股标的，客户端强制追加 search_astocks、实时行情和历史行情，避免只按大盘概览回答。"
                     previous = self._text_field(intent_plan.get("tool_selection_note"))
                     intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
         if isinstance(intent_plan, dict) and tools:
@@ -7438,12 +7449,12 @@ class CLI:
             if not any(word in compact for word in astock_context_words):
                 return []
             cleaned = re.sub(
-                r"(分析一下|帮我分析|帮我|分析|看一下|看看|今天|今日|昨日|昨天|今年|年内|最近|近期|的|表现|走势|股价|涨跌|怎么样|如何|怎么走|A股|a股|股票|个股)",
+                r"(分析一下|帮我分析|帮我|分析|看一下|看看|今天|今日|昨日|昨天|今年|年内|最近|近期|的|结果|结论|是|呢|表现|走势|股价|涨跌|怎么样|如何|怎么走|A股|a股|股票|个股)",
                 "",
                 text,
                 flags=re.I,
             ).strip(" ，。！？?;；")
-            generic_assets = {"资产", "市场", "行情", "大盘", "股市", "股票", "个股", "公司", "黄金", "原油", "美元", "美元指数"}
+            generic_assets = {"资产", "市场", "行情", "大盘", "股市", "股票", "个股", "公司", "结果", "结果是", "结论", "结论是", "黄金", "原油", "美元", "美元指数"}
             if (
                 cleaned
                 and 2 <= len(cleaned) <= 12
@@ -7452,6 +7463,60 @@ class CLI:
             ):
                 keyword = cleaned
         if not keyword:
+            return []
+        return self._astock_tools_for_target(code=code, keyword=keyword)
+
+    def _specific_astock_tools_from_followup_context(self, query: str, intent_plan: dict | None = None) -> list[dict]:
+        if not self._is_contextual_followup_query(query, intent_plan):
+            return []
+        codes = self._astock_codes_from_mcp_context(self._last_mcp_data)
+        if codes:
+            code = codes[0]
+            return self._astock_tools_for_target(code=code, keyword=self._known_astock_name(code))
+        context_chunks: list[str] = []
+        if isinstance(self._last_mcp_data, dict):
+            context_chunks.extend(str(key) for key in self._last_mcp_data.keys())
+        for turn in reversed(self._recent_conversation_context()[-4:]):
+            if isinstance(turn, dict):
+                context_chunks.extend([
+                    self._text_field(turn.get("user")),
+                    self._text_field(turn.get("assistant")),
+                ])
+        for text in context_chunks:
+            tools = self._specific_astock_tools_from_query(text)
+            if tools:
+                return tools
+        return []
+
+    def _is_contextual_followup_query(self, query: str, intent_plan: dict | None = None) -> bool:
+        if isinstance(intent_plan, dict) and intent_plan.get("is_followup"):
+            return True
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        if not text:
+            return False
+        markers = (
+            "刚才", "刚刚", "上面", "前面", "上一轮", "上轮", "这个", "那个", "它",
+            "继续", "结果", "结论", "分析结果", "怎么看", "怎么样", "如何", "呢",
+        )
+        return any(marker in text for marker in markers)
+
+    def _astock_codes_from_mcp_context(self, mcp_data) -> list[str]:
+        if not isinstance(mcp_data, dict):
+            return []
+        codes: list[str] = []
+        for key, value in mcp_data.items():
+            for candidate in [key, *self._extract_astock_codes_from_value(value)]:
+                code = self._normalize_astock_code(candidate)
+                if code and code not in codes:
+                    codes.append(code)
+            if len(codes) >= 3:
+                break
+        return codes
+
+    def _astock_tools_for_target(self, *, code: str = "", keyword: str = "") -> list[dict]:
+        code = self._normalize_astock_code(code)
+        keyword = self._text_field(keyword) or self._known_astock_name(code) or code
+        if not keyword and not code:
             return []
         window = self._recent_market_window_args(days=120)
         tools: list[dict] = [{"name": "search_astocks", "arguments": {"keyword": keyword, "limit": 5}}]
@@ -7495,7 +7560,10 @@ class CLI:
         if intent_plan.get("chart_opportunity") or intent_plan.get("is_followup"):
             return True
         text = re.sub(r"\s+", "", (query or "").lower())
-        followup_markers = ("刚才", "上面", "这个", "它", "继续", "做成图表", "画图", "报告", "对比")
+        followup_markers = (
+            "刚才", "刚刚", "上面", "前面", "上一轮", "这个", "那个", "它",
+            "继续", "结果", "结论", "做成图表", "画图", "报告", "对比",
+        )
         return any(marker in text for marker in followup_markers)
 
     def _infer_tools_from_mcp_keys(self, mcp_data: dict) -> list[dict]:
@@ -8408,7 +8476,7 @@ class CLI:
         text = (raw_text or "").strip()
         data = self._parse_json_object(
             text,
-            preferred_keys={"view", "suggestions", "risk_controls", "missing_data", "artifacts"},
+            preferred_keys={"final_answer", "view", "suggestions", "risk_controls", "missing_data", "artifacts"},
         )
         if data:
             return data
@@ -8690,6 +8758,9 @@ class CLI:
         model: str,
         data_inputs: dict,
     ) -> str:
+        direct_answer = self._direct_client_final_answer(synthesis, raw_text)
+        if direct_answer:
+            return direct_answer
         top = matches[0] if matches else {}
         suggestions = self._coerce_text_items(synthesis.get("suggestions"))
         risks = self._coerce_text_items(synthesis.get("risk_controls"))
@@ -8792,6 +8863,16 @@ class CLI:
             for item in compact_next[:3]:
                 lines.append(f"- {item}")
         return "\n".join(lines)
+
+    def _direct_client_final_answer(self, synthesis: dict, raw_text: str = "") -> str:
+        if not isinstance(synthesis, dict):
+            return ""
+        for key in ("final_answer", "answer", "response"):
+            value = synthesis.get(key)
+            text = value.strip() if isinstance(value, str) else self._text_field(value)
+            if text:
+                return text
+        return ""
 
     def _answer_command_bar(self, *, mcp_links: list, artifact_results: list[dict], data_inputs: dict) -> list[str]:
         actions = ["/plan 复盘本轮意图、MCP 数据、服务端映射和产物计划"]

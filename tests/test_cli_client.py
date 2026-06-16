@@ -3764,6 +3764,8 @@ def test_llm_prompts_include_mcp_catalog_and_chart_channel():
     assert "/open link 1" in payload
     assert "网页、图片、HTML、PDF" in payload
     assert "artifacts" in payload
+    assert "final_answer" in payload
+    assert "客户端会实时流式展示 final_answer" in messages[0]["content"]
     assert "followups" in payload
     assert "next_actions" in payload
     assert "recent_conversation" in payload
@@ -4872,6 +4874,35 @@ async def test_collect_astock_data_follows_search_result_with_realtime_and_histo
     assert cli._market_fact_grounding("贵州茅台表现", data, {"mcp_tools": [{"name": "search_astocks"}]})["status"] == "grounded"
 
 
+@pytest.mark.asyncio
+async def test_collect_astock_followup_restores_previous_stock_and_refetches(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments))
+            if tool_name == "search_astocks":
+                return {"rows": [{"code": "600519", "name": "贵州茅台"}]}
+            return {"latest": {"code": arguments["code"], "name": "贵州茅台", "close": 1255.67}}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    cli = CLI()
+    cli._last_mcp_data = {
+        "search_astocks:贵州茅台": {"rows": [{"code": "600519", "name": "贵州茅台"}]},
+    }
+
+    plan = {"intent": "general_investment", "needs_mcp": False, "mcp_tools": [], "is_followup": True}
+    data = await cli._collect_client_mcp_data("分析的结果是？", {}, plan)
+
+    assert ("search_astocks", {"keyword": "贵州茅台", "limit": 5}) in calls
+    assert ("get_astock_realtime", {"code": "600519"}) in calls
+    assert any(name == "get_astock_history" and args["code"] == "600519" for name, args in calls)
+    assert plan["needs_mcp"] is True
+    assert "client_astock_followup_guardrail" in plan["tool_selection_source"]
+    assert "get_astock_realtime:600519" in data
+
+
 def test_global_index_daily_table_name_does_not_trigger_ai_event_defaults():
     plan = CLI()._normalize_intent_plan(
         {"intent": "data_lookup", "needs_mcp": False, "mcp_tools": []},
@@ -5398,6 +5429,31 @@ async def test_client_side_advice_formats_string_sections_as_items():
     assert "你也可以继续问：" not in result
     assert "如果需要图表或报告，可以继续说" not in result
     assert "- 可" not in result
+
+
+def test_client_side_advice_uses_final_answer_without_reformatting():
+    cli = CLI()
+    final_answer = "结论：先看相对强弱。\n\n- 建议：等 MCP 数据确认后再行动。\n- 风控：不追高。"
+
+    result = cli._format_client_advice(
+        query="分析的结果是？",
+        matches=[{"scene": "市场监测与事件响应", "confidence": 0.72}],
+        synthesis={
+            "final_answer": final_answer,
+            "view": "旧摘要不应该覆盖最终回答。",
+            "suggestions": ["不应该被重组"],
+            "risk_controls": ["不应该被重组"],
+            "missing_data": [],
+        },
+        raw_text="",
+        provider="Xiaomi MiMo",
+        model="mimo-v2.5",
+        data_inputs={"mcp_data": ["get_astock_realtime:600519"]},
+    )
+
+    assert result == final_answer
+    assert "我先按" not in result
+    assert "可以先这样做" not in result
 
 
 def test_client_side_advice_formats_object_sections_as_natural_items():
