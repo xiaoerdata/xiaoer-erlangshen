@@ -128,6 +128,12 @@ class Super66MCP:
                 return value
             self._cache.pop(cache_key, None)
 
+        if normalized_tool in {"dc66_batch_get_index_data", "dc66_get_index_batch_series"}:
+            result = await self._client_batch_get_index_data(normalized_arguments, use_cache=use_cache)
+            if use_cache:
+                self._cache[cache_key] = (result, time.time() + self.cache_ttl)
+            return result
+
         token = await self._ensure_token()
         if not token:
             return {
@@ -162,6 +168,11 @@ class Super66MCP:
                     )
                     payload = self._parse_payload(response)
             if response.status_code >= 400:
+                if normalized_tool == "dc66_get_index_batch_series" and self._is_tool_not_found(payload):
+                    result = await self._client_batch_get_index_data(normalized_arguments, use_cache=use_cache)
+                    if use_cache:
+                        self._cache[cache_key] = (result, time.time() + self.cache_ttl)
+                    return result
                 return {
                     "error": f"HTTP {response.status_code}",
                     "detail": payload,
@@ -235,10 +246,84 @@ class Super66MCP:
     def _cache_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
         return f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
 
+    async def _client_batch_get_index_data(self, arguments: dict[str, Any], *, use_cache: bool = True) -> dict[str, Any]:
+        labels = self._coerce_label_list(
+            arguments.get("indexNames")
+            or arguments.get("indexName")
+            or arguments.get("indices")
+            or arguments.get("names")
+        )
+        if not labels:
+            return {
+                "error": "batch_get_index_data 缺少 indexNames",
+                "tool": "dc66_batch_get_index_data",
+                "arguments": self._safe_arguments(arguments),
+            }
+        window = {
+            key: value
+            for key, value in arguments.items()
+            if key not in {"indexNames", "indexName", "indices", "names"}
+        }
+        rows: list[dict[str, Any]] = []
+        latest_rows: list[dict[str, Any]] = []
+        results: dict[str, Any] = {}
+        errors: dict[str, Any] = {}
+        for label in labels[:12]:
+            child_args = {"indexName": label, **window}
+            result = await self.call_tool("get_index_data", child_args, use_cache=use_cache)
+            if isinstance(result, dict) and result.get("error"):
+                errors[label] = result
+                continue
+            results[label] = result
+            if isinstance(result, dict):
+                child_rows = result.get("rows") if isinstance(result.get("rows"), list) else []
+                for row in child_rows:
+                    if isinstance(row, dict):
+                        item = dict(row)
+                        item.setdefault("index_name", label)
+                        rows.append(item)
+                latest = result.get("latest")
+                if isinstance(latest, dict):
+                    item = dict(latest)
+                    item.setdefault("index_name", label)
+                    latest_rows.append(item)
+        if not results and errors:
+            return {
+                "error": "batch_get_index_data 拆分调用全部失败",
+                "tool": "dc66_batch_get_index_data",
+                "arguments": self._safe_arguments(arguments),
+                "errors": errors,
+            }
+        return {
+            "tool": "dc66_batch_get_index_data",
+            "arguments": self._safe_arguments(arguments),
+            "rows": self._sort_market_rows(rows),
+            "latest_rows": self._sort_market_rows(latest_rows),
+            "results": results,
+            "errors": errors,
+            "count": len(rows),
+            "source_format": "client_batch_fanout",
+        }
+
+    def _coerce_label_list(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            items = value
+        elif isinstance(value, str):
+            items = re.split(r"[,，、/|;\s]+", value)
+        else:
+            items = []
+        result: list[str] = []
+        for item in items:
+            text = str(item or "").strip()
+            if text and text not in result:
+                result.append(text)
+        return result
+
     def _normalize_tool_name(self, tool_name: str) -> str:
-        if tool_name.startswith("dc66_"):
-            return tool_name
-        return f"dc66_{tool_name}"
+        normalized = tool_name if tool_name.startswith("dc66_") else f"dc66_{tool_name}"
+        if normalized == "dc66_batch_get_index_data":
+            return "dc66_get_index_batch_series"
+        return normalized
 
     def _canonical_index_market_label(self, label: Any) -> str:
         text = re.sub(r"\s+", "", str(label or "").lower())
@@ -307,6 +392,7 @@ class Super66MCP:
         aliases = {
             "get_index_data": {"index_name": "indexName", "index_code": "indexName", "indexCode": "indexName"},
             "batch_get_index_data": {"index_names": "indexNames", "index_name": "indexNames", "indices": "indexNames", "names": "indexNames"},
+            "get_index_batch_series": {"index_names": "indexNames", "index_name": "indexNames", "indices": "indexNames", "names": "indexNames"},
             "get_global_asset_data": {"asset_name": "assetName", "asset_code": "assetCode", "assetCode": "assetCode", "source_table": "sourceTable"},
             "batch_get_global_asset_data": {"asset_names": "assetNames", "asset_name": "assetNames", "assets": "assetNames", "names": "assetNames"},
             "batch_get_astock_realtime": {"stock_codes": "codes", "stockCodes": "codes", "code": "codes"},
@@ -363,6 +449,25 @@ class Super66MCP:
         except ValueError:
             return response.text
 
+    def _is_tool_not_found(self, payload: Any) -> bool:
+        if isinstance(payload, str):
+            return "TOOL_NOT_FOUND" in payload or "not registered" in payload
+        if not isinstance(payload, dict):
+            return False
+        values = [
+            payload.get("code"),
+            payload.get("message"),
+            payload.get("error"),
+        ]
+        detail = payload.get("detail")
+        if isinstance(detail, dict):
+            values.extend([detail.get("code"), detail.get("message"), detail.get("error")])
+        error = payload.get("error")
+        if isinstance(error, dict):
+            values.extend([error.get("code"), error.get("message")])
+        text = " ".join(str(value) for value in values if value is not None)
+        return "TOOL_NOT_FOUND" in text or "not registered" in text
+
     def _extract_result(
         self,
         payload: Any,
@@ -408,6 +513,10 @@ class Super66MCP:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
+        if tool_name == "dc66_get_index_batch_series":
+            batch = self._normalize_batch_index_series_result(result, arguments)
+            if batch:
+                return batch
         rows = self._extract_rows(result)
         if rows:
             normalized_rows = [self._normalize_market_row(row, arguments) for row in rows if isinstance(row, dict)]
@@ -432,6 +541,73 @@ class Super66MCP:
                 return output
             return result
         return {"result": result}
+
+    def _normalize_batch_index_series_result(self, result: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        items = result.get("items")
+        if not isinstance(items, list):
+            return {}
+        rows: list[dict[str, Any]] = []
+        latest_rows: list[dict[str, Any]] = []
+        grouped: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            label = (
+                item.get("indexName")
+                or item.get("index_name")
+                or item.get("assetName")
+                or item.get("name")
+                or ""
+            )
+            label_text = str(label).strip()
+            item_rows = self._columnar_rows(item.get("data")) if isinstance(item.get("data"), dict) else []
+            if not item_rows:
+                item_rows = self._extract_rows(item.get("data"))
+            normalized_item_rows: list[dict[str, Any]] = []
+            for row in item_rows:
+                if not isinstance(row, dict):
+                    continue
+                next_row = dict(row)
+                if label_text:
+                    next_row.setdefault("index_name", label_text)
+                normalized = self._normalize_market_row(next_row, arguments)
+                normalized_item_rows.append(normalized)
+                rows.append(normalized)
+            normalized_item_rows = self._sort_market_rows(normalized_item_rows)
+            latest = normalized_item_rows[-1] if normalized_item_rows else {}
+            if latest:
+                latest_rows.append(latest)
+            if label_text:
+                grouped[label_text] = {
+                    "tool": "dc66_get_index_data",
+                    "arguments": {
+                        **self._safe_arguments(arguments),
+                        "indexName": label_text,
+                    },
+                    "rows": normalized_item_rows[-120:],
+                    "latest": latest,
+                    "count": len(normalized_item_rows),
+                    "actualStartDate": item.get("actualStartDate"),
+                    "actualEndDate": item.get("actualEndDate"),
+                    "latestAvailableDate": item.get("latestAvailableDate"),
+                }
+        if not rows:
+            return {}
+        rows = self._sort_market_rows(rows)
+        latest_rows = self._sort_market_rows(latest_rows)
+        return {
+            "tool": "dc66_get_index_batch_series",
+            "arguments": self._safe_arguments(arguments),
+            "rows": rows[-120:],
+            "latest_rows": latest_rows,
+            "latest": rows[-1],
+            "results": grouped,
+            "count": len(rows),
+            "missingIndexNames": result.get("missingIndexNames", []),
+            "source_format": "index_batch_series",
+        }
 
     def _extract_rows(self, value: Any, depth: int = 0) -> list[dict[str, Any]]:
         if depth > 6:
@@ -521,6 +697,11 @@ class Super66MCP:
                     if isinstance(series, list) and index < len(series):
                         row[field] = series[index]
                         break
+            indicators = value.get("indicators")
+            if isinstance(indicators, dict):
+                for name, series in indicators.items():
+                    if isinstance(series, list) and index < len(series):
+                        row[str(name)] = series[index]
             if len(row) > 1:
                 rows.append(row)
         return rows
@@ -557,7 +738,13 @@ class Super66MCP:
                 continue
             current = normalized.get(target)
             if target not in normalized or current is None or current == "":
-                normalized[target] = self._coerce_market_value(value, percent=target == "change_pct")
+                normalized[target] = (
+                    self._normalize_date_value(value)
+                    if target == "date"
+                    else self._coerce_market_value(value, percent=target == "change_pct")
+                )
+        if normalized.get("date"):
+            normalized["date"] = self._normalize_date_value(normalized.get("date"))
         label = (
             arguments.get("index_name")
             or arguments.get("indexName")
@@ -606,6 +793,15 @@ class Super66MCP:
                 return value
         return value
 
+    def _normalize_date_value(self, value: Any) -> Any:
+        text = str(value or "").strip()
+        if not text:
+            return value
+        digits = re.sub(r"\D", "", text)
+        if len(digits) >= 8:
+            return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+        return text
+
     def _looks_like_market_row(self, value: Any) -> bool:
         if not isinstance(value, dict):
             return False
@@ -652,10 +848,14 @@ class Super66MCP:
         value = (
             row.get("date")
             or row.get("trade_date")
+            or row.get("tradedate")
             or row.get("trading_date")
             or row.get("datetime")
+            or row.get("timestamp")
+            or row.get("time")
             or row.get("日期")
             or row.get("交易日期")
+            or row.get("时间")
         )
         if value is None:
             return ""

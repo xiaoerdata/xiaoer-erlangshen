@@ -5264,9 +5264,11 @@ class CLI:
             field_name = field_name.strip()
             if not field_name:
                 continue
-            preview = self._extract_partial_json_string_field(raw_text, field_name).strip()
+            preview = self._extract_jsonish_text_field(raw_text, field_name).strip()
             if preview:
                 break
+        if not preview and not self._looks_like_json_response_text(raw_text):
+            preview = raw_text.strip()
         if not preview or preview == state.get("preview"):
             return
         state["preview"] = preview
@@ -6628,7 +6630,7 @@ class CLI:
             if not tool_selection_note:
                 tool_selection_note = "本机大模型未给出具体工具，客户端按 intent/data_recipes 补齐默认 MCP 工具，避免无事实数据分析。"
         index_guardrail_tools = self._index_market_guardrail_tools(query)
-        if index_guardrail_tools:
+        if index_guardrail_tools and tools:
             before = list(tools)
             tools = self._drop_misdirected_astock_lookup_tools(tools)
             if tools != before or not self._has_index_market_tool(tools):
@@ -7295,7 +7297,7 @@ class CLI:
         tools = intent_plan.get("mcp_tools") if isinstance(intent_plan, dict) else []
         tools = self._dedupe_mcp_tools(tools) if isinstance(tools, list) else []
         index_guardrail_tools = self._index_market_guardrail_tools(query)
-        if index_guardrail_tools:
+        if index_guardrail_tools and tools:
             before = list(tools)
             tools = self._drop_misdirected_astock_lookup_tools(tools)
             if tools != before or not self._has_index_market_tool(tools):
@@ -7695,7 +7697,7 @@ class CLI:
     def _default_market_overview_tools(self, query: str = "") -> list[dict]:
         search_query = self._market_overview_search_query(query)
         macro_query = self._market_overview_macro_search_query(query)
-        window = self._recent_market_window_args(days=120)
+        window = self._recent_market_window_args(days=120, query=query)
         hot_query = self._market_hot_stock_search_query(query)
         return [
             {
@@ -7726,8 +7728,11 @@ class CLI:
             {"name": "web_search", "arguments": {"query": hot_query, "count": 5}},
         ]
 
-    def _recent_market_window_args(self, days: int = 45) -> dict:
+    def _recent_market_window_args(self, days: int = 45, query: str = "") -> dict:
         end = datetime.now().date()
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        if "昨天" in text or "昨日" in text:
+            end = end - timedelta(days=1)
         start = end - timedelta(days=days)
         return {"startDate": start.isoformat(), "endDate": end.isoformat()}
 
@@ -7773,7 +7778,7 @@ class CLI:
         return bool(has_event) and any(word in text for word in market_words)
 
     def _event_market_default_tools(self, query: str) -> list[dict]:
-        window = self._recent_market_window_args(days=60)
+        window = self._recent_market_window_args(days=60, query=query)
         return [
             {"name": "get_index_data", "arguments": {"index_name": "恒生科技指数", **window}},
             {"name": "get_index_data", "arguments": {"index_name": "沪深300", **window}},
@@ -7787,7 +7792,7 @@ class CLI:
         text = re.sub(r"\s+", "", self._text_field(query).lower())
         if not text:
             return []
-        window = self._recent_market_window_args(days=60)
+        window = self._recent_market_window_args(days=60, query=query)
         tools: list[dict] = []
         seen: set[tuple[str, str]] = set()
 
@@ -8479,9 +8484,14 @@ class CLI:
     def _mcp_snapshot_lines(self, mcp_data, limit: int = 6) -> list[str]:
         if not isinstance(mcp_data, dict) or not mcp_data:
             return []
-        lines = []
-        for key in sorted(mcp_data.keys(), key=str):
-            if len(lines) >= limit:
+        entries = self._mcp_snapshot_entries(mcp_data, limit=limit)
+        return [self._format_mcp_snapshot_entry(entry) for entry in entries[:limit]]
+
+    def _mcp_snapshot_entries(self, mcp_data, limit: int = 6) -> list[dict[str, object]]:
+        entries: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for key in sorted((mcp_data or {}).keys(), key=str):
+            if len(entries) >= limit:
                 break
             key_text = str(key)
             if key_text == "note":
@@ -8489,12 +8499,198 @@ class CLI:
             value = mcp_data.get(key)
             if self._mcp_value_has_error(value) or "error" in key_text.lower():
                 continue
+            if key_text.startswith("web_search:"):
+                for highlight in self._extract_web_search_highlights(value):
+                    signature = f"网页线索:{highlight}"
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    entries.append({"label": "网页线索", "summary": highlight})
+                    if len(entries) >= limit:
+                        break
+                continue
+            grouped_rows = self._snapshot_grouped_market_rows(key_text, value)
+            for label, rows in grouped_rows.items():
+                if label in seen:
+                    continue
+                entry = self._snapshot_entry_from_rows(label, rows)
+                if not entry:
+                    continue
+                seen.add(label)
+                entries.append(entry)
+                if len(entries) >= limit:
+                    break
+            if grouped_rows:
+                continue
             highlights = self._extract_mcp_key_highlights(key_text, value)
-            if highlights:
-                lines.append(f"{key_text}: " + "，".join(highlights[:5]))
-            else:
-                lines.append(f"{key_text}: 已返回数据")
-        return lines
+            for highlight in highlights[: max(1, limit - len(entries))]:
+                label, detail = self._split_snapshot_label_detail(highlight)
+                label = label or self._snapshot_label_from_key(key_text)
+                signature = f"{label}:{detail}"
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                entries.append({"label": label, "summary": detail or highlight})
+                if len(entries) >= limit:
+                    break
+        return entries
+
+    def _snapshot_grouped_market_rows(self, key_text: str, value) -> dict[str, list[dict]]:
+        rows = [
+            row for row in self._flatten_mcp_dict_rows(value)
+            if self._row_has_snapshot_market_value(row)
+        ]
+        grouped: dict[str, list[dict]] = {}
+        fallback_label = self._snapshot_label_from_key(key_text)
+        for row in rows:
+            label = self._snapshot_row_label(row, fallback_label)
+            if not label:
+                continue
+            grouped.setdefault(label, []).append(row)
+        return grouped
+
+    def _row_has_snapshot_market_value(self, row: dict) -> bool:
+        if not isinstance(row, dict):
+            return False
+        if self._first_numeric_value(row, ("price", "latest", "last", "close", "close_price", "value", "nav", "unit_nav", "收盘", "收盘价", "最新价", "现价", "净值")) is not None:
+            return True
+        if self._first_numeric_value(row, ("change_pct", "pct_chg", "change_percent", "changePercent", "changeRate", "percent", "涨跌幅", "涨幅", "日涨跌幅")) is not None:
+            return True
+        return bool(self._readable_mcp_date(row) and self._snapshot_row_label(row, ""))
+
+    def _snapshot_row_label(self, row: dict, fallback: str = "") -> str:
+        return (
+            self._text_field(row.get("name"))
+            or self._text_field(row.get("index_name"))
+            or self._text_field(row.get("asset_name"))
+            or self._text_field(row.get("product_name"))
+            or self._text_field(row.get("security_name"))
+            or self._text_field(row.get("symbol_name"))
+            or self._text_field(row.get("fund_name"))
+            or self._text_field(row.get("code"))
+            or self._text_field(row.get("指标名称"))
+            or self._text_field(row.get("指数名称"))
+            or self._text_field(row.get("资产名称"))
+            or self._text_field(row.get("名称"))
+            or self._text_field(row.get("简称"))
+            or fallback
+        )[:24]
+
+    def _snapshot_label_from_key(self, key_text: str) -> str:
+        key = self._text_field(key_text)
+        if ":" not in key:
+            return key[:24]
+        label = key.split(":", 1)[1]
+        if label.startswith("{"):
+            return ""
+        return label.split(",", 1)[0][:24]
+
+    def _snapshot_entry_from_rows(self, label: str, rows: list[dict]) -> dict[str, object]:
+        clean_rows = [row for row in rows if isinstance(row, dict)]
+        if not clean_rows:
+            return {}
+        latest = self._latest_mcp_row_by_date(clean_rows) or clean_rows[-1]
+        latest_value = self._first_numeric_value(
+            latest,
+            ("price", "latest", "last", "close", "close_price", "value", "nav", "unit_nav", "收盘", "收盘价", "最新价", "现价", "净值"),
+        )
+        change_pct = self._first_numeric_value(
+            latest,
+            ("change_pct", "pct_chg", "change_percent", "changePercent", "changeRate", "percent", "涨跌幅", "涨幅", "日涨跌幅"),
+        )
+        if change_pct is None:
+            change_pct = self._snapshot_latest_change_pct(clean_rows)
+        volume = self._first_numeric_value(latest, ("volume", "vol", "成交量", "成交量(手)"))
+        amount = self._first_numeric_value(latest, ("amount", "turnover", "turnover_amount", "成交额", "成交额(元)"))
+        return_pct = self._snapshot_close_return_pct(clean_rows)
+        return {
+            "label": label,
+            "date": self._format_compact_date(self._readable_mcp_date(latest)),
+            "latest": latest_value,
+            "change_pct": change_pct,
+            "volume": volume,
+            "amount": amount,
+            "return_pct": return_pct,
+        }
+
+    def _snapshot_close_return_pct(self, rows: list[dict]) -> float | None:
+        points: dict[str, float] = {}
+        for row in rows:
+            close = self._first_numeric_value(
+                row,
+                ("close", "close_price", "latest_close", "last_close", "price", "nav", "unit_nav", "收盘", "收盘价", "最新价", "现价", "净值"),
+            )
+            if close is None:
+                continue
+            date_key = self._mcp_row_date_key(row)
+            if not date_key:
+                continue
+            points[date_key] = close
+        if len(points) < 2:
+            return None
+        ordered = sorted(points.items(), key=lambda item: item[0])
+        start_close = ordered[0][1]
+        end_close = ordered[-1][1]
+        if start_close == 0:
+            return None
+        return (end_close / start_close - 1.0) * 100.0
+
+    def _snapshot_latest_change_pct(self, rows: list[dict]) -> float | None:
+        points: dict[str, float] = {}
+        for row in rows:
+            close = self._first_numeric_value(
+                row,
+                ("close", "close_price", "latest_close", "last_close", "price", "nav", "unit_nav", "收盘", "收盘价", "最新价", "现价", "净值"),
+            )
+            if close is None:
+                continue
+            date_key = self._mcp_row_date_key(row)
+            if not date_key:
+                continue
+            points[date_key] = close
+        if len(points) < 2:
+            return None
+        ordered = sorted(points.items(), key=lambda item: item[0])
+        previous_close = ordered[-2][1]
+        latest_close = ordered[-1][1]
+        if previous_close == 0:
+            return None
+        return (latest_close / previous_close - 1.0) * 100.0
+
+    def _format_mcp_snapshot_entry(self, entry: dict[str, object]) -> str:
+        label = self._text_field(entry.get("label")) or "数据"
+        summary = self._text_field(entry.get("summary"))
+        if summary:
+            return f"{label}: {summary}"
+        parts = []
+        date = self._text_field(entry.get("date"))
+        if date and date != "起止日":
+            parts.append(f"日期 {date}")
+        latest = self._numeric_chart_value(entry.get("latest"))
+        if latest is not None:
+            parts.append(f"最新 {self._format_price(latest)}")
+        change_pct = self._numeric_chart_value(entry.get("change_pct"))
+        if change_pct is not None:
+            parts.append(f"涨跌幅 {self._format_pct(change_pct)}")
+        amount = self._numeric_chart_value(entry.get("amount"))
+        volume = self._numeric_chart_value(entry.get("volume"))
+        if amount is not None:
+            parts.append(f"成交额 {self._format_price(amount)}")
+        elif volume is not None:
+            parts.append(f"成交量 {self._format_price(volume)}")
+        return_pct = self._numeric_chart_value(entry.get("return_pct"))
+        if return_pct is not None:
+            parts.append(f"区间收益 {self._format_pct(return_pct)}")
+        return f"{label}: " + ("，".join(parts) if parts else "已返回数据")
+
+    def _split_snapshot_label_detail(self, value: str) -> tuple[str, str]:
+        text = self._text_field(value)
+        if not text:
+            return "", ""
+        if " " in text:
+            label, detail = text.split(" ", 1)
+            return label.strip(), detail.strip()
+        return "", text
 
     def _extract_mcp_key_highlights(self, key_text: str, value) -> list[str]:
         if key_text.startswith(("batch_get_", "get_hot_stocks:", "get_macro_data:", "batch_get_macro_data:")):
@@ -8549,17 +8745,75 @@ class CLI:
             text = self._text_field(item)
             if not text:
                 continue
-            source, _, detail = text.partition(": ")
-            source = self._truncate_context_text(source, 32).replace("|", "/")
-            detail = self._truncate_context_text(detail or text, 96).replace("|", "/")
-            rows.append((source, detail))
+            label, detail = self._display_snapshot_label_and_detail(text)
+            label = self._truncate_context_text(label or "数据", 24).replace("|", "/")
+            parsed = self._parse_snapshot_detail_fields(detail or text)
+            rows.append((
+                label,
+                parsed.get("date", ""),
+                parsed.get("latest") or parsed.get("summary", ""),
+                parsed.get("change_pct", ""),
+                parsed.get("turnover", ""),
+                parsed.get("return_pct", ""),
+            ))
         if not rows:
             return []
         return [
-            "| 数据源 | 摘要 |",
-            "| --- | --- |",
-            *[f"| {source} | {detail} |" for source, detail in rows],
+            "| 标的/线索 | 日期 | 最新/摘要 | 涨跌幅 | 成交 | 区间收益 |",
+            "| --- | --- | --- | --- | --- | --- |",
+            *[
+                "| "
+                + " | ".join(self._truncate_context_text(str(cell), 48).replace("|", "/") for cell in row)
+                + " |"
+                for row in rows
+            ],
         ]
+
+    def _display_snapshot_label_and_detail(self, text: str) -> tuple[str, str]:
+        clean = self._text_field(text)
+        known_prefixes = (
+            "get_index_data",
+            "batch_get_index_data",
+            "get_global_asset_data",
+            "batch_get_global_asset_data",
+            "get_astock_realtime",
+            "get_astock_history",
+            "search_astocks",
+            "web_search",
+            "get_macro_data",
+            "get_hot_stocks",
+        )
+        for prefix in known_prefixes:
+            marker = f"{prefix}:"
+            if clean.startswith(marker):
+                rest = clean[len(marker):]
+                label, sep, detail = rest.partition(": ")
+                if sep:
+                    return label.strip() or prefix, detail.strip()
+                return prefix, rest.strip()
+        label, _, detail = clean.partition(": ")
+        return (label or clean).strip(), detail.strip()
+
+    def _parse_snapshot_detail_fields(self, detail: str) -> dict[str, str]:
+        text = self._text_field(detail)
+        fields: dict[str, str] = {}
+        patterns = {
+            "date": r"日期\s*([^，,]+)",
+            "latest": r"最新\s*([^，,]+)",
+            "change_pct": r"涨跌幅\s*([^，,]+)",
+            "return_pct": r"区间收益\s*([^，,]+)",
+            "amount": r"成交额\s*([^，,]+)",
+            "volume": r"成交量\s*([^，,]+)",
+        }
+        for key, pattern in patterns.items():
+            match = re.search(pattern, text)
+            if match:
+                fields[key] = match.group(1).strip()
+        if fields:
+            fields["turnover"] = fields.get("amount") or fields.get("volume") or ""
+        else:
+            fields["summary"] = text
+        return fields
 
     def _resource_links_from_value(self, value, fallback_label: str = "资源", limit: int = 8) -> list[str]:
         if isinstance(value, str):
@@ -8888,7 +9142,69 @@ class CLI:
         )
         if data:
             return data
+        answer = self._extract_jsonish_text_field(text, "final_answer") or self._extract_jsonish_text_field(text, "answer") or self._extract_jsonish_text_field(text, "response")
+        if answer:
+            return {
+                "final_answer": answer,
+                "view": answer,
+                "suggestions": [],
+                "risk_controls": [],
+                "missing_data": [],
+                "recovered_from_jsonish_text": True,
+            }
+        view = self._extract_jsonish_text_field(text, "view")
+        if view:
+            return {"view": view, "suggestions": [], "risk_controls": [], "missing_data": []}
+        if self._looks_like_json_response_text(text):
+            return {
+                "view": "",
+                "suggestions": [],
+                "risk_controls": ["模型返回了非标准 JSON，本轮已隐藏原始 JSON，避免把结构化载荷当正文。"],
+                "missing_data": [],
+                "parse_warning": "invalid_json_response",
+            }
         return {"view": text, "suggestions": [], "risk_controls": [], "missing_data": []}
+
+    def _looks_like_json_response_text(self, text: str) -> bool:
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        if stripped.startswith("{") or stripped.startswith("```json"):
+            return True
+        compact = re.sub(r"\s+", "", stripped.lower())
+        return any(marker in compact for marker in ("final_answer", "risk_controls", "missing_data", "suggestions", '"view"', "'view'"))
+
+    def _extract_jsonish_text_field(self, raw_text: str, field: str) -> str:
+        text = raw_text or ""
+        strict = self._extract_partial_json_string_field(text, field).strip()
+        if strict:
+            return strict
+        field_pattern = re.escape(field)
+        patterns = (
+            rf"['\"]?{field_pattern}['\"]?\s*[:：]\s*“(?P<value>.*?)”",
+            rf"['\"]?{field_pattern}['\"]?\s*[:：]\s*\"(?P<value>(?:\\.|[^\"\\])*)\"",
+            rf"['\"]?{field_pattern}['\"]?\s*[:：]\s*'(?P<value>(?:\\.|[^'\\])*)'",
+            rf"['\"]?{field_pattern}['\"]?\s*[:：]\s*(?P<value>.*?)(?=,\s*['\"]?(?:final_answer|answer|response|view|suggestions|risk_controls|missing_data|followups|next_actions|artifacts)['\"]?\s*[:：]|\n\s*['\"]?(?:final_answer|answer|response|view|suggestions|risk_controls|missing_data|followups|next_actions|artifacts)['\"]?\s*[:：]|\n?\s*\}}|$)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.I | re.S)
+            if not match:
+                continue
+            value = match.group("value")
+            decoded = self._decode_jsonish_string_value(value)
+            cleaned = self._clean_recovered_final_answer(decoded) if field in {"final_answer", "answer", "response"} else self._text_field(decoded)
+            if cleaned:
+                return cleaned
+        return ""
+
+    def _decode_jsonish_string_value(self, value: str) -> str:
+        text = value or ""
+        if "\\" not in text:
+            return text.strip()
+        try:
+            return json.loads(f'"{text}"')
+        except Exception:
+            return text.replace("\\n", "\n").replace('\\"', '"').strip()
 
     def _recover_client_synthesis_from_reasoning(self, synthesis: dict) -> dict:
         if not isinstance(synthesis, dict):
@@ -9263,7 +9579,7 @@ class CLI:
             lines.extend(["", source_line])
         snapshot_lines = data_inputs.get("mcp_snapshot") if isinstance(data_inputs, dict) else []
         snapshot_table = self._snapshot_markdown_table(snapshot_lines)
-        if snapshot_table and self._is_vague_market_query(query):
+        if snapshot_table:
             lines.extend(["", "数据快照：", *snapshot_table])
         mcp_links = data_inputs.get("mcp_links") if isinstance(data_inputs, dict) else []
         if not isinstance(mcp_links, list):
@@ -9354,6 +9670,15 @@ class CLI:
             value = synthesis.get(key)
             text = value.strip() if isinstance(value, str) else self._text_field(value)
             if text:
+                if self._looks_like_json_response_text(text):
+                    extracted = (
+                        self._extract_jsonish_text_field(text, "final_answer")
+                        or self._extract_jsonish_text_field(text, "answer")
+                        or self._extract_jsonish_text_field(text, "response")
+                    )
+                    if extracted:
+                        return extracted
+                    continue
                 return text
         return ""
 

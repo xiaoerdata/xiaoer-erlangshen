@@ -1,5 +1,6 @@
 import json
 import sys
+from datetime import datetime
 
 import pytest
 from pathlib import Path
@@ -910,7 +911,7 @@ def test_message_block_wraps_chinese_by_terminal_display_width(monkeypatch):
 
     widths = [_display_width(line) for line in block.splitlines()]
     assert len(set(widths)) == 1
-    assert max(widths) == 68
+    assert max(widths) == 70
 
 
 def test_prompt_status_bar_shows_readiness_without_server_url(monkeypatch, tmp_path):
@@ -2692,7 +2693,7 @@ async def test_client_side_advice_uses_local_intent_to_fetch_super66_mcp(monkeyp
     assert '参数: {"index_name": "沪深300", "limit": 60}' in plan
     assert "数据键: get_index_data:沪深300" in plan
     assert "MCP 快照" in plan
-    assert "涨跌幅 1.23" in plan
+    assert "涨跌幅 +1.23%" in plan
     assert "执行过程" in plan
     assert "本机理解问题意图" in plan
     assert "读取数据工具: get_index_data / 沪深300" in plan
@@ -3117,6 +3118,20 @@ def test_market_overview_defaults_use_batch_macro_and_hot_stock_tools():
     assert any(item["name"] == "web_search" and "热门股票" in item["arguments"]["query"] for item in tools)
 
 
+def test_market_overview_yesterday_ends_at_previous_day(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 6, 16, 12, 0, 0)
+
+    monkeypatch.setattr("src.cli.datetime", FixedDatetime)
+
+    tools = CLI()._default_market_overview_tools("查询一下昨天的指数表现")
+
+    assert tools[0]["arguments"]["endDate"] == "2026-06-15"
+    assert tools[1]["arguments"]["endDate"] == "2026-06-15"
+
+
 @pytest.mark.asyncio
 async def test_collect_client_mcp_data_falls_back_when_batch_tool_fails(monkeypatch):
     calls = []
@@ -3160,8 +3175,9 @@ def test_mcp_snapshot_lines_expand_batch_rows_to_readable_summary():
     })
 
     assert "沪深300" in lines[0]
-    assert "创业板指" in lines[0]
-    assert "涨跌幅 1.2" in lines[0]
+    assert "涨跌幅 +1.20%" in lines[0]
+    assert "创业板指" in lines[1]
+    assert "涨跌幅 -0.50%" in lines[1]
 
 
 def test_chart_terminal_preview_formats_numeric_chart_data():
@@ -4303,31 +4319,15 @@ async def test_vague_market_query_fetches_default_market_data(monkeypatch):
     )
 
     assert [item[0] for item in calls] == [
-        "get_index_data",
-        "get_index_data",
-        "get_index_data",
-        "get_index_data",
-        "get_index_data",
-        "get_global_asset_data",
-        "get_global_asset_data",
-        "get_global_asset_data",
+        "batch_get_index_data",
+        "batch_get_global_asset_data",
+        "get_macro_data",
+        "get_hot_stocks",
     ]
-    assert calls[0][1]["index_name"] == "沪深300"
-    assert calls[1][1]["index_name"] == "上证指数"
-    assert calls[2][1]["index_name"] == "创业板指"
-    assert calls[3][1]["index_name"] == "恒生科技指数"
-    assert calls[4][1]["index_name"] == "恒生指数"
-    assert calls[5][1]["asset_name"] == "黄金"
-    assert calls[6][1]["asset_name"] == "美元指数"
-    assert calls[7][1]["asset_name"] == "原油"
-    assert "get_index_data:沪深300" in data
-    assert "get_index_data:上证指数" in data
-    assert "get_index_data:创业板指" in data
-    assert "get_index_data:恒生科技指数" in data
-    assert "get_index_data:恒生指数" in data
-    assert "get_global_asset_data:黄金" in data
-    assert "get_global_asset_data:美元指数" in data
-    assert "get_global_asset_data:原油" in data
+    assert calls[0][1]["index_names"][:4] == ["沪深300", "上证指数", "创业板指", "科创50"]
+    assert calls[1][1]["asset_names"] == ["黄金", "美元指数", "原油"]
+    assert "batch_get_index_data:沪深300,上证指数,创业板指,科创50" in data
+    assert "batch_get_global_asset_data:黄金,美元指数,原油" in data
     assert data[search_key]["provider"] == "local_chrome"
     assert data[search_key]["query"].startswith(cli._today_market_search_query()[:10])
     assert plan["tool_selection_source"] == "client_market_overview_fallback"
@@ -4360,21 +4360,13 @@ async def test_yesterday_market_query_fetches_default_market_data(monkeypatch):
     )
 
     assert [item[0] for item in calls] == [
-        "get_index_data",
-        "get_index_data",
-        "get_index_data",
-        "get_index_data",
-        "get_index_data",
-        "get_global_asset_data",
-        "get_global_asset_data",
-        "get_global_asset_data",
+        "batch_get_index_data",
+        "batch_get_global_asset_data",
+        "get_macro_data",
+        "get_hot_stocks",
     ]
-    assert "get_index_data:沪深300" in data
-    assert "get_index_data:恒生科技指数" in data
-    assert "get_index_data:恒生指数" in data
-    assert "get_global_asset_data:黄金" in data
-    assert "get_global_asset_data:美元指数" in data
-    assert "get_global_asset_data:原油" in data
+    assert "batch_get_index_data:沪深300,上证指数,创业板指,科创50" in data
+    assert "batch_get_global_asset_data:黄金,美元指数,原油" in data
     assert data[search_key]["query"] == yesterday_query
     assert plan["needs_mcp"] is True
     assert plan["tool_selection_source"] == "client_market_overview_fallback"
@@ -4438,18 +4430,13 @@ async def test_market_overview_intent_fetches_default_data_without_keyword_rules
     assert plan["artifact_plan"]["title"] == "市场快照对比"
     assert "MCP 行情快照" in plan["artifact_plan"]["data_hint"]
     assert [item[0] for item in calls] == [
-        "get_index_data",
-        "get_index_data",
-        "get_index_data",
-        "get_index_data",
-        "get_index_data",
-        "get_global_asset_data",
-        "get_global_asset_data",
-        "get_global_asset_data",
+        "batch_get_index_data",
+        "batch_get_global_asset_data",
+        "get_macro_data",
+        "get_hot_stocks",
     ]
-    assert "get_index_data:沪深300" in data
-    assert "get_index_data:恒生科技指数" in data
-    assert "get_global_asset_data:黄金" in data
+    assert "batch_get_index_data:沪深300,上证指数,创业板指,科创50" in data
+    assert "batch_get_global_asset_data:黄金,美元指数,原油" in data
     assert search_key in data
 
 
@@ -5470,8 +5457,8 @@ async def test_collect_client_data_keeps_partial_results_when_one_tool_fails(mon
         {"needs_mcp": False, "mcp_tools": []},
     )
 
-    assert "get_index_data:沪深300" in data
-    assert "get_global_asset_data:黄金" in data
+    assert "batch_get_index_data:沪深300,上证指数,创业板指,科创50" in data
+    assert "batch_get_global_asset_data:黄金,美元指数,原油" in data
     assert f"{search_key}:error" in data
 
 
@@ -5496,8 +5483,8 @@ async def test_collect_client_data_keeps_web_search_when_super66_init_fails(monk
     )
 
     assert data["super66_error"] == "super66 auth expired"
-    assert "get_index_data:沪深300:error" in data
-    assert "get_global_asset_data:黄金:error" in data
+    assert "batch_get_index_data:沪深300,上证指数,创业板指,科创50:error" in data
+    assert "batch_get_global_asset_data:黄金,美元指数,原油:error" in data
     assert data[search_key]["provider"] == "local_chrome"
     assert data[search_key]["results"][0]["title"] == "政策新闻"
 
@@ -5627,6 +5614,31 @@ def test_client_side_advice_recovers_quoted_final_answer_from_reasoning():
     assert recovered["final_answer"] == "关于昨天（2026-06-15）的指数表现，沪深300上涨1.2%，创业板指回落0.4%。"
     assert "然后" not in recovered["final_answer"]
     assert "suggestions" not in recovered["final_answer"]
+
+
+def test_client_side_advice_extracts_final_answer_from_jsonish_text():
+    cli = CLI()
+    parsed = cli._parse_client_llm_advice(
+        '{\n'
+        '  final_answer: “正式回答：昨天沪深300上涨1.20%，创业板指下跌0.50%。”,\n'
+        '  suggestions: ["不要展示这段 JSON"],\n'
+        '  risk_controls: []\n'
+        '}'
+    )
+
+    result = cli._format_client_advice(
+        query="查询一下昨天的指数表现",
+        matches=[{"scene": "市场监测与事件响应", "confidence": 0.8}],
+        synthesis=parsed,
+        raw_text="",
+        provider="Xiaomi MiMo",
+        model="mimo-v2.5",
+        data_inputs={},
+    )
+
+    assert result == "正式回答：昨天沪深300上涨1.20%，创业板指下跌0.50%。"
+    assert "final_answer" not in result
+    assert "suggestions" not in result
 
 
 def test_live_region_line_count_handles_wide_and_ansi_text(monkeypatch):
@@ -5763,7 +5775,7 @@ def test_mcp_snapshot_lines_extracts_readable_market_fields():
     })
 
     assert lines == [
-        "get_index_data:沪深300: 日期 2026-06-10，最新 4100，成交量 123456，区间收益 1.23%"
+        "沪深300: 日期 2026-06-10，最新 4100，涨跌幅 +1.20%，成交量 123456，区间收益 +1.23%"
     ]
     assert "should-not-render" not in "\n".join(lines)
 
@@ -5780,8 +5792,48 @@ def test_mcp_snapshot_lines_use_latest_date_for_descending_rows():
 
     joined = "\n".join(lines)
     assert "日期 2026-06-10" in joined
-    assert "最新 4725" in joined
+    assert "最新 4724.79" in joined
     assert "2026-04-30" not in joined
+    assert "区间收益 +9.88%" in joined
+
+
+def test_snapshot_markdown_table_hides_tool_function_names():
+    table = CLI()._snapshot_markdown_table([
+        "get_index_data:沪深300: 日期 2026-06-10，最新 4100，涨跌幅 +1.20%，区间收益 +1.23%",
+        "创业板指: 日期 2026-06-10，最新 2200，涨跌幅 -0.50%",
+    ])
+
+    rendered = "\n".join(table)
+    assert "| 标的/线索 | 日期 | 最新/摘要 | 涨跌幅 | 成交 | 区间收益 |" in rendered
+    assert "沪深300" in rendered
+    assert "创业板指" in rendered
+    assert "get_index_data" not in rendered
+
+
+def test_mcp_snapshot_computes_latest_daily_change_when_missing():
+    lines = CLI()._mcp_snapshot_lines({
+        "get_index_data:沪深300": {
+            "rows": [
+                {"index_name": "沪深300", "date": "2026-06-14", "close": 100},
+                {"index_name": "沪深300", "date": "2026-06-15", "close": 103},
+            ]
+        }
+    })
+
+    assert lines == ["沪深300: 日期 2026-06-15，最新 103，涨跌幅 +3.00%，区间收益 +3.00%"]
+
+
+def test_mcp_snapshot_does_not_show_interval_return_without_dated_series():
+    lines = CLI()._mcp_snapshot_lines({
+        "get_astock_realtime:600519": {
+            "rows": [
+                {"name": "贵州茅台", "code": "600519", "price": 1255.67, "change_pct": -1.21},
+                {"name": "贵州茅台", "code": "600519", "price": 1255.67, "change_pct": -1.21},
+            ]
+        }
+    })
+
+    assert lines == ["贵州茅台: 最新 1255.67，涨跌幅 -1.21%"]
 
 
 def test_chart_return_prefers_strict_start_end_close_division():
@@ -5834,7 +5886,7 @@ def test_super66_normalizes_supabase_rows_for_market_snapshot():
     assert latest["close"] == 4100.5
     assert latest["change_pct"] == 1.2
     assert lines == [
-        "get_index_data:沪深300: 名称 沪深300，日期 2026-06-10，最新 4100，成交额 123456，涨跌幅 1.2"
+        "沪深300: 日期 2026-06-10，最新 4100.5，涨跌幅 +1.20%，成交额 123456"
     ]
 
 
@@ -5878,9 +5930,9 @@ def test_super66_uses_latest_tradedate_alias_in_nested_payload():
 
     result = Super66MCP()._extract_result(payload, "dc66_get_index_data", {"indexName": "恒生科技指数"})
 
-    assert result["rows"][0]["date"] == "2026/04/30"
-    assert result["rows"][-1]["date"] == "2026/06/10"
-    assert result["latest"]["date"] == "2026/06/10"
+    assert result["rows"][0]["date"] == "2026-04-30"
+    assert result["rows"][-1]["date"] == "2026-06-10"
+    assert result["latest"]["date"] == "2026-06-10"
     assert result["latest"]["close"] == 4724.79
 
 
@@ -6076,6 +6128,62 @@ async def test_super66_call_tool_redirects_hk_index_to_index_payload(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_super66_batch_index_fans_out_to_registered_index_tool(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        content = b"{}"
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        is_closed = False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append(json)
+            assert json["name"] == "dc66_get_index_data"
+            label = json["arguments"]["indexName"]
+            close = 4100 if label == "沪深300" else 2200
+            return FakeResponse({
+                "code": 200,
+                "data": {
+                    "result": {
+                        "rows": [
+                            {"date": "2026-06-15", "close": close - 10, "index_name": label},
+                            {"date": "2026-06-16", "close": close, "index_name": label},
+                        ]
+                    }
+                },
+            })
+
+    monkeypatch.setenv("SUPER66_MCP_TOKEN", "token")
+    monkeypatch.setenv("SUPER66_ALLOW_STATIC_TOKEN", "true")
+    Super66MCP._instance = None
+    mcp = Super66MCP()
+    mcp._client = FakeClient()
+    mcp._cache.clear()
+
+    result = await mcp.call_tool(
+        "batch_get_index_data",
+        {"index_names": ["沪深300", "创业板指"], "start_date": "2026-06-15", "end_date": "2026-06-16"},
+        use_cache=False,
+    )
+
+    assert [call["name"] for call in calls] == ["dc66_get_index_data", "dc66_get_index_data"]
+    assert [call["arguments"]["indexName"] for call in calls] == ["沪深300", "创业板指"]
+    assert result["tool"] == "dc66_batch_get_index_data"
+    assert result["source_format"] == "client_batch_fanout"
+    assert len(result["latest_rows"]) == 2
+    assert {row["index_name"] for row in result["latest_rows"]} == {"沪深300", "创业板指"}
+    Super66MCP._instance = None
+
+
+@pytest.mark.asyncio
 async def test_super66_does_not_reuse_saved_auth_token_without_relogin_credentials(monkeypatch, tmp_path):
     monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
     monkeypatch.delenv("SUPER66_MCP_TOKEN", raising=False)
@@ -6160,7 +6268,7 @@ def test_super66_normalizes_columnar_market_series():
     assert result["latest"]["index_name"] == "沪深300"
     assert result["latest"]["date"] == "2026-06-10"
     assert result["latest"]["close"] == 4100
-    assert lines == ["get_index_data:沪深300: 名称 沪深300，日期 2026-06-10，最新 4100，成交量 20，区间收益 1.23%"]
+    assert lines == ["沪深300: 日期 2026-06-10，最新 4100，涨跌幅 +1.23%，成交量 20，区间收益 +1.23%"]
 
 
 def test_chrome_search_defaults_to_bing_and_filters_block_pages(monkeypatch):
@@ -6192,7 +6300,8 @@ def test_mcp_snapshot_lines_extracts_web_search_titles_without_secret_fields():
     })
 
     joined = "\n".join(lines)
-    assert "web_search:最新政策影响: 网页线索 央行释放流动性信号 (example.com) https://www.example.com/news/1，网页线索 科技成长板块成交活跃 (财经网)" in joined
+    assert "网页线索: 网页线索 央行释放流动性信号 (example.com) https://www.example.com/news/1" in joined
+    assert "网页线索: 网页线索 科技成长板块成交活跃 (财经网)" in joined
     assert "should-not-render" not in joined
     assert "api_key" not in joined
 
