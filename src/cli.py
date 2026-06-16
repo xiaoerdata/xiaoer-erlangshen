@@ -94,6 +94,7 @@ COMMAND_PALETTE = [
     ("tools", "/tools", "查看 super-66 MCP、web_search 和图表 artifact 能力地图"),
     ("mcp", "/mcp", "同 /tools，查看可调用的数据和工具组合"),
     ("plan", "/plan", "查看最近一次分析的意图、工具调用和产物计划"),
+    ("thinking", "/thinking", "展开上一轮模型供应商返回的思考过程"),
     ("context", "/context", "查看或清空最近对话上下文"),
     ("context-clear", "/context clear", "清空最近对话上下文，保留登录、模型和工作区"),
     ("memory", "/memory", "查看本机持久记忆；会自动压缩最近问答并注入上下文"),
@@ -124,7 +125,7 @@ COMMAND_GROUPS = [
         "server-artifact", "server-resources", "server-map", "server-advice",
     }),
     ("Workspace & Artifacts", {"workspace", "workspace-browse", "workspace-path", "artifacts", "open", "open-link", "links", "links-open", "chart", "report", "memo"}),
-    ("Market Intelligence", {"examples", "tools", "mcp", "plan", "context", "context-clear", "memory", "memory-clear", "analyze", "macro", "stock", "search", "portfolio", "risk", "invest", "omniscient", "god", "cognition"}),
+    ("Market Intelligence", {"examples", "tools", "mcp", "plan", "thinking", "context", "context-clear", "memory", "memory-clear", "analyze", "macro", "stock", "search", "portfolio", "risk", "invest", "omniscient", "god", "cognition"}),
     ("Session", {"commands", "clear", "help", "exit"}),
 ]
 
@@ -459,7 +460,7 @@ class CLI:
         "map": ("server", "map"),
         "init": ("setup", ""),
     }
-    LOCAL_COMMANDS = {"benchmarks", "benchmark", "cli-benchmarks", "commands", "cmd", "?", "model", "models", "config", "setup", "tools", "mcp", "plan", "context", "memory", "mem", "clear", "doctor", "brief", "examples", "links"}
+    LOCAL_COMMANDS = {"benchmarks", "benchmark", "cli-benchmarks", "commands", "cmd", "?", "model", "models", "config", "setup", "tools", "mcp", "plan", "thinking", "think", "reasoning", "context", "memory", "mem", "clear", "doctor", "brief", "examples", "links"}
 
     def __init__(self):
         self.brain = None
@@ -473,12 +474,14 @@ class CLI:
         self._agent_trace: list[str] | None = None
         self._conversation_history: list[dict[str, str]] = []
         self._last_mcp_data: dict | None = None
+        self._last_reasoning_trace: dict[str, object] | None = None
         self._last_artifact_results: list[dict] = []
         self._last_resource_links: list[dict[str, object]] = []
         self._command_usage_cache: dict[str, object] | None = None
         self._memory = LocalMemoryStore()
         self._token_status_visible = False
         self._token_status_activity = "ready"
+        self._interactive_question_printed = False
 
     async def dispatch(self, user_input: str) -> str:
         """把交互输入或一次性参数分发到对应命令。"""
@@ -531,6 +534,8 @@ class CLI:
             return self.examples_text()
         if command in {"plan", "计划", "trace", "过程"}:
             return self.plan_text(args)
+        if command in {"thinking", "think", "reasoning", "思考", "思考过程"}:
+            return self.thinking_text(args)
         if command in {"context", "ctx", "上下文"}:
             return self.context_text(args)
         if command in {"memory", "mem", "记忆", "长期记忆"}:
@@ -660,10 +665,16 @@ class CLI:
                     print()
                     continue
 
+                self._interactive_question_printed = False
+                if self._is_advice_turn(user_input):
+                    self._print_interactive_question(user_input)
+                    self._interactive_question_printed = True
+
                 result = await self.dispatch(user_input)
 
                 self._refresh_token_status_bar(activity="ready")
                 await self._print_interactive_turn(user_input, result)
+                self._interactive_question_printed = False
 
             except (KeyboardInterrupt, EOFError):
                 print("\n再见!")
@@ -1332,11 +1343,27 @@ class CLI:
         ])
 
     async def _print_interactive_turn(self, user_input: str, result: str) -> None:
-        output = self._format_interactive_turn(user_input, result)
+        if self._interactive_question_printed and self._is_advice_turn(user_input):
+            output = self._format_interactive_answer(result)
+        else:
+            output = self._format_interactive_turn(user_input, result)
         if self._should_stream_terminal_render(user_input):
             await self._stream_terminal_text(output)
         else:
             print(output)
+
+    def _print_interactive_question(self, user_input: str) -> None:
+        question = self._turn_question_text(user_input)
+        print("\n".join(["", self._message_block("你", question, "36;1"), ""]), flush=True)
+
+    def _format_interactive_answer(self, result: str) -> str:
+        meter = self._token_dialog_footer(activity="ready")
+        return "\n".join([
+            "",
+            self._message_block("二郎神", result, "32;1"),
+            meter,
+            "",
+        ])
 
     def _should_stream_terminal_render(self, user_input: str) -> bool:
         setting = os.getenv("ERLANGSHEN_STREAM_RENDER", "on").lower()
@@ -3887,6 +3914,33 @@ class CLI:
         ])
         return "\n".join(lines)
 
+    def thinking_text(self, args: str = "") -> str:
+        trace = self._last_reasoning_trace if isinstance(self._last_reasoning_trace, dict) else {}
+        raw_text = trace.get("text")
+        text = raw_text if isinstance(raw_text, str) else str(raw_text or "")
+        text = text.strip()
+        if not text:
+            return "\n".join([
+                "【思考过程】",
+                "暂无可展开的模型思考过程。",
+                "",
+                "说明: 这里只展示模型供应商在流式响应中返回的 reasoning/thinking 事件；如果供应商没有返回该事件，就不会有可展开内容。",
+            ])
+        chars = int(trace.get("char_count") or len(text))
+        elapsed = self._format_seconds(trace.get("elapsed_seconds"))
+        saved_at = self._text_field(trace.get("saved_at"))
+        header = [
+            f"字数: {chars}",
+            f"耗时: {elapsed}",
+        ]
+        if saved_at:
+            header.append(f"时间: {saved_at}")
+        return "\n".join([
+            _text_panel("思考过程", header, min_width=48, max_width=120),
+            "",
+            self._message_block("完整思考过程", text, "35"),
+        ])
+
     def memory_text(self, args: str = "") -> str:
         action = (args or "").strip().lower()
         if action in {"clear", "reset", "clean", "清空", "重置"}:
@@ -3944,6 +3998,7 @@ class CLI:
         self._conversation_history.clear()
         self._agent_trace = None
         self._last_mcp_data = None
+        self._last_reasoning_trace = None
         self._last_artifact_results = []
         self._last_resource_links = []
         if clear_plan:
@@ -4996,6 +5051,7 @@ class CLI:
     def _new_reasoning_stream_state(self) -> dict[str, object]:
         return {
             "visible": False,
+            "line_count": 0,
             "char_count": 0,
             "chunks": [],
             "started": time.perf_counter(),
@@ -5012,55 +5068,75 @@ class CLI:
         return self._dialog_box_width()
 
     def _write_reasoning_stream(self, state: dict[str, object], text: str) -> None:
-        if not self._should_show_reasoning_stream() or state.get("closed"):
-            return
         chunks = state.get("chunks")
         if isinstance(chunks, list):
             chunks.append(text)
         state["char_count"] = int(state.get("char_count") or 0) + len(text)
-        line = self._reasoning_live_line(state)
+        if not self._should_show_reasoning_stream() or state.get("closed"):
+            return
+        block = self._reasoning_stream_block(state)
+        lines = block.splitlines()
         try:
             if sys.stdout.isatty():
-                sys.stdout.write("\r\033[2K" + line)
-                sys.stdout.flush()
+                if state.get("visible"):
+                    line_count = int(state.get("line_count") or 0)
+                    if line_count > 0:
+                        sys.stdout.write(f"\033[{line_count}A\033[J")
+                sys.stdout.write(block + "\n")
             elif not state.get("visible"):
-                print(line, flush=True)
+                sys.stdout.write(block + "\n")
+            sys.stdout.flush()
             state["visible"] = True
+            state["line_count"] = len(lines)
         except OSError:
             state["closed"] = True
 
     def _finish_reasoning_stream(self, state: dict[str, object]) -> None:
+        self._remember_reasoning_trace(state)
         if not state.get("visible") or state.get("closed"):
             return
         state["closed"] = True
         collapsed = self._reasoning_collapsed_line(state)
         try:
             if sys.stdout.isatty():
-                sys.stdout.write("\r\033[2K" + collapsed + "\n")
+                line_count = int(state.get("line_count") or 0)
+                if line_count > 0:
+                    sys.stdout.write(f"\033[{line_count}A\033[J")
+                sys.stdout.write(collapsed + "\n")
             else:
                 sys.stdout.write(collapsed + "\n")
             sys.stdout.flush()
         except OSError:
             pass
 
-    def _reasoning_live_line(self, state: dict[str, object]) -> str:
-        width = self._reasoning_box_width()
+    def _reasoning_stream_block(self, state: dict[str, object]) -> str:
+        text = self._reasoning_text_from_state(state)
+        if not text.strip():
+            text = "正在整理模型供应商返回的思考过程..."
+        return self._message_block("思考过程 · 生成中", text, "35")
+
+    def _reasoning_text_from_state(self, state: dict[str, object]) -> str:
         chunks = state.get("chunks")
-        joined = "".join(chunks if isinstance(chunks, list) else [])
-        preview = " ".join(joined.split())
-        chars = int(state.get("char_count") or 0)
-        prefix = f"◌ 思考过程 · {chars} 字 · "
-        preview_width = max(0, width - _display_width(prefix))
-        if _display_width(preview) > preview_width:
-            preview = (_clip_display(preview, max(0, preview_width - 1)) + "…") if preview_width > 0 else ""
-        return _color(_pad_display(prefix + preview, width), "35")
+        return "".join(chunks if isinstance(chunks, list) else [])
 
     def _reasoning_collapsed_line(self, state: dict[str, object]) -> str:
         elapsed = max(0.0, time.perf_counter() - float(state.get("started") or time.perf_counter()))
         chars = int(state.get("char_count") or 0)
-        summary = f"▸ 思考过程已折叠 · {chars} 字 · {self._format_seconds(elapsed)}"
+        summary = f"▸ 思考过程已折叠 · {chars} 字 · {self._format_seconds(elapsed)} · /thinking 展开"
         width = self._reasoning_box_width()
         return _color(_pad_display(summary, width), "35")
+
+    def _remember_reasoning_trace(self, state: dict[str, object]) -> None:
+        text = self._reasoning_text_from_state(state).strip()
+        if not text:
+            return
+        elapsed = max(0.0, time.perf_counter() - float(state.get("started") or time.perf_counter()))
+        self._last_reasoning_trace = {
+            "text": text,
+            "char_count": int(state.get("char_count") or len(text)),
+            "elapsed_seconds": elapsed,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
 
     def _new_answer_stream_state(self, title: str) -> dict[str, object]:
         return {

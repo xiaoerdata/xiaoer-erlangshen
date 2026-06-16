@@ -187,12 +187,14 @@ async def test_complete_llm_response_folds_reasoning_in_place_for_tty(monkeypatc
     class FakeClient:
         async def stream_complete_events(self, messages, *, temperature, max_tokens):
             yield {"type": "reasoning", "text": "先核对工具返回。"}
+            yield {"type": "reasoning", "text": "再检查行情字段。"}
             yield {"type": "content", "text": '{"view":"ok"}'}
 
         async def complete(self, messages, *, temperature, max_tokens):
             raise AssertionError("non-streaming fallback should not run")
 
-    result = await CLI()._complete_llm_response(
+    cli = CLI()
+    result = await cli._complete_llm_response(
         FakeClient(),
         [{"role": "user", "content": "hello"}],
         temperature=0.1,
@@ -201,8 +203,15 @@ async def test_complete_llm_response_folds_reasoning_in_place_for_tty(monkeypatc
 
     output = capsys.readouterr().out
     assert result == '{"view":"ok"}'
-    assert "\r\033[2K" in output
+    assert "先核对工具返回。" in output
+    assert "再检查行情字段。" in output
     assert "思考过程已折叠" in output
+    assert "/thinking 展开" in output
+
+    expanded = cli.thinking_text()
+    assert "完整思考过程" in expanded
+    assert "先核对工具返回。" in expanded
+    assert "再检查行情字段。" in expanded
 
 
 @pytest.mark.asyncio
@@ -270,6 +279,20 @@ async def test_print_interactive_turn_streams_when_forced(monkeypatch, capsys):
     assert "╭─ 二郎神 " in output
     assert "先看主线。" in output
     assert "TOK ·" in output
+
+
+@pytest.mark.asyncio
+async def test_print_interactive_turn_omits_question_when_already_printed(monkeypatch, capsys):
+    monkeypatch.setenv("ERLANGSHEN_STREAM_RENDER", "off")
+    cli = CLI()
+    cli._interactive_question_printed = True
+
+    await cli._print_interactive_turn("今天市场情况怎么样", "先看主线。")
+
+    output = capsys.readouterr().out
+    assert "╭─ 你 " not in output
+    assert "╭─ 二郎神 " in output
+    assert "先看主线。" in output
 
 
 @pytest.mark.asyncio
