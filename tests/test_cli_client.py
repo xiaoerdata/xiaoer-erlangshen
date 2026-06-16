@@ -204,7 +204,6 @@ async def test_complete_llm_response_folds_reasoning_in_place_for_tty(monkeypatc
     output = capsys.readouterr().out
     assert result == '{"view":"ok"}'
     assert "先核对工具返回。" in output
-    assert "再检查行情字段。" in output
     assert "思考过程已折叠" in output
     assert "/thinking 展开" in output
 
@@ -5530,6 +5529,15 @@ def test_client_side_advice_uses_final_answer_without_reformatting():
     assert result == final_answer
     assert "我先按" not in result
     assert "可以先这样做" not in result
+
+
+def test_live_region_line_count_handles_wide_and_ansi_text(monkeypatch):
+    monkeypatch.setattr("src.cli._terminal_width", lambda: 20)
+    cli = CLI()
+
+    text = "\033[35m╭─ 思考过程 ─╮\033[0m\n│ 贵州茅台今年股价表现重复测试 │"
+
+    assert cli._terminal_visual_line_count(text) > len(text.splitlines())
 
 
 def test_mcp_source_line_classifies_astock_sources():

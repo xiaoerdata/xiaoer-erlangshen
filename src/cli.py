@@ -361,6 +361,13 @@ def _display_width(text: str) -> int:
     return width
 
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", str(text))
+
+
 def _clip_display(text: str, limit: int) -> str:
     if limit <= 0:
         return ""
@@ -5079,24 +5086,57 @@ class CLI:
     def _reasoning_box_width(self) -> int:
         return self._dialog_box_width()
 
+    def _terminal_visual_line_count(self, text: str) -> int:
+        effective_width = max(20, _terminal_width() - 1)
+        total = 0
+        for raw_line in str(text or "").splitlines() or [""]:
+            width = _display_width(_strip_ansi(raw_line))
+            total += max(1, (width + effective_width - 1) // effective_width)
+        return total
+
+    def _clear_live_region(self, state: dict[str, object]) -> None:
+        count = int(state.get("line_count") or 0)
+        if count > 0:
+            sys.stdout.write(f"\033[{count}A\033[J")
+
+    def _should_render_live_update(
+        self,
+        state: dict[str, object],
+        rendered_text: str,
+        *,
+        min_interval: float = 0.08,
+        min_chars: int = 24,
+    ) -> bool:
+        previous = state.get("rendered_text")
+        if not state.get("visible") or previous != rendered_text and not previous:
+            return True
+        if previous == rendered_text:
+            return False
+        now = time.perf_counter()
+        last_rendered = float(state.get("last_rendered_at") or 0.0)
+        if now - last_rendered >= min_interval:
+            return True
+        return abs(len(rendered_text) - len(str(previous or ""))) >= min_chars
+
     def _write_reasoning_stream(self, state: dict[str, object], text: str) -> None:
         self._append_reasoning_chunk(state, text)
         if not self._should_show_reasoning_stream() or state.get("closed"):
             return
         block = self._reasoning_stream_block(state)
-        lines = block.splitlines()
+        if not self._should_render_live_update(state, block, min_interval=0.18, min_chars=80):
+            return
         try:
             if sys.stdout.isatty():
                 if state.get("visible"):
-                    line_count = int(state.get("line_count") or 0)
-                    if line_count > 0:
-                        sys.stdout.write(f"\033[{line_count}A\033[J")
+                    self._clear_live_region(state)
                 sys.stdout.write(block + "\n")
             elif not state.get("visible"):
                 sys.stdout.write(block + "\n")
             sys.stdout.flush()
             state["visible"] = True
-            state["line_count"] = len(lines)
+            state["line_count"] = self._terminal_visual_line_count(block)
+            state["rendered_text"] = block
+            state["last_rendered_at"] = time.perf_counter()
         except OSError:
             state["closed"] = True
 
@@ -5138,21 +5178,40 @@ class CLI:
         collapsed = self._reasoning_collapsed_line(state)
         try:
             if sys.stdout.isatty():
-                line_count = int(state.get("line_count") or 0)
-                if line_count > 0:
-                    sys.stdout.write(f"\033[{line_count}A\033[J")
+                self._clear_live_region(state)
                 sys.stdout.write(collapsed + "\n")
             else:
                 sys.stdout.write(collapsed + "\n")
             sys.stdout.flush()
+            state["line_count"] = self._terminal_visual_line_count(collapsed)
+            state["rendered_text"] = collapsed
+            state["last_rendered_at"] = time.perf_counter()
         except OSError:
             pass
 
     def _reasoning_stream_block(self, state: dict[str, object]) -> str:
-        text = self._reasoning_text_from_state(state)
+        text = self._reasoning_stream_preview(state)
         if not text.strip():
             text = "正在整理模型供应商返回的思考过程..."
         return self._message_block("思考过程 · 生成中", text, "35")
+
+    def _reasoning_stream_preview(self, state: dict[str, object]) -> str:
+        mode = os.getenv("ERLANGSHEN_REASONING_STREAM_MODE", "compact").lower()
+        text = self._reasoning_text_from_state(state).strip()
+        if mode in {"full", "verbose", "all"}:
+            return text
+        elapsed = self._format_seconds(time.perf_counter() - float(state.get("started") or time.perf_counter()))
+        chars = int(state.get("char_count") or len(text))
+        clean_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        tail = clean_lines[-3:] if clean_lines else []
+        if not tail and text:
+            tail = [text]
+        preview_lines = [
+            f"正在思考 · {chars} 字 · {elapsed} · 完整内容可用 /thinking 展开",
+        ]
+        for line in tail[:3]:
+            preview_lines.append(_clip_display(line, max(20, self._dialog_box_width() - 8)))
+        return "\n".join(preview_lines)
 
     def _reasoning_text_from_state(self, state: dict[str, object]) -> str:
         chunks = state.get("chunks")
@@ -5214,22 +5273,23 @@ class CLI:
         self._live_answer_state = state
         self._render_answer_stream(state, preview)
 
-    def _render_answer_stream(self, state: dict[str, object], preview: str, *, final: bool = False) -> None:
+    def _render_answer_stream(self, state: dict[str, object], preview: str, *, final: bool = False, force: bool = False) -> None:
         body = preview.strip() if final else self._answer_stream_preview_body(preview)
         elapsed = self._format_seconds(time.perf_counter() - float(state.get("started") or time.perf_counter()))
         footer = self._token_dialog_footer(activity="ready" if final else f"生成中 {elapsed}")
         title = self._text_field(state.get("title")) or "二郎神"
         block = "\n".join([self._message_block(title, body or "正在组织回答...", "32;1"), footer])
-        lines = block.splitlines()
+        if not force and not final and not self._should_render_live_update(state, block, min_interval=0.08, min_chars=32):
+            return
         try:
             if state.get("visible"):
-                count = int(state.get("line_count") or 0)
-                if count > 0:
-                    sys.stdout.write(f"\033[{count}A\033[J")
+                self._clear_live_region(state)
             sys.stdout.write(block + "\n")
             sys.stdout.flush()
             state["visible"] = True
-            state["line_count"] = len(lines)
+            state["line_count"] = self._terminal_visual_line_count(block)
+            state["rendered_text"] = block
+            state["last_rendered_at"] = time.perf_counter()
             if final:
                 state["finalized"] = True
                 self._live_answer_finalized = True
@@ -5239,6 +5299,9 @@ class CLI:
     def _finish_answer_stream(self, state: dict[str, object]) -> None:
         if state.get("closed"):
             return
+        preview = self._text_field(state.get("preview"))
+        if preview and state.get("visible") and state.get("rendered_text"):
+            self._render_answer_stream(state, preview, force=True)
         state["stream_done"] = True
 
     def _finalize_live_answer_stream(self, final_text: str) -> bool:
