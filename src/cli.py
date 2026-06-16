@@ -661,7 +661,7 @@ class CLI:
                 result = await self.dispatch(user_input)
 
                 self._refresh_token_status_bar(activity="ready")
-                print(self._format_interactive_turn(user_input, result))
+                await self._print_interactive_turn(user_input, result)
 
             except (KeyboardInterrupt, EOFError):
                 print("\n再见!")
@@ -1328,6 +1328,45 @@ class CLI:
             meter,
             "",
         ])
+
+    async def _print_interactive_turn(self, user_input: str, result: str) -> None:
+        output = self._format_interactive_turn(user_input, result)
+        if self._should_stream_terminal_render(user_input):
+            await self._stream_terminal_text(output)
+        else:
+            print(output)
+
+    def _should_stream_terminal_render(self, user_input: str) -> bool:
+        setting = os.getenv("ERLANGSHEN_STREAM_RENDER", "on").lower()
+        if setting in {"0", "off", "false", "no"}:
+            return False
+        if not self._is_advice_turn(user_input):
+            return False
+        return sys.stdout.isatty() or setting in {"1", "on", "true", "yes", "force"}
+
+    async def _stream_terminal_text(self, text: str) -> None:
+        chunk_size = self._stream_render_chunk_size()
+        delay = self._stream_render_delay()
+        for index in range(0, len(text), chunk_size):
+            sys.stdout.write(text[index:index + chunk_size])
+            sys.stdout.flush()
+            if delay > 0:
+                await asyncio.sleep(delay)
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+    def _stream_render_chunk_size(self) -> int:
+        try:
+            return max(1, min(80, int(os.getenv("ERLANGSHEN_STREAM_RENDER_CHUNK", "16"))))
+        except (TypeError, ValueError):
+            return 16
+
+    def _stream_render_delay(self) -> float:
+        try:
+            return max(0.0, min(0.05, float(os.getenv("ERLANGSHEN_STREAM_RENDER_DELAY", "0.002"))))
+        except (TypeError, ValueError):
+            return 0.002
 
     def _is_advice_turn(self, user_input: str) -> bool:
         text = (user_input or "").strip()
@@ -6657,7 +6696,7 @@ class CLI:
                 elif mcp is None:
                     collected[f"{key}:error"] = mcp_init_error or "super-66 MCP 未初始化"
                 else:
-                    result = await mcp.call_tool(name, arguments, use_cache=True)
+                    result = await self._call_mcp_tool_checked(mcp, name, arguments)
                     if self._mcp_value_has_error(result) and self._batch_tool_fallback_tools(name, arguments):
                         collected[f"{key}:error"] = result
                         await self._collect_batch_fallback_data(collected, name, arguments, mcp)
@@ -6681,9 +6720,103 @@ class CLI:
                 continue
             self._show_progress(f"批量接口未命中，回退读取: {self._mcp_tool_label(fallback_name, fallback_args)}")
             try:
-                collected[result_key] = await mcp.call_tool(fallback_name, fallback_args, use_cache=True)
+                collected[result_key] = await self._call_mcp_tool_checked(mcp, fallback_name, fallback_args)
             except Exception as exc:
                 collected[f"{result_key}:error"] = self._sanitize_api_key_error(exc, "")
+
+    async def _call_mcp_tool_checked(self, mcp, name: str, arguments: dict):
+        result = await mcp.call_tool(name, arguments, use_cache=True)
+        checked = self._validate_mcp_tool_result(name, arguments, result)
+        if not self._mcp_value_has_error(checked):
+            return checked
+        code = self._requested_astock_code(name, arguments)
+        if not code:
+            return checked
+        for retry_args in self._astock_retry_arguments(arguments, code):
+            if retry_args == arguments:
+                continue
+            self._show_progress(f"股票代码校验未通过，换参数重试: {self._mcp_tool_label(name, retry_args)}")
+            retry_result = await mcp.call_tool(name, retry_args, use_cache=False)
+            retry_checked = self._validate_mcp_tool_result(name, {**arguments, **retry_args}, retry_result)
+            if not self._mcp_value_has_error(retry_checked):
+                return retry_checked
+            checked = retry_checked
+        return checked
+
+    def _requested_astock_code(self, name: str, arguments: dict) -> str:
+        if name not in {"get_astock_realtime", "get_astock_history"}:
+            return ""
+        args = arguments if isinstance(arguments, dict) else {}
+        code = (
+            args.get("code")
+            or args.get("stockCode")
+            or args.get("stock_code")
+            or args.get("symbol")
+            or args.get("ticker")
+        )
+        match = re.search(r"(?<!\d)([036]\d{5})(?:\.[A-Z]{2})?(?!\d)", self._text_field(code), flags=re.I)
+        return match.group(1) if match else ""
+
+    def _astock_retry_arguments(self, arguments: dict, code: str) -> list[dict]:
+        base = dict(arguments or {})
+        variants = []
+        for key in ("stockCode", "stock_code", "symbol", "ticker", "code"):
+            item = dict(base)
+            for old in ("code", "stockCode", "stock_code", "symbol", "ticker"):
+                item.pop(old, None)
+            item[key] = code
+            variants.append(item)
+        return variants
+
+    def _validate_mcp_tool_result(self, name: str, arguments: dict, result):
+        code = self._requested_astock_code(name, arguments)
+        if not code or self._mcp_value_has_error(result):
+            return result
+        returned_codes = self._extract_astock_codes_from_value(result)
+        normalized_codes = {self._normalize_astock_code(item) for item in returned_codes}
+        if normalized_codes and code not in normalized_codes:
+            return self._astock_mismatch_error(code, result, returned_codes=returned_codes)
+        expected_name = self._known_astock_name(code)
+        returned_names = self._extract_astock_names_from_value(result)
+        if expected_name and returned_names and not any(self._astock_name_matches(expected_name, item) for item in returned_names):
+            return self._astock_mismatch_error(code, result, returned_names=returned_names)
+        return result
+
+    def _normalize_astock_code(self, value) -> str:
+        match = re.search(r"(?<!\d)([036]\d{5})(?:\.[A-Z]{2})?(?!\d)", self._text_field(value), flags=re.I)
+        return match.group(1) if match else ""
+
+    def _known_astock_name(self, code: str) -> str:
+        return {
+            "600519": "贵州茅台",
+        }.get(self._normalize_astock_code(code), "")
+
+    def _extract_astock_names_from_value(self, value) -> list[str]:
+        names: list[str] = []
+        for row in self._flatten_mcp_dict_rows(value):
+            for key in ("name", "index_name", "security_name", "symbol_name", "股票简称", "名称", "简称"):
+                text = self._text_field(row.get(key))
+                if text and text not in names:
+                    names.append(text)
+                    break
+            if len(names) >= 5:
+                break
+        return names
+
+    def _astock_name_matches(self, expected: str, actual: str) -> bool:
+        expected_text = re.sub(r"\s+", "", self._text_field(expected))
+        actual_text = re.sub(r"\s+", "", self._text_field(actual))
+        return bool(expected_text and actual_text and (expected_text in actual_text or actual_text in expected_text))
+
+    def _astock_mismatch_error(self, code: str, result, *, returned_codes: list[str] | None = None, returned_names: list[str] | None = None) -> dict:
+        return {
+            "error": "MCP 返回标的与请求代码不一致，已丢弃该行情结果",
+            "requested_code": code,
+            "expected_name": self._known_astock_name(code),
+            "returned_codes": returned_codes or [],
+            "returned_names": returned_names or self._extract_astock_names_from_value(result),
+            "result_hint": self._mcp_snapshot_lines({"invalid": result}, limit=1)[:1],
+        }
 
     def _batch_tool_fallback_tools(self, name: str, arguments: dict) -> list[dict]:
         args = arguments if isinstance(arguments, dict) else {}
@@ -6753,7 +6886,7 @@ class CLI:
                         continue
                     self._show_progress(f"正在补充股票真实行情: {self._mcp_tool_label(tool_name, args)}")
                     try:
-                        collected[result_key] = await mcp.call_tool(tool_name, args, use_cache=True)
+                        collected[result_key] = await self._call_mcp_tool_checked(mcp, tool_name, args)
                     except Exception as exc:
                         collected[f"{result_key}:error"] = self._sanitize_api_key_error(exc, "")
                 break
@@ -7162,6 +7295,18 @@ class CLI:
                 "stockCodes": "codes",
                 "stock_codes": "codes",
                 "code": "codes",
+            },
+            "get_astock_realtime": {
+                "stockCode": "code",
+                "stock_code": "code",
+                "symbol": "code",
+                "ticker": "code",
+            },
+            "get_astock_history": {
+                "stockCode": "code",
+                "stock_code": "code",
+                "symbol": "code",
+                "ticker": "code",
             },
             "get_macro_data": {
                 "indicatorCodes": "indicator_codes",
@@ -7871,6 +8016,8 @@ class CLI:
             or arguments.get("asset_name")
             or ",".join(self._coerce_label_list(arguments.get("asset_names") or arguments.get("assetNames"))[:4])
             or arguments.get("code")
+            or arguments.get("stockCode")
+            or arguments.get("stock_code")
             or ",".join(self._coerce_label_list(arguments.get("codes"))[:4])
             or arguments.get("keyword")
             or arguments.get("rank_by")
@@ -7889,6 +8036,8 @@ class CLI:
             or arguments.get("asset_name")
             or ",".join(self._coerce_label_list(arguments.get("asset_names") or arguments.get("assetNames"))[:4])
             or arguments.get("code")
+            or arguments.get("stockCode")
+            or arguments.get("stock_code")
             or ",".join(self._coerce_label_list(arguments.get("codes"))[:4])
             or arguments.get("keyword")
             or arguments.get("rank_by")

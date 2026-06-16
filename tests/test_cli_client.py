@@ -149,6 +149,52 @@ async def test_complete_llm_response_uses_streaming_when_enabled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_print_interactive_turn_streams_when_forced(monkeypatch, capsys):
+    monkeypatch.setenv("ERLANGSHEN_STREAM_RENDER", "force")
+    monkeypatch.setenv("ERLANGSHEN_STREAM_RENDER_DELAY", "0")
+    monkeypatch.setenv("ERLANGSHEN_STREAM_RENDER_CHUNK", "5")
+
+    await CLI()._print_interactive_turn("今天市场情况怎么样", "先看主线。")
+
+    output = capsys.readouterr().out
+    assert "╭─ 你 " in output
+    assert "╭─ 二郎神 " in output
+    assert "先看主线。" in output
+    assert "TOK ·" in output
+
+
+@pytest.mark.asyncio
+async def test_astock_mcp_result_mismatch_retries_stock_code_alias():
+    calls = []
+
+    class FakeMCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, dict(arguments or {}), use_cache))
+            if (arguments or {}).get("stockCode") == "600519":
+                return {"latest": {"code": "600519", "name": "贵州茅台", "price": 1500.0}}
+            return {"latest": {"code": "688398", "name": "赛特新材", "price": 42.0}}
+
+    result = await CLI()._call_mcp_tool_checked(FakeMCP(), "get_astock_realtime", {"code": "600519"})
+
+    assert result["latest"]["code"] == "600519"
+    assert calls[0] == ("get_astock_realtime", {"code": "600519"}, True)
+    assert ("get_astock_realtime", {"stockCode": "600519"}, False) in calls
+
+
+def test_astock_mcp_result_mismatch_is_rejected():
+    result = CLI()._validate_mcp_tool_result(
+        "get_astock_realtime",
+        {"code": "600519"},
+        {"latest": {"code": "688398", "name": "赛特新材", "price": 42.0}},
+    )
+
+    assert result["error"].startswith("MCP 返回标的与请求代码不一致")
+    assert result["requested_code"] == "600519"
+    assert result["returned_codes"] == ["688398"]
+    assert result["returned_names"] == ["赛特新材"]
+
+
+@pytest.mark.asyncio
 async def test_command_palette_and_command_suggestion():
     cli = CLI()
 
@@ -4578,7 +4624,8 @@ async def test_collect_astock_data_follows_search_result_with_realtime_and_histo
         {"intent": "single_asset", "needs_mcp": True, "mcp_tools": [{"name": "search_astocks", "arguments": {"keyword": "贵州茅台"}}]},
     )
 
-    assert calls[0] == ("search_astocks", {"keyword": "贵州茅台"})
+    assert calls[0][0] == "search_astocks"
+    assert calls[0][1]["keyword"] == "贵州茅台"
     assert ("get_astock_realtime", {"code": "600519"}) in calls
     assert any(call[0] == "get_astock_history" and call[1]["code"] == "600519" for call in calls)
     assert cli._market_fact_grounding("贵州茅台表现", data, {"mcp_tools": [{"name": "search_astocks"}]})["status"] == "grounded"
