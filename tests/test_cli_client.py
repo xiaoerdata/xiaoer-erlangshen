@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 
 from src import __version__
+from src.auth.session import save_auth_session
 from src.cli import CLI, _display_width, _extract_startup_workspace_args, _json_cli_envelope, _logo, _panel, _strict_exit_code, _text_panel, main
 from src.commands.server import ServerCommand
 from src.client.server_client import _normalize_login_payload
@@ -1941,6 +1942,104 @@ async def test_client_side_advice_server_failure_keeps_agent_trace(monkeypatch, 
     assert "执行过程: 本机理解问题意图；读取 super-66 MCP / 本地网页线索；读取数据工具: get_index_data / 沪深300；向服务端确认改写后的问题场景" in plan
     assert "服务端命中场景: 未返回" in plan
     assert "/login xwab <账号> 重新登录" in plan
+    reset_config()
+
+
+@pytest.mark.asyncio
+async def test_client_side_advice_retries_after_auth_refresh(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "local-secret")
+    reset_config()
+    save_auth_session({
+        "base_url": "https://example.test/api/erlangshen",
+        "token": "old-token",
+        "account": "user@example.com",
+        "loginEntry": "xwab",
+        "user": {"username": "小二MCP助手"},
+    })
+
+    from src.client.server_client import ErlangshenAPIError
+
+    seen_tokens = []
+
+    class FakeServerClient:
+        def __init__(self, **kwargs):
+            self.token = kwargs.get("token")
+
+        async def cognition_map(self, query):
+            seen_tokens.append(self.token)
+            if len(seen_tokens) == 1:
+                raise ErlangshenAPIError(401, "Token验证失败，请重新登录")
+            return {"matches": [{"scene": "市场监测与事件响应", "confidence": 0.9}]}
+
+    class FakeLLMClient:
+        def __init__(self, settings, timeout=60.0):
+            pass
+
+        async def complete(self, messages, temperature=0.7, max_tokens=4096):
+            payload = messages[-1]["content"]
+            if "allowed_mcp_tools" in payload:
+                return '{"intent":"market_overview","needs_server_mapping":true,"needs_mcp":false,"mcp_tools":[],"rewritten_query":"分析昨天"}'
+            return '{"view":"已恢复登录态后的判断","suggestions":["继续观察"],"risk_controls":["控制仓位"],"missing_data":[]}'
+
+    async def fake_refresh(self, session, *, reason="server_mapping"):
+        save_auth_session({
+            **session,
+            "token": "new-token",
+            "account": session.get("account") or "user@example.com",
+        })
+        return True
+
+    monkeypatch.setattr("src.client.server_client.ErlangshenServerClient", FakeServerClient)
+    monkeypatch.setattr("src.llm.LLMClient", FakeLLMClient)
+    monkeypatch.setattr(CLI, "_refresh_auth_after_unauthorized", fake_refresh)
+
+    result = await CLI().dispatch("分析昨天")
+
+    assert "服务端场景映射失败" not in result
+    assert "已恢复登录态后的判断" in result
+    assert seen_tokens == ["old-token", "new-token"]
+    reset_config()
+
+
+@pytest.mark.asyncio
+async def test_auth_refresh_uses_env_password_without_prompt(monkeypatch, tmp_path):
+    monkeypatch.setenv("ERLANGSHEN_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("ERLANGSHEN_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("SUPER66_USERNAME", "小二MCP助手")
+    monkeypatch.setenv("SUPER66_PASSWORD", "secret")
+    reset_config()
+    session = {
+        "base_url": "https://example.test/api/erlangshen",
+        "token": "old-token",
+        "loginEntry": "xwab",
+        "user": {"username": "小二MCP助手"},
+    }
+    save_auth_session(session)
+
+    class FakeServerClient:
+        def __init__(self, **kwargs):
+            self.base_url = kwargs.get("base_url")
+
+        async def login(self, login_entry, account, password):
+            assert self.base_url == "https://example.test/api/erlangshen"
+            assert login_entry == "xwab"
+            assert account == "小二MCP助手"
+            assert password == "secret"
+            return {
+                "token": "fresh-token",
+                "loginEntry": "xwab",
+                "user": {"username": account, "email": account, "role": "corer"},
+            }
+
+    monkeypatch.setattr("src.client.server_client.ErlangshenServerClient", FakeServerClient)
+
+    assert await CLI()._refresh_auth_after_unauthorized(session, reason="startup") is True
+    saved = json.loads((tmp_path / "auth.json").read_text(encoding="utf-8"))
+    assert saved["token"] == "fresh-token"
+    assert saved["account"] == "小二MCP助手"
     reset_config()
 
 
@@ -5071,6 +5170,47 @@ async def test_super66_call_tool_redirects_hk_index_to_index_payload(monkeypatch
     assert result["latest"]["date"] == "2026-06-10"
 
 
+@pytest.mark.asyncio
+async def test_super66_call_tool_retries_after_token_refresh(monkeypatch):
+    monkeypatch.delenv("SUPER66_MCP_TOKEN", raising=False)
+    monkeypatch.delenv("SUPER66_TOKEN", raising=False)
+    monkeypatch.setenv("SUPER66_USERNAME", "小二MCP助手")
+    monkeypatch.setenv("SUPER66_PASSWORD", "secret")
+    Super66MCP._instance = None
+    seen_auth = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.content = b"{}"
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        is_closed = False
+
+        async def post(self, url, json=None, headers=None):
+            if url.endswith("/auth/xwab/login"):
+                return FakeResponse(200, {"code": 200, "data": {"token": "new-token", "expiresInSeconds": 3600}})
+            seen_auth.append(headers.get("Authorization"))
+            if headers.get("Authorization") == "Bearer old-token":
+                return FakeResponse(401, {"message": "expired"})
+            return FakeResponse(200, {"code": 200, "data": {"result": {"rows": [{"date": "2026-06-10", "close": 1.23}]}}})
+
+    mcp = Super66MCP()
+    mcp._client = FakeClient()
+    mcp._token_value = "old-token"
+    mcp._token_expires_at = 9999999999
+
+    result = await mcp.call_tool("get_index_data", {"indexName": "沪深300"}, use_cache=False)
+
+    assert seen_auth == ["Bearer old-token", "Bearer new-token"]
+    assert result["latest"]["close"] == 1.23
+    Super66MCP._instance = None
+
+
 def test_super66_normalizes_columnar_market_series():
     payload = {
         "code": 200,
@@ -5507,6 +5647,36 @@ def test_normalize_account_system_login_payload():
     assert result["token"] == "token-value"
     assert result["user"]["username"] == "小二MCP助手"
     assert result["user"]["loginEntry"] == "xwab"
+
+
+@pytest.mark.asyncio
+async def test_super66_mcp_refreshes_token_with_env_password(monkeypatch):
+    monkeypatch.setenv("SUPER66_MCP_TOKEN", "stale-token")
+    monkeypatch.delenv("SUPER66_TOKEN", raising=False)
+    monkeypatch.setenv("SUPER66_USERNAME", "小二MCP助手")
+    monkeypatch.setenv("SUPER66_PASSWORD", "secret")
+    Super66MCP._instance = None
+
+    class FakeResponse:
+        status_code = 200
+        content = b"{}"
+
+        def json(self):
+            return {"code": 200, "data": {"token": "mcp-token", "expiresInSeconds": 3600}}
+
+    class FakeClient:
+        is_closed = False
+
+        async def post(self, url, json=None, headers=None):
+            assert url.endswith("/auth/xwab/login")
+            assert json == {"identifier": "小二MCP助手", "password": "secret"}
+            return FakeResponse()
+
+    mcp = Super66MCP()
+    mcp._client = FakeClient()
+
+    assert await mcp._ensure_token() == "mcp-token"
+    Super66MCP._instance = None
 
 
 def test_normalize_erlangshen_login_payload():

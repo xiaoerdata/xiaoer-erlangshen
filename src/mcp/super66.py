@@ -1,8 +1,8 @@
 """
 Lightweight Super-66 MCP client for the npm CLI package.
 
-The client reuses the Erlangshen/XWAB/XCZT auth token saved by `/login`.
-No separate Super-66 password is required on the client side.
+The client can refresh its own MCP token from SUPER66_USERNAME/SUPER66_PASSWORD,
+or fall back to the Erlangshen/XWAB/XCZT auth token saved by `/login`.
 """
 
 from __future__ import annotations
@@ -34,6 +34,9 @@ class Super66MCP:
             return
         self._initialized = True
         self.base_url = os.environ.get("SUPER66_MCP_URL", "https://www.xiaoerdata.site/mcp").rstrip("/")
+        self.api_base = os.environ.get("SUPER66_API_URL", "https://www.xiaoerdata.site/api/v1").rstrip("/")
+        self.username = os.environ.get("SUPER66_USERNAME", "小二MCP助手")
+        self.password = os.environ.get("SUPER66_PASSWORD", "")
         self.timeout = float(os.environ.get("SUPER66_TIMEOUT_SECONDS", "12"))
         self.trust_env = os.environ.get("SUPER66_TRUST_ENV", "false").lower() in {
             "1",
@@ -42,6 +45,9 @@ class Super66MCP:
             "on",
         }
         self._client: Optional[httpx.AsyncClient] = None
+        env_token = os.environ.get("SUPER66_MCP_TOKEN") or os.environ.get("SUPER66_TOKEN")
+        self._token_value: str = env_token.strip() if env_token else ""
+        self._token_expires_at: float = 0 if (env_token and self.password) else (float("inf") if env_token else 0)
         self._cache: dict[str, tuple[Any, float]] = {}
         self.cache_ttl = int(os.environ.get("SUPER66_CACHE_TTL_SECONDS", "60"))
 
@@ -70,10 +76,10 @@ class Super66MCP:
                 return value
             self._cache.pop(cache_key, None)
 
-        token = self._token()
+        token = await self._ensure_token()
         if not token:
             return {
-                "error": "未登录，super-66 MCP 需要先执行 /login xwab <账号> 或设置 SUPER66_MCP_TOKEN",
+                "error": "未登录，super-66 MCP 需要 SUPER66_USERNAME/SUPER66_PASSWORD、SUPER66_MCP_TOKEN 或 CLI 登录态",
                 "auth": "missing_token",
             }
 
@@ -88,6 +94,21 @@ class Super66MCP:
                 },
             )
             payload = self._parse_payload(response)
+            if response.status_code in {401, 403}:
+                self._token_value = ""
+                self._token_expires_at = 0
+                refreshed = await self._ensure_token(force_refresh=True)
+                if refreshed and refreshed != token:
+                    response = await self.client.post(
+                        f"{self.base_url}/tools/call",
+                        json={"name": normalized_tool, "arguments": normalized_arguments},
+                        headers={
+                            "Authorization": format_bearer_token(refreshed),
+                            "Accept": "application/json",
+                            "Content-Type": "application/json",
+                        },
+                    )
+                    payload = self._parse_payload(response)
             if response.status_code >= 400:
                 return {
                     "error": f"HTTP {response.status_code}",
@@ -113,10 +134,35 @@ class Super66MCP:
             {"name": "get_product_history", "description": "获取产品历史净值或行情"},
         ]
 
-    def _token(self) -> str:
+    async def _ensure_token(self, *, force_refresh: bool = False) -> str:
         token = os.environ.get("SUPER66_MCP_TOKEN") or os.environ.get("SUPER66_TOKEN")
-        if token:
+        if token and not self.password:
             return token.strip()
+        now = time.time()
+        if self.password:
+            if not force_refresh and self._token_value and now < self._token_expires_at - 300:
+                return self._token_value
+            try:
+                response = await self.client.post(
+                    f"{self.api_base}/auth/xwab/login",
+                    json={"identifier": self.username, "password": self.password},
+                    headers={"Accept": "application/json", "Content-Type": "application/json"},
+                )
+                payload = self._parse_payload(response)
+                if response.status_code >= 400:
+                    return ""
+                data = payload.get("data") if isinstance(payload, dict) else {}
+                if isinstance(data, dict):
+                    refreshed = data.get("token") or data.get("accessToken") or data.get("access_token")
+                    if refreshed:
+                        self._token_value = str(refreshed).strip()
+                        try:
+                            self._token_expires_at = now + int(data.get("expiresInSeconds") or 86400)
+                        except (TypeError, ValueError):
+                            self._token_expires_at = now + 86400
+                        return self._token_value
+            except httpx.RequestError:
+                return ""
         saved = load_auth_session().get("token")
         return str(saved).strip() if saved else ""
 

@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from src import __version__
-from src.auth.session import load_auth_session
+from src.auth.session import load_auth_session, save_auth_session
 from src.client.local_memory import LocalMemoryStore
 from src.config import get_config, get_config_path, update_config
 from src.model_presets import MODEL_PRESETS, get_provider_preset, normalize_provider
@@ -625,6 +625,7 @@ class CLI:
         """交互模式"""
         self._setup_completion()
         self._confirm_workspace_sandbox()
+        await self._ensure_fresh_auth_session_interactive(reason="startup")
         self.print_header()
 
         # Session start hook
@@ -675,6 +676,149 @@ class CLI:
         # Session end hook
         if self.hooks and "session_end" in self.hooks:
             await self.hooks["session_end"].run()
+
+    async def _ensure_fresh_auth_session_interactive(self, *, reason: str = "startup") -> bool:
+        session = load_auth_session()
+        token = self._text_field(session.get("token"))
+        if not token:
+            return await self._refresh_auth_from_env(session, reason=reason)
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+        base_url = self._text_field(session.get("base_url")) or get_config().erlangshen_api_base_url
+        try:
+            from src.client.server_client import ErlangshenAPIError, ErlangshenServerClient
+
+            await ErlangshenServerClient(base_url=base_url, token=token, timeout=8).me()
+            return False
+        except ErlangshenAPIError as exc:
+            if exc.status_code not in {401, 403}:
+                print(_color(f"账号状态暂时无法校验: {exc}；本轮会继续使用已保存登录态。", "33"))
+                return False
+            return await self._refresh_auth_after_unauthorized(session, reason=reason)
+        except Exception as exc:
+            print(_color(f"账号状态暂时无法校验: {exc}；本轮会继续使用已保存登录态。", "33"))
+            return False
+
+    async def _refresh_auth_after_unauthorized(self, session: dict, *, reason: str = "server_mapping") -> bool:
+        if await self._refresh_auth_from_env(session, reason=reason):
+            return True
+
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            self._mark_auth_session_invalid(session, "token_unauthorized")
+            return False
+
+        base_url = self._text_field(session.get("base_url")) or get_config().erlangshen_api_base_url
+        login_entry = self._auth_login_entry(session)
+        account = self._auth_account(session)
+        prompt_reason = "启动时检测到登录态失效" if reason == "startup" else "服务端返回 401/403，登录态需要刷新"
+        print(_color(f"{prompt_reason}，二郎神将自动重新登录 {login_entry}。", "33;1"))
+        if account:
+            raw = input(f"账号 [{account}]: ").strip()
+            if raw:
+                account = raw
+        else:
+            account = input("账号: ").strip()
+        if not account:
+            self._mark_auth_session_invalid(session, "missing_account")
+            print(_color("已取消自动登录：账号为空。", "33"))
+            return False
+        password = getpass.getpass("密码（只用于本次刷新，不保存）: ")
+        if not password:
+            self._mark_auth_session_invalid(session, "missing_password")
+            print(_color("已取消自动登录：密码为空。", "33"))
+            return False
+        return await self._login_and_save_auth_session(base_url, login_entry, account, password, session, silent=False)
+
+    async def _refresh_auth_from_env(self, session: dict, *, reason: str = "server_mapping") -> bool:
+        password = self._text_field(os.getenv("ERLANGSHEN_AUTH_PASSWORD")) or self._text_field(os.getenv("SUPER66_PASSWORD"))
+        if not password:
+            return False
+        base_url = self._text_field(session.get("base_url")) or get_config().erlangshen_api_base_url
+        login_entry = self._auth_login_entry(session)
+        account = (
+            self._text_field(os.getenv("ERLANGSHEN_AUTH_ACCOUNT"))
+            or self._text_field(os.getenv("SUPER66_USERNAME"))
+            or self._auth_account(session)
+        )
+        if not account and os.getenv("SUPER66_PASSWORD"):
+            account = "小二MCP助手"
+        if not account:
+            return False
+        return await self._login_and_save_auth_session(base_url, login_entry, account, password, session, silent=True)
+
+    async def _login_and_save_auth_session(
+        self,
+        base_url: str,
+        login_entry: str,
+        account: str,
+        password: str,
+        previous_session: dict,
+        *,
+        silent: bool,
+    ) -> bool:
+        try:
+            from src.client.server_client import ErlangshenAPIError, ErlangshenServerClient
+
+            result = await ErlangshenServerClient(base_url=base_url, timeout=20).login(login_entry, account, password)
+        except ErlangshenAPIError as exc:
+            self._mark_auth_session_invalid(previous_session, f"login_failed_{exc.status_code}")
+            print(_color(f"自动登录失败 ({exc.status_code}): {exc}", "31"))
+            return False
+        token = result.get("token") if isinstance(result, dict) else None
+        if not token:
+            self._mark_auth_session_invalid(previous_session, "login_missing_token")
+            print(_color("自动登录失败: 服务端未返回 token。", "31"))
+            return False
+        save_auth_session({
+            "base_url": base_url,
+            "token": token,
+            "account": account,
+            "loginEntry": result.get("loginEntry") or login_entry,
+            "expires": result.get("expires"),
+            "user": self._safe_auth_user(result.get("user") or {}),
+        })
+        if silent:
+            if sys.stdout.isatty():
+                print(_color("登录态已通过 MCP 环境凭证静默刷新。", "32"))
+        else:
+            print(_color("登录态已刷新，super-66 MCP 和服务端映射将复用新 token。", "32"))
+        return True
+
+    def _auth_login_entry(self, session: dict) -> str:
+        user = session.get("user") if isinstance(session.get("user"), dict) else {}
+        login_entry = (
+            self._text_field(session.get("loginEntry"))
+            or self._text_field(user.get("loginEntry"))
+            or get_config().erlangshen_auth_login_entry
+        ).lower()
+        if login_entry not in {"xwab", "xczt"}:
+            login_entry = get_config().erlangshen_auth_login_entry
+        return login_entry
+
+    def _auth_account(self, session: dict) -> str:
+        user = session.get("user") if isinstance(session.get("user"), dict) else {}
+        return (
+            self._text_field(session.get("account"))
+            or self._text_field(user.get("email"))
+            or self._text_field(user.get("username"))
+        )
+
+    def _mark_auth_session_invalid(self, session: dict, reason: str) -> None:
+        if not isinstance(session, dict):
+            return
+        payload = {key: value for key, value in session.items() if key != "token"}
+        payload["token_invalid_reason"] = reason
+        payload["token_invalid_at"] = datetime.now().isoformat(timespec="seconds")
+        save_auth_session(payload)
+
+    def _safe_auth_user(self, user: dict) -> dict:
+        return {
+            "id": user.get("id"),
+            "username": user.get("username") or user.get("user_name"),
+            "email": user.get("email"),
+            "role": user.get("role") or user.get("user_type"),
+            "loginEntry": user.get("loginEntry") or user.get("login_entry"),
+        }
 
     def print_header(self) -> None:
         session = load_auth_session()
@@ -4611,7 +4755,19 @@ class CLI:
                 base_url=session.get("base_url") or config.erlangshen_api_base_url,
                 token=session.get("token"),
             )
-            mapping = await client.cognition_map(mapping_query)
+            try:
+                mapping = await client.cognition_map(mapping_query)
+            except ErlangshenAPIError as exc:
+                if exc.status_code in {401, 403} and await self._refresh_auth_after_unauthorized(session, reason="server_mapping"):
+                    refreshed = load_auth_session()
+                    client = ErlangshenServerClient(
+                        base_url=refreshed.get("base_url") or config.erlangshen_api_base_url,
+                        token=refreshed.get("token"),
+                    )
+                    self._show_progress("登录态已刷新，正在重新确认问题场景")
+                    mapping = await client.cognition_map(mapping_query)
+                else:
+                    raise
         except ErlangshenAPIError as exc:
             message = f"服务端场景映射失败 ({exc.status_code}): {exc}"
             self._remember_agent_failure_plan(
@@ -4629,7 +4785,7 @@ class CLI:
                 message,
                 [
                     "注意: 大模型 API Key 没有发送给服务端；这里只是账号/认知映射请求失败。",
-                    "可先执行 /login xwab <账号> 或 /service 检查服务端状态。",
+                    "交互模式会自动发起重新登录；非交互脚本请先执行 /login xwab <账号> 或检查 /service。",
                 ],
             )
         except Exception as exc:

@@ -81,6 +81,7 @@ class AuthCommand:
         save_auth_session({
             "base_url": base_url,
             "token": token,
+            "account": email_or_phone,
             "loginEntry": result.get("loginEntry") or login_entry,
             "expires": result.get("expires"),
             "user": self._safe_user(result.get("user") or {}),
