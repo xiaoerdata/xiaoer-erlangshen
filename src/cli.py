@@ -10275,7 +10275,7 @@ class CLI:
         except OSError:
             pass
         try:
-            readline.set_history_length(1000)
+            readline.set_history_length(-1)
             atexit.register(readline.write_history_file, str(history_path))
         except OSError:
             pass
@@ -10306,12 +10306,12 @@ class CLI:
         history: list[str] = []
         for line in lines:
             command = line.strip()
-            if command and (not history or history[-1] != command):
+            if command:
                 history.append(command)
-        self._input_history = history[-1000:]
+        self._input_history = history
 
     def _save_input_history(self) -> None:
-        history = self._input_history[-1000:]
+        history = self._input_history
         try:
             path = self._history_path()
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -10324,11 +10324,7 @@ class CLI:
         if not command:
             return
         self._load_input_history()
-        if self._input_history and self._input_history[-1] == command:
-            return
         self._input_history.append(command)
-        if len(self._input_history) > 1000:
-            self._input_history = self._input_history[-1000:]
         try:
             import readline
 
