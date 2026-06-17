@@ -7949,10 +7949,6 @@ class CLI:
                 "arguments": {"market": "A股", "rank_by": "amount", "limit": 20},
             },
             {
-                "name": "get_astock_realtime",
-                "arguments": {"sort": "成交额", "order": "desc", "limit": 10000},
-            },
-            {
                 "name": "web_search",
                 "arguments": {"query": f"华证微盘指数 {date_hint} 涨跌幅 成交额 换手率 量价", "count": 5},
             },
@@ -8644,13 +8640,11 @@ class CLI:
                 label_summaries[label] = summary
         microcap_label = self._find_label(label_summaries, ("华证微盘",))
         market_label = self._find_label(label_summaries, ("中证全指", "万得全A", "万得全ａ", "全A", "全市场"))
-        astock_turnover_proxy = self._microcap_astock_turnover_proxy(mcp_data)
         turnover_diagnostics = self._microcap_turnover_diagnostics(
             label_summaries,
             microcap_label,
             market_label,
             mcp_data,
-            astock_turnover_proxy=astock_turnover_proxy,
         )
         turnover_share = turnover_diagnostics.get("turnover_share")
         missing = []
@@ -8660,7 +8654,7 @@ class CLI:
             missing.append("华证微盘指数成交额字段")
         if not turnover_diagnostics.get("market_amount_available"):
             missing.append("全市场成交额代理口径")
-        if not turnover_share and not astock_turnover_proxy.get("share_pct"):
+        if not turnover_share:
             missing.append("微盘成交额占全市场成交额比重")
         if not any(self._find_label(label_summaries, (label,)) for label in ("中证2000", "中证1000", "沪深300")):
             missing.append("中证2000/中证1000/沪深300相对强弱比较")
@@ -8712,17 +8706,13 @@ class CLI:
         microcap_label: str,
         market_label: str,
         mcp_data,
-        *,
-        astock_turnover_proxy: dict | None = None,
     ) -> dict:
-        astock_turnover_proxy = astock_turnover_proxy if isinstance(astock_turnover_proxy, dict) else {}
         micro_summary = summaries.get(microcap_label, {}) if microcap_label else {}
         market_summary = summaries.get(market_label, {}) if market_label else {}
         micro_amount = micro_summary.get("amount")
         market_amount = market_summary.get("amount")
         micro_available = isinstance(micro_amount, (int, float))
         market_available = isinstance(market_amount, (int, float))
-        proxy_available = bool(astock_turnover_proxy.get("share_pct"))
         turnover_share = None
         if micro_available and market_available and market_amount > 0:
             turnover_share = {
@@ -8739,96 +8729,17 @@ class CLI:
             "microcap_amount_change_pct": micro_summary.get("amount_change_pct"),
             "microcap_latest_amount_change_pct": micro_summary.get("latest_amount_change_pct"),
             "market_label": market_label,
-            "market_amount_available": market_available or proxy_available,
+            "market_amount_available": market_available,
             "market_amount": market_amount if market_available else None,
             "market_amount_date": market_summary.get("date"),
             "turnover_share": turnover_share,
-            "astock_turnover_proxy": astock_turnover_proxy,
             "web_turnover_evidence": self._microcap_turnover_web_evidence(mcp_data),
             "fallback_rule": (
                 "优先用 MCP rows/latest_rows 中的 amount/turnover/成交额等字段计算；"
-                "没有指数成交额时，用 get_astock_realtime 全市场 A股快照按总市值底部股票池计算微盘成交额代理占比；"
                 "没有全市场结构化成交额时，用中证全指或万得全A作代理并标注口径；"
                 "结构化字段仍缺失时，必须列出网页成交额/占比线索和缺口，不能直接跳过成交额分析。"
             ),
         }
-
-    def _microcap_astock_turnover_proxy(self, mcp_data) -> dict:
-        if not isinstance(mcp_data, dict):
-            return {}
-        rows: list[dict] = []
-        for key, value in mcp_data.items():
-            key_text = str(key)
-            if not key_text.startswith(("get_astock_realtime:", "batch_get_astock_realtime:", "get_astock_realtime_batch:")):
-                continue
-            if self._mcp_value_has_error(value) or "error" in key_text.lower():
-                continue
-            for row in self._flatten_mcp_dict_rows(value):
-                if isinstance(row, dict):
-                    rows.append(row)
-        candidates = []
-        seen: set[str] = set()
-        total_amount = 0.0
-        amount_row_count = 0
-        for row in rows:
-            signature = self._text_field(row.get("代码") or row.get("code") or row.get("symbol") or row.get("名称") or row.get("name"))
-            if signature and signature in seen:
-                continue
-            if signature:
-                seen.add(signature)
-            amount = self._first_numeric_value(row, self._market_amount_keys())
-            market_cap = self._first_numeric_value(row, self._market_cap_keys())
-            if amount is None or amount < 0:
-                continue
-            amount_row_count += 1
-            total_amount += amount
-            if market_cap is None or market_cap <= 0:
-                continue
-            name = self._text_field(row.get("名称") or row.get("name") or row.get("index_name"))
-            close = self._first_numeric_value(row, ("最新价", "close", "price", "latest", "现价"))
-            if "退市" in name or close == 0:
-                continue
-            candidates.append({"row": row, "amount": amount, "market_cap": market_cap, "name": name})
-        if not candidates or total_amount <= 0:
-            return {}
-        candidates.sort(key=lambda item: item["market_cap"])
-        pool_size = min(400, len(candidates))
-        micro_pool = candidates[:pool_size]
-        micro_amount = sum(item["amount"] for item in micro_pool)
-        threshold = micro_pool[-1]["market_cap"] if micro_pool else None
-        samples = [
-            {
-                "code": self._text_field(item["row"].get("代码") or item["row"].get("code")),
-                "name": item["name"],
-                "market_cap": item["market_cap"],
-                "amount": item["amount"],
-            }
-            for item in micro_pool[:5]
-        ]
-        return {
-            "method": f"A股全市场实时快照：剔除退市/零价后按总市值从小到大取底部 {pool_size} 只作为微盘成交额代理",
-            "raw_rows": len(rows),
-            "universe_rows": amount_row_count,
-            "eligible_rows": len(candidates),
-            "pool_size": pool_size,
-            "total_amount": round(total_amount, 2),
-            "microcap_proxy_amount": round(micro_amount, 2),
-            "share_pct": round(micro_amount / total_amount * 100, 4),
-            "market_cap_threshold": threshold,
-            "samples": samples,
-        }
-
-    def _market_cap_keys(self) -> tuple[str, ...]:
-        return (
-            "总市值",
-            "总市值(元)",
-            "总市值（元）",
-            "market_cap",
-            "total_market_cap",
-            "totalMarketCap",
-            "mkt_cap",
-            "mv",
-        )
 
     def _microcap_turnover_web_evidence(self, mcp_data) -> list[str]:
         if not isinstance(mcp_data, dict):
