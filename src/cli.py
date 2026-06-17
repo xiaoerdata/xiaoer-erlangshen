@@ -7548,11 +7548,21 @@ class CLI:
             result_key = self._mcp_result_key(fallback_name, fallback_args, len(collected))
             if result_key in collected:
                 continue
-            self._show_progress(f"批量接口未命中，回退读取: {self._mcp_tool_label(fallback_name, fallback_args)}")
+            self._show_progress(self._fallback_progress_message(name, fallback_name, fallback_args))
             try:
                 collected[result_key] = await self._call_mcp_tool_checked(mcp, fallback_name, fallback_args)
             except Exception as exc:
                 collected[f"{result_key}:error"] = self._sanitize_api_key_error(exc, "")
+
+    def _fallback_progress_message(self, name: str, fallback_name: str, fallback_args: dict) -> str:
+        label = self._mcp_tool_label(fallback_name, fallback_args)
+        if name in {"batch_get_index_data", "batch_get_global_asset_data", "batch_get_astock_realtime", "get_astock_realtime_batch"}:
+            return f"批量接口未命中，回退读取: {label}"
+        if name == "get_hot_stocks":
+            return f"热门股票工具未命中，回退读取: {label}"
+        if name in {"batch_get_macro_data", "get_macro_data", "get_macro_indicator", "list_macro_indicators"}:
+            return f"宏观数据工具未命中，回退读取: {label}"
+        return f"数据工具未命中，回退读取: {label}"
 
     async def _call_mcp_tool_checked(self, mcp, name: str, arguments: dict):
         result = await mcp.call_tool(name, arguments, use_cache=True)
@@ -8593,7 +8603,9 @@ class CLI:
             return {"required": False}
         required_checks = [
             "华证微盘区间收益/回撤",
+            "华证微盘成交额绝对值与区间变化",
             "华证微盘成交额/成交量/换手变化",
+            "全市场或中证全指/万得全A成交额代理口径",
             "微盘成交额占全市场成交额比重",
             "相对中证2000/中证1000/沪深300强弱",
             "跌停/断流、量化拥挤、赎回去杠杆和强主线吸金",
@@ -8614,27 +8626,22 @@ class CLI:
                 continue
             for label, rows in self._snapshot_grouped_market_rows(key_text, value).items():
                 grouped.setdefault(label, []).extend(rows)
-        label_summaries = {
-            label: self._microcap_label_summary(label, rows)
-            for label, rows in grouped.items()
-            if self._microcap_label_summary(label, rows)
-        }
+        label_summaries: dict[str, dict] = {}
+        for label, rows in grouped.items():
+            summary = self._microcap_label_summary(label, rows)
+            if summary:
+                label_summaries[label] = summary
         microcap_label = self._find_label(label_summaries, ("华证微盘",))
         market_label = self._find_label(label_summaries, ("中证全指", "万得全A", "万得全ａ", "全A", "全市场"))
-        turnover_share = None
-        if microcap_label and market_label:
-            micro_amount = label_summaries[microcap_label].get("amount")
-            market_amount = label_summaries[market_label].get("amount")
-            if isinstance(micro_amount, (int, float)) and isinstance(market_amount, (int, float)) and market_amount > 0:
-                turnover_share = {
-                    "microcap_label": microcap_label,
-                    "market_label": market_label,
-                    "ratio": micro_amount / market_amount,
-                    "ratio_pct": round(micro_amount / market_amount * 100, 4),
-                }
+        turnover_diagnostics = self._microcap_turnover_diagnostics(label_summaries, microcap_label, market_label, mcp_data)
+        turnover_share = turnover_diagnostics.get("turnover_share")
         missing = []
         if not microcap_label:
             missing.append("华证微盘 MCP 行情")
+        if not turnover_diagnostics.get("microcap_amount_available"):
+            missing.append("华证微盘成交额/成交量字段")
+        if not turnover_diagnostics.get("market_amount_available"):
+            missing.append("全市场成交额代理口径")
         if not turnover_share:
             missing.append("微盘成交额占全市场成交额比重")
         if not any(self._find_label(label_summaries, (label,)) for label in ("中证2000", "中证1000", "沪深300")):
@@ -8651,10 +8658,15 @@ class CLI:
             "comparison_benchmarks": ["中证2000", "中证1000", "沪深300", "创业板指", "中证全指/万得全A"],
             "available_labels": sorted(label_summaries.keys()),
             "label_summaries": label_summaries,
+            "turnover_diagnostics": turnover_diagnostics,
             "turnover_share": turnover_share,
             "missing": missing,
             "required_checks": required_checks,
-            "instruction": "回答微盘策略时必须优先使用本 brief；turnover_share 为空则说明成交额占比未被结构化验证，不能据此给高确定性结论。",
+            "instruction": (
+                "回答微盘策略时必须优先使用本 brief。必须逐项说明 turnover_diagnostics："
+                "华证微盘成交额是否取到、全市场代理成交额是否取到、是否能计算成交额占比、成交额趋势是否放大或萎缩。"
+                "turnover_share 为空只说明结构化占比未验证，不能跳过成交额分析；若 web_turnover_evidence 非空，要作为公开线索列出。"
+            ),
         }
 
     def _microcap_label_summary(self, label: str, rows: list[dict]) -> dict[str, object]:
@@ -8663,15 +8675,75 @@ class CLI:
             return {}
         latest = self._latest_mcp_row_by_date(clean_rows) or clean_rows[-1]
         return_pct = self._snapshot_close_return_pct(clean_rows)
+        amount = self._first_numeric_value(latest, self._market_amount_keys())
         return {
             "label": label,
             "date": self._format_compact_date(self._readable_mcp_date(latest)),
             "close": self._first_numeric_value(latest, ("close", "close_price", "latest", "last", "price", "收盘", "收盘价", "最新价")),
             "change_pct": self._first_numeric_value(latest, ("change_pct", "pct_chg", "change_percent", "涨跌幅", "涨幅")),
             "return_pct": round(return_pct, 4) if return_pct is not None else None,
-            "amount": self._first_numeric_value(latest, ("amount", "turnover", "turnover_amount", "成交额", "成交额(元)")),
+            "amount": amount,
+            "amount_change_pct": self._snapshot_amount_change_pct(clean_rows),
+            "latest_amount_change_pct": self._snapshot_latest_amount_change_pct(clean_rows),
             "volume": self._first_numeric_value(latest, ("volume", "vol", "成交量", "成交量(手)")),
         }
+
+    def _microcap_turnover_diagnostics(self, summaries: dict[str, dict], microcap_label: str, market_label: str, mcp_data) -> dict:
+        micro_summary = summaries.get(microcap_label, {}) if microcap_label else {}
+        market_summary = summaries.get(market_label, {}) if market_label else {}
+        micro_amount = micro_summary.get("amount")
+        market_amount = market_summary.get("amount")
+        micro_available = isinstance(micro_amount, (int, float))
+        market_available = isinstance(market_amount, (int, float))
+        turnover_share = None
+        if micro_available and market_available and market_amount > 0:
+            turnover_share = {
+                "microcap_label": microcap_label,
+                "market_label": market_label,
+                "ratio": micro_amount / market_amount,
+                "ratio_pct": round(micro_amount / market_amount * 100, 4),
+            }
+        return {
+            "microcap_label": microcap_label,
+            "microcap_amount_available": micro_available,
+            "microcap_amount": micro_amount if micro_available else None,
+            "microcap_amount_date": micro_summary.get("date"),
+            "microcap_amount_change_pct": micro_summary.get("amount_change_pct"),
+            "microcap_latest_amount_change_pct": micro_summary.get("latest_amount_change_pct"),
+            "market_label": market_label,
+            "market_amount_available": market_available,
+            "market_amount": market_amount if market_available else None,
+            "market_amount_date": market_summary.get("date"),
+            "turnover_share": turnover_share,
+            "web_turnover_evidence": self._microcap_turnover_web_evidence(mcp_data),
+            "fallback_rule": (
+                "优先用 MCP rows/latest_rows 中的 amount/turnover/成交额等字段计算；"
+                "没有全市场结构化成交额时，用中证全指或万得全A作代理并标注口径；"
+                "结构化字段仍缺失时，必须列出网页成交额/占比线索和缺口，不能直接跳过成交额分析。"
+            ),
+        }
+
+    def _microcap_turnover_web_evidence(self, mcp_data) -> list[str]:
+        if not isinstance(mcp_data, dict):
+            return []
+        evidence: list[str] = []
+        for key, value in mcp_data.items():
+            key_text = str(key)
+            if not key_text.startswith("web_search:") or self._mcp_value_has_error(value):
+                continue
+            compact_key = re.sub(r"\s+", "", key_text)
+            highlights = self._extract_web_search_highlights(value)
+            if not any(term in compact_key for term in ("微盘成交额", "全市场成交额", "成交额占", "占比", "流动性", "华证微盘")):
+                highlights = [
+                    item for item in highlights
+                    if any(term in item for term in ("微盘", "成交额", "占比", "流动性", "换手"))
+                ]
+            for item in highlights:
+                if item not in evidence:
+                    evidence.append(item)
+                if len(evidence) >= 5:
+                    return evidence
+        return evidence
 
     def _find_label(self, summaries: dict[str, dict], terms: tuple[str, ...]) -> str:
         for label in summaries.keys():
@@ -8848,6 +8920,8 @@ class CLI:
             return True
         if self._first_numeric_value(row, ("change_pct", "pct_chg", "change_percent", "changePercent", "changeRate", "percent", "涨跌幅", "涨幅", "日涨跌幅")) is not None:
             return True
+        if self._first_numeric_value(row, self._market_amount_keys()) is not None:
+            return True
         return bool(self._readable_mcp_date(row) and self._snapshot_row_label(row, ""))
 
     def _snapshot_row_label(self, row: dict, fallback: str = "") -> str:
@@ -8893,7 +8967,7 @@ class CLI:
         if change_pct is None:
             change_pct = self._snapshot_latest_change_pct(clean_rows)
         volume = self._first_numeric_value(latest, ("volume", "vol", "成交量", "成交量(手)"))
-        amount = self._first_numeric_value(latest, ("amount", "turnover", "turnover_amount", "成交额", "成交额(元)"))
+        amount = self._first_numeric_value(latest, self._market_amount_keys())
         return_pct = self._snapshot_close_return_pct(clean_rows)
         return {
             "label": label,
@@ -8926,6 +9000,61 @@ class CLI:
         if start_close == 0:
             return None
         return (end_close / start_close - 1.0) * 100.0
+
+    def _market_amount_keys(self) -> tuple[str, ...]:
+        return (
+            "amount",
+            "turnover",
+            "turnover_amount",
+            "turnoverAmount",
+            "turnoverValue",
+            "turnover_value",
+            "amt",
+            "amount_cny",
+            "成交额",
+            "成交额(元)",
+            "成交额（元）",
+            "成交额(万元)",
+            "成交额（万元）",
+            "成交额(亿元)",
+            "成交额（亿元）",
+            "成交额(万亿)",
+            "成交额（万亿）",
+            "成交金额",
+            "成交金额(元)",
+            "成交金额（元）",
+            "成交金额(万元)",
+            "成交金额（万元）",
+            "成交金额(亿元)",
+            "成交金额（亿元）",
+            "成交金额(万亿)",
+            "成交金额（万亿）",
+        )
+
+    def _snapshot_amount_change_pct(self, rows: list[dict]) -> float | None:
+        return self._snapshot_numeric_change_pct(rows, self._market_amount_keys(), latest_only=False)
+
+    def _snapshot_latest_amount_change_pct(self, rows: list[dict]) -> float | None:
+        return self._snapshot_numeric_change_pct(rows, self._market_amount_keys(), latest_only=True)
+
+    def _snapshot_numeric_change_pct(self, rows: list[dict], keys: tuple[str, ...], *, latest_only: bool = False) -> float | None:
+        points: dict[str, float] = {}
+        for row in rows:
+            value = self._first_numeric_value(row, keys)
+            if value is None:
+                continue
+            date_key = self._mcp_row_date_key(row)
+            if not date_key:
+                continue
+            points[date_key] = value
+        if len(points) < 2:
+            return None
+        ordered = sorted(points.items(), key=lambda item: item[0])
+        start_value = ordered[-2][1] if latest_only else ordered[0][1]
+        end_value = ordered[-1][1]
+        if start_value == 0:
+            return None
+        return round((end_value / start_value - 1.0) * 100.0, 4)
 
     def _snapshot_latest_change_pct(self, rows: list[dict]) -> float | None:
         points: dict[str, float] = {}
@@ -9018,7 +9147,7 @@ class CLI:
                 ("日期", ("date", "trade_date", "日期", "交易日期", "period", "报告期")),
                 ("最新", ("price", "latest", "close", "close_price", "value", "指标值", "收盘", "最新价", "现价")),
                 ("涨跌幅", ("change_pct", "pct_chg", "change_percent", "涨跌幅", "涨幅", "日涨跌幅")),
-                ("成交额", ("amount", "turnover", "turnover_amount", "成交额")),
+                ("成交额", self._market_amount_keys()),
             ):
                 for alias in aliases:
                     if alias in row and self._is_safe_mcp_scalar(alias, row.get(alias)):
@@ -9833,10 +9962,24 @@ class CLI:
     def _first_numeric_value(self, value: dict, keys: tuple[str, ...]) -> float | None:
         for key in keys:
             if key in value:
-                number = self._numeric_chart_value(value.get(key))
+                raw_value = value.get(key)
+                number = self._numeric_chart_value(raw_value)
                 if number is not None:
-                    return number
+                    return self._scale_numeric_value_for_key(key, raw_value, number)
         return None
+
+    def _scale_numeric_value_for_key(self, key: str, raw_value, number: float) -> float:
+        raw_text = self._text_field(raw_value)
+        if any(unit in raw_text for unit in ("万亿", "萬億", "亿", "億", "万", "萬")):
+            return number
+        key_text = str(key)
+        if "万亿" in key_text or "萬億" in key_text:
+            return number * 1_000_000_000_000.0
+        if "亿元" in key_text or "億元" in key_text:
+            return number * 100_000_000.0
+        if "万元" in key_text or "萬元" in key_text:
+            return number * 10_000.0
+        return number
 
     def _format_client_advice(
         self,
@@ -10258,11 +10401,30 @@ class CLI:
         if isinstance(value, (int, float)):
             return float(value)
         if isinstance(value, str):
-            cleaned = value.strip().replace(",", "")
-            if cleaned.endswith("%"):
+            cleaned = value.strip().replace(",", "").replace("，", "")
+            if not cleaned:
+                return None
+            is_percent = cleaned.endswith("%")
+            if is_percent:
                 cleaned = cleaned[:-1]
             try:
                 return float(cleaned)
+            except ValueError:
+                pass
+            unit_multiplier = 1.0
+            if "万亿" in cleaned or "萬億" in cleaned:
+                unit_multiplier = 1_000_000_000_000.0
+            elif "亿" in cleaned or "億" in cleaned:
+                unit_multiplier = 100_000_000.0
+            elif "万" in cleaned or "萬" in cleaned:
+                unit_multiplier = 10_000.0
+            elif not any(unit in cleaned for unit in ("元", "手", "股", "份", "张", "美元", "港元")):
+                return None
+            match = re.search(r"[-+]?\d+(?:\.\d+)?", cleaned)
+            if not match:
+                return None
+            try:
+                return float(match.group(0)) * unit_multiplier
             except ValueError:
                 return None
         return None

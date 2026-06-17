@@ -3154,10 +3154,10 @@ def test_microcap_analysis_brief_computes_turnover_share_from_mcp_rows():
     mcp_data = {
         "batch_get_index_data:华证微盘,中证全指,沪深300": {
             "rows": [
-                {"index_name": "华证微盘", "date": "2026-06-15", "close": 1000, "amount": 80},
-                {"index_name": "华证微盘", "date": "2026-06-16", "close": 1020, "amount": 100},
-                {"index_name": "中证全指", "date": "2026-06-16", "close": 5000, "amount": 1000},
-                {"index_name": "沪深300", "date": "2026-06-16", "close": 4100, "amount": 300},
+                {"index_name": "华证微盘", "date": "2026-06-15", "close": 1000, "成交额(亿元)": 0.8},
+                {"index_name": "华证微盘", "date": "2026-06-16", "close": 1020, "成交额(亿元)": 1.0},
+                {"index_name": "中证全指", "date": "2026-06-16", "close": 5000, "成交额(亿元)": 10.0},
+                {"index_name": "沪深300", "date": "2026-06-16", "close": 4100, "成交额(亿元)": 3.0},
             ]
         },
         "web_search:A股 近期 微盘策略": {"results": [{"title": "微盘成交额占比线索"}]},
@@ -3172,7 +3172,21 @@ def test_microcap_analysis_brief_computes_turnover_share_from_mcp_rows():
     assert brief["turnover_share"]["market_label"] == "中证全指"
     assert brief["turnover_share"]["ratio_pct"] == 10.0
     assert brief["label_summaries"]["华证微盘"]["return_pct"] == 2.0
+    assert brief["turnover_diagnostics"]["microcap_amount_available"] is True
+    assert brief["turnover_diagnostics"]["microcap_amount"] == 100000000.0
+    assert brief["turnover_diagnostics"]["microcap_amount_change_pct"] == 25.0
     assert brief["missing"] == []
+
+
+def test_hot_stocks_fallback_progress_message_is_not_batch_miss():
+    message = CLI()._fallback_progress_message(
+        "get_hot_stocks",
+        "web_search",
+        {"query": "A股 今日 热门股票 涨幅榜 成交额 主线 板块", "count": 5},
+    )
+
+    assert message.startswith("热门股票工具未命中")
+    assert "批量接口未命中" not in message
 
 
 def test_market_overview_yesterday_ends_at_previous_day(monkeypatch):
