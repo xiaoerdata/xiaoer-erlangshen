@@ -3140,6 +3140,9 @@ def test_microcap_strategy_query_uses_huazheng_benchmark_and_volume_share_tools(
     index_names = index_tool["arguments"]["index_names"]
     assert index_names[:3] == ["华证微盘", "中证2000", "中证1000"]
     assert "沪深300" in index_names
+    astock_tool = next(item for item in tools if item["name"] == "get_astock_realtime")
+    assert astock_tool["arguments"]["sort"] == "成交额"
+    assert astock_tool["arguments"]["limit"] == 10000
     assert not any(item["name"] == "search_astocks" for item in tools)
     web_queries = [
         item["arguments"]["query"]
@@ -3176,6 +3179,21 @@ def test_microcap_analysis_brief_computes_turnover_share_from_mcp_rows():
     assert brief["turnover_diagnostics"]["microcap_amount"] == 100000000.0
     assert brief["turnover_diagnostics"]["microcap_amount_change_pct"] == 25.0
     assert brief["missing"] == []
+
+
+def test_microcap_astock_turnover_proxy_uses_bottom_market_cap_pool():
+    rows = [
+        {"代码": f"{index:06d}", "名称": f"股票{index}", "总市值": index * 100000000, "成交额": 10}
+        for index in range(1, 501)
+    ]
+    mcp_data = {"get_astock_realtime:成交额": {"rows": rows}}
+
+    proxy = CLI()._microcap_astock_turnover_proxy(mcp_data)
+
+    assert proxy["pool_size"] == 400
+    assert proxy["eligible_rows"] == 500
+    assert proxy["microcap_proxy_amount"] == 4000
+    assert proxy["share_pct"] == 80.0
 
 
 def test_hot_stocks_fallback_progress_message_is_not_batch_miss():
@@ -6256,6 +6274,42 @@ async def test_super66_batch_index_fans_out_to_registered_index_tool(monkeypatch
     assert result["source_format"] == "client_batch_fanout"
     assert len(result["latest_rows"]) == 2
     assert {row["index_name"] for row in result["latest_rows"]} == {"沪深300", "创业板指"}
+    Super66MCP._instance = None
+
+
+def test_super66_keeps_requested_large_realtime_row_limit(monkeypatch):
+    monkeypatch.setenv("SUPER66_MCP_TOKEN", "token")
+    monkeypatch.setenv("SUPER66_ALLOW_STATIC_TOKEN", "true")
+    Super66MCP._instance = None
+    mcp = Super66MCP()
+    payload = {
+        "code": 200,
+        "data": {
+            "rows": [
+                {"代码": f"{index:06d}", "名称": f"股票{index}", "最新价": index + 1, "成交额": index}
+                for index in range(150)
+            ],
+            "count": 150,
+        },
+    }
+
+    result = mcp._extract_result(payload, "dc66_get_astock_realtime", {"limit": 150})
+
+    assert result["count"] == 150
+    assert len(result["rows"]) == 150
+    Super66MCP._instance = None
+
+
+def test_super66_mcp_control_tools_are_not_dc66_prefixed(monkeypatch):
+    monkeypatch.setenv("SUPER66_MCP_TOKEN", "token")
+    monkeypatch.setenv("SUPER66_ALLOW_STATIC_TOKEN", "true")
+    Super66MCP._instance = None
+    mcp = Super66MCP()
+
+    tool_name, arguments = mcp._normalize_tool_call("super66.mcp.data_capabilities", {"query": "成交额"})
+
+    assert tool_name == "super66.mcp.data_capabilities"
+    assert arguments["query"] == "成交额"
     Super66MCP._instance = None
 
 

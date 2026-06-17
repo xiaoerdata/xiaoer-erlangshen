@@ -387,6 +387,8 @@ class Super66MCP:
         return result
 
     def _normalize_tool_name(self, tool_name: str) -> str:
+        if "." in tool_name:
+            return tool_name
         normalized = tool_name if tool_name.startswith("dc66_") else f"dc66_{tool_name}"
         if normalized == "dc66_batch_get_index_data":
             return "dc66_get_index_batch_series"
@@ -589,10 +591,11 @@ class Super66MCP:
             normalized_rows = [self._normalize_market_row(row, arguments) for row in rows if isinstance(row, dict)]
             normalized_rows = self._sort_market_rows(normalized_rows)
             latest = normalized_rows[-1] if normalized_rows else {}
+            row_limit = self._result_row_limit(arguments)
             return {
                 "tool": tool_name,
                 "arguments": self._safe_arguments(arguments),
-                "rows": normalized_rows[-120:],
+                "rows": normalized_rows[-row_limit:],
                 "latest": latest,
                 "count": self._result_count(result, len(normalized_rows)),
                 "source_format": "supabase_rows",
@@ -647,13 +650,14 @@ class Super66MCP:
             if latest:
                 latest_rows.append(latest)
             if label_text:
+                item_row_limit = self._result_row_limit(arguments)
                 grouped[label_text] = {
                     "tool": "dc66_get_index_data",
                     "arguments": {
                         **self._safe_arguments(arguments),
                         "indexName": label_text,
                     },
-                    "rows": normalized_item_rows[-120:],
+                    "rows": normalized_item_rows[-item_row_limit:],
                     "latest": latest,
                     "count": len(normalized_item_rows),
                     "actualStartDate": item.get("actualStartDate"),
@@ -664,10 +668,11 @@ class Super66MCP:
             return {}
         rows = self._sort_market_rows(rows)
         latest_rows = self._sort_market_rows(latest_rows)
+        row_limit = self._result_row_limit(arguments)
         return {
             "tool": "dc66_get_index_batch_series",
             "arguments": self._safe_arguments(arguments),
-            "rows": rows[-120:],
+            "rows": rows[-row_limit:],
             "latest_rows": latest_rows,
             "latest": rows[-1],
             "results": grouped,
@@ -675,6 +680,14 @@ class Super66MCP:
             "missingIndexNames": result.get("missingIndexNames", []),
             "source_format": "index_batch_series",
         }
+
+    def _result_row_limit(self, arguments: dict[str, Any], default: int = 120) -> int:
+        raw_limit = arguments.get("limit") or arguments.get("historyLimit") or arguments.get("pageSize") or default
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = default
+        return max(1, min(limit, 10000))
 
     def _extract_rows(self, value: Any, depth: int = 0) -> list[dict[str, Any]]:
         if depth > 6:
