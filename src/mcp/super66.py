@@ -134,6 +134,12 @@ class Super66MCP:
                 self._cache[cache_key] = (result, time.time() + self.cache_ttl)
             return result
 
+        if normalized_tool == "dc66_batch_get_global_asset_data":
+            result = await self._client_batch_get_global_asset_data(normalized_arguments, use_cache=use_cache)
+            if use_cache:
+                self._cache[cache_key] = (result, time.time() + self.cache_ttl)
+            return result
+
         token = await self._ensure_token()
         if not token:
             return {
@@ -296,6 +302,67 @@ class Super66MCP:
             }
         return {
             "tool": "dc66_batch_get_index_data",
+            "arguments": self._safe_arguments(arguments),
+            "rows": self._sort_market_rows(rows),
+            "latest_rows": self._sort_market_rows(latest_rows),
+            "results": results,
+            "errors": errors,
+            "count": len(rows),
+            "source_format": "client_batch_fanout",
+        }
+
+    async def _client_batch_get_global_asset_data(self, arguments: dict[str, Any], *, use_cache: bool = True) -> dict[str, Any]:
+        labels = self._coerce_label_list(
+            arguments.get("assetNames")
+            or arguments.get("assetName")
+            or arguments.get("assets")
+            or arguments.get("names")
+        )
+        if not labels:
+            return {
+                "error": "batch_get_global_asset_data 缺少 assetNames",
+                "tool": "dc66_batch_get_global_asset_data",
+                "arguments": self._safe_arguments(arguments),
+            }
+        window = {
+            key: value
+            for key, value in arguments.items()
+            if key not in {"assetNames", "assetName", "assets", "names"}
+        }
+        rows: list[dict[str, Any]] = []
+        latest_rows: list[dict[str, Any]] = []
+        results: dict[str, Any] = {}
+        errors: dict[str, Any] = {}
+        for label in labels[:12]:
+            child_args = {"assetName": label, **window}
+            result = await self.call_tool("get_global_asset_data", child_args, use_cache=use_cache)
+            if isinstance(result, dict) and result.get("error"):
+                errors[label] = result
+                continue
+            results[label] = result
+            if isinstance(result, dict):
+                child_rows = result.get("rows") if isinstance(result.get("rows"), list) else []
+                for row in child_rows:
+                    if isinstance(row, dict):
+                        item = dict(row)
+                        item.setdefault("asset_name", label)
+                        item.setdefault("index_name", label)
+                        rows.append(item)
+                latest = result.get("latest")
+                if isinstance(latest, dict):
+                    item = dict(latest)
+                    item.setdefault("asset_name", label)
+                    item.setdefault("index_name", label)
+                    latest_rows.append(item)
+        if not results and errors:
+            return {
+                "error": "batch_get_global_asset_data 拆分调用全部失败",
+                "tool": "dc66_batch_get_global_asset_data",
+                "arguments": self._safe_arguments(arguments),
+                "errors": errors,
+            }
+        return {
+            "tool": "dc66_batch_get_global_asset_data",
             "arguments": self._safe_arguments(arguments),
             "rows": self._sort_market_rows(rows),
             "latest_rows": self._sort_market_rows(latest_rows),

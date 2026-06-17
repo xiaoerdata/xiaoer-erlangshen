@@ -1240,9 +1240,11 @@ def test_mcp_catalog_includes_super66_registry_tools():
     assert "market_overview" in playbook_tasks
     assert "single_asset_or_product" in playbook_tasks
     assert "macro_event_cross_asset" in playbook_tasks
+    assert "microcap_strategy_due_diligence" in playbook_tasks
     assert "visualization_or_report_followup" in playbook_tasks
     pattern_names = {item["name"] for item in catalog["composition_patterns"]}
     assert "market_snapshot_to_narrative" in pattern_names
+    assert "microcap_liquidity_price_volume_to_decision" in pattern_names
     assert "mcp_table_to_chart_artifact" in pattern_names
 
 
@@ -2689,7 +2691,7 @@ async def test_client_side_advice_uses_local_intent_to_fetch_super66_mcp(monkeyp
     assert "沪深300" in plan
     assert "工具链路解释:" in plan
     assert "get_index_data / 沪深300: 已返回" in plan
-    assert "用途: A股指数、港股宽基指数、市场整体、沪深300、上证指数、创业板指、恒生科技指数、恒生指数等行情问题" in plan
+    assert "用途: A股指数、港股宽基指数、市场整体、华证微盘、沪深300、上证指数、创业板指、恒生科技指数、恒生指数等行情问题" in plan
     assert '参数: {"index_name": "沪深300", "limit": 60}' in plan
     assert "数据键: get_index_data:沪深300" in plan
     assert "MCP 快照" in plan
@@ -3116,6 +3118,61 @@ def test_market_overview_defaults_use_batch_macro_and_hot_stock_tools():
     assert "黄金" in tools[1]["arguments"]["asset_names"]
     assert "PMI" in tools[2]["arguments"]["keyword"]
     assert any(item["name"] == "web_search" and "热门股票" in item["arguments"]["query"] for item in tools)
+
+
+def test_microcap_strategy_query_uses_huazheng_benchmark_and_volume_share_tools():
+    cli = CLI()
+    plan = cli._normalize_intent_plan(
+        {"intent": "general_investment", "needs_mcp": False, "mcp_tools": []},
+        "最近的微盘策略值得投资吗？请做量价和成交额占比分析",
+    )
+
+    assert plan["needs_mcp"] is True
+    assert "client_microcap_strategy_guardrail" in plan["tool_selection_source"]
+    assert "华证微盘" in plan["tool_selection_note"]
+    assert "microcap_liquidity_price_volume_to_decision" in plan["composition_patterns_used"]
+    assert plan["artifact_plan"]["title"] == "华证微盘量价与相对强弱验证"
+    assert "微盘成交额占全市场成交额" in plan["data_strategy"]
+    assert "微盘成交额占全市场成交额的可核验口径" in plan["missing_inputs"]
+
+    tools = plan["mcp_tools"]
+    index_tool = next(item for item in tools if item["name"] == "batch_get_index_data")
+    index_names = index_tool["arguments"]["index_names"]
+    assert index_names[:3] == ["华证微盘", "中证2000", "中证1000"]
+    assert "沪深300" in index_names
+    assert not any(item["name"] == "search_astocks" for item in tools)
+    web_queries = [
+        item["arguments"]["query"]
+        for item in tools
+        if item["name"] == "web_search" and isinstance(item.get("arguments"), dict)
+    ]
+    assert any("微盘成交额" in query and "占比" in query for query in web_queries)
+    assert any("量化私募" in query and "风格主线" in query for query in web_queries)
+
+
+def test_microcap_analysis_brief_computes_turnover_share_from_mcp_rows():
+    mcp_data = {
+        "batch_get_index_data:华证微盘,中证全指,沪深300": {
+            "rows": [
+                {"index_name": "华证微盘", "date": "2026-06-15", "close": 1000, "amount": 80},
+                {"index_name": "华证微盘", "date": "2026-06-16", "close": 1020, "amount": 100},
+                {"index_name": "中证全指", "date": "2026-06-16", "close": 5000, "amount": 1000},
+                {"index_name": "沪深300", "date": "2026-06-16", "close": 4100, "amount": 300},
+            ]
+        },
+        "web_search:A股 近期 微盘策略": {"results": [{"title": "微盘成交额占比线索"}]},
+    }
+
+    brief = CLI()._microcap_analysis_brief("最近微盘策略值得投资吗", mcp_data)
+
+    assert brief["required"] is True
+    assert brief["status"] == "available"
+    assert brief["primary_benchmark"] == "华证微盘"
+    assert brief["turnover_share"]["microcap_label"] == "华证微盘"
+    assert brief["turnover_share"]["market_label"] == "中证全指"
+    assert brief["turnover_share"]["ratio_pct"] == 10.0
+    assert brief["label_summaries"]["华证微盘"]["return_pct"] == 2.0
+    assert brief["missing"] == []
 
 
 def test_market_overview_yesterday_ends_at_previous_day(monkeypatch):
@@ -3824,6 +3881,10 @@ def test_llm_prompts_include_mcp_catalog_and_chart_channel():
     assert "必须参考 previous_mcp_context 和 recent_artifacts" in payload
     assert "刚才那个网页/图片/图/链接/报告" in payload
     assert "/links 或 /open" in payload
+    assert "必须以华证微盘作为主基准" in payload
+    assert "中证1000/中证2000只能作为比较对象" in payload
+    assert "微盘成交额占全市场成交额比重" in payload
+    assert "禁止用“中证1000近期平稳”直接推导微盘值得投" in payload
     assert "tool_rationale" in payload
     assert "tool_selection_source" in payload
     assert "tool_selection_note" in payload
@@ -3832,6 +3893,7 @@ def test_llm_prompts_include_mcp_catalog_and_chart_channel():
     assert "data_confidence" in payload
     assert "chart_opportunity" in payload
     assert "artifact_plan" in payload
+    assert "microcap_analysis_brief" in payload
     assert "数据足够时可直接在 artifacts 请求图表" in payload
     assert "missing_inputs" in payload
     assert "tool_result_contract" in payload
@@ -6180,6 +6242,123 @@ async def test_super66_batch_index_fans_out_to_registered_index_tool(monkeypatch
     assert result["source_format"] == "client_batch_fanout"
     assert len(result["latest_rows"]) == 2
     assert {row["index_name"] for row in result["latest_rows"]} == {"沪深300", "创业板指"}
+    Super66MCP._instance = None
+
+
+@pytest.mark.asyncio
+async def test_super66_batch_global_asset_fans_out_to_registered_asset_tool(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        content = b"{}"
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        is_closed = False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append(json)
+            assert json["name"] == "dc66_get_global_asset_data"
+            label = json["arguments"]["assetName"]
+            close = 2400 if label == "黄金" else 105
+            return FakeResponse({
+                "code": 200,
+                "data": {
+                    "result": {
+                        "rows": [
+                            {"date": "2026-06-15", "close": close - 1, "asset_name": label},
+                            {"date": "2026-06-16", "close": close, "asset_name": label},
+                        ]
+                    }
+                },
+            })
+
+    monkeypatch.setenv("SUPER66_MCP_TOKEN", "token")
+    monkeypatch.setenv("SUPER66_ALLOW_STATIC_TOKEN", "true")
+    Super66MCP._instance = None
+    mcp = Super66MCP()
+    mcp._client = FakeClient()
+    mcp._cache.clear()
+
+    result = await mcp.call_tool(
+        "batch_get_global_asset_data",
+        {"asset_names": ["黄金", "美元指数"], "start_date": "2026-06-15", "end_date": "2026-06-16"},
+        use_cache=False,
+    )
+
+    assert [call["name"] for call in calls] == ["dc66_get_global_asset_data", "dc66_get_global_asset_data"]
+    assert [call["arguments"]["assetName"] for call in calls] == ["黄金", "美元指数"]
+    assert result["tool"] == "dc66_batch_get_global_asset_data"
+    assert result["source_format"] == "client_batch_fanout"
+    assert len(result["latest_rows"]) == 2
+    assert {row["asset_name"] for row in result["latest_rows"]} == {"黄金", "美元指数"}
+    Super66MCP._instance = None
+
+
+@pytest.mark.asyncio
+async def test_cli_batch_global_asset_uses_client_fanout_without_fallback_progress(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        content = b"{}"
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeHTTPClient:
+        is_closed = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def post(self, url, json=None, headers=None):
+            calls.append(json)
+            assert json["name"] == "dc66_get_global_asset_data"
+            label = json["arguments"]["assetName"]
+            return FakeResponse({
+                "code": 200,
+                "data": {
+                    "result": {
+                        "rows": [
+                            {"date": "2026-06-16", "close": 2400 if label == "黄金" else 105, "asset_name": label}
+                        ]
+                    }
+                },
+            })
+
+    monkeypatch.setenv("SUPER66_MCP_TOKEN", "token")
+    monkeypatch.setenv("SUPER66_ALLOW_STATIC_TOKEN", "true")
+    monkeypatch.setattr("src.mcp.super66.httpx.AsyncClient", FakeHTTPClient)
+    Super66MCP._instance = None
+
+    cli = CLI()
+    progress = []
+    monkeypatch.setattr(cli, "_show_progress", lambda message: progress.append(message))
+    data = await cli._collect_client_mcp_data(
+        "跨资产数据",
+        {},
+        {
+            "needs_mcp": True,
+            "mcp_tools": [
+                {"name": "batch_get_global_asset_data", "arguments": {"asset_names": ["黄金", "美元指数"]}}
+            ],
+        },
+    )
+
+    assert [call["name"] for call in calls] == ["dc66_get_global_asset_data", "dc66_get_global_asset_data"]
+    assert "batch_get_global_asset_data:黄金,美元指数" in data
+    assert data["batch_get_global_asset_data:黄金,美元指数"]["source_format"] == "client_batch_fanout"
+    assert not any("批量接口未命中" in item for item in progress)
     Super66MCP._instance = None
 
 

@@ -6284,6 +6284,7 @@ class CLI:
             "server_protected_matches": matches[:3],
             "mcp_data": mcp_data or {},
             "market_data_brief": self._mcp_data_brief(mcp_data),
+            "microcap_analysis_brief": self._microcap_analysis_brief(query, mcp_data),
             "user_data": user_data or {},
             "current_cognition": current_cognition or {},
             "requirements": [
@@ -6304,6 +6305,10 @@ class CLI:
                 "如果用户是图表、报告或承接上一轮的追问，必须参考 previous_mcp_context 和 recent_artifacts；但不能编造其中不存在的数值",
                 "如果用户提到“刚才那个网页/图片/图/链接/报告”，必须参考 recent_resources 和 recent_artifacts，并用自然语言说明可通过 /links 或 /open 重新打开",
                 "市场分析默认不是单点快照：要综合指数、港股/美股联动、黄金/美元/原油等跨资产、成交与事件线索，有条件时用 120 天窗口观察趋势和相对强弱",
+                "如果用户询问微盘策略、华证微盘、小微盘或小市值策略是否值得投资，必须以华证微盘作为主基准；中证1000/中证2000只能作为比较对象，不能替代华证微盘代表微盘",
+                "微盘策略判断必须做量价验证：华证微盘区间收益与回撤、成交额/成交量/换手变化、微盘成交额占全市场成交额比重、相对中证2000/中证1000/沪深300的强弱、跌停/断流、量化拥挤、赎回去杠杆和强主线吸金",
+                "如果本轮没有拿到华证微盘、成交额占比或跌停/拥挤等关键数据，必须把这些列入 missing_data，并把结论降级为框架判断；禁止用“中证1000近期平稳”直接推导微盘值得投",
+                "微盘策略结论要按可投/观察/回避三段给条件：提高权重需要华证微盘放量走强、成交占比回升、相对强弱改善、主线吸金降温；降低权重需要流动性抽空、价跌量增或价涨量缩、成交占比下滑、跌停扩散或强主线持续抽血",
                 "不要逐条罗列 MCP 原始快照；把数据消化成趋势、结构、相对强弱、异常和可能驱动，明细留给 /plan",
                 "如果 MCP、web_search、服务端或大模型返回网页、图片、HTML、PDF 等非文本资源，必须保留为命名 resource_links，不要试图把富文本或二进制内容直接塞进终端",
                 "优先参考 client_intent_plan 中的 tool_rationale 和 data_strategy，说明你为什么用了这些数据边界",
@@ -6629,6 +6634,20 @@ class CLI:
             tool_selection_source = "client_default_by_intent"
             if not tool_selection_note:
                 tool_selection_note = "本机大模型未给出具体工具，客户端按 intent/data_recipes 补齐默认 MCP 工具，避免无事实数据分析。"
+        microcap_tools = self._microcap_strategy_tools(query)
+        if microcap_tools:
+            before = list(tools)
+            tools = self._dedupe_mcp_tools(microcap_tools + tools)
+            needs_mcp = True
+            if tools != before or not self._has_microcap_benchmark_tool(before):
+                source = tool_selection_source or route_source or "local_llm"
+                tool_selection_source = (
+                    source
+                    if "client_microcap_strategy_guardrail" in source
+                    else f"{source}+client_microcap_strategy_guardrail"
+                )
+                note = "检测到微盘/小市值策略问题，客户端强制以华证微盘为主基准，并补充微盘成交额占比、量价、流动性和主线强度验证。"
+                tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
         index_guardrail_tools = self._index_market_guardrail_tools(query)
         if index_guardrail_tools and tools:
             before = list(tools)
@@ -6644,7 +6663,7 @@ class CLI:
                 note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
                 tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
             needs_mcp = True
-        astock_tools = [] if index_guardrail_tools else self._specific_astock_tools_from_query(query)
+        astock_tools = [] if (index_guardrail_tools or microcap_tools) else self._specific_astock_tools_from_query(query)
         if astock_tools:
             before = list(tools)
             tools = self._dedupe_mcp_tools(astock_tools + tools)
@@ -6681,6 +6700,19 @@ class CLI:
         if not route_summary:
             route_summary = "先由本机大模型理解上下文，再按需要调用 MCP/web_search 和服务端映射。"
         chart_opportunity = bool(plan.get("chart_opportunity"))
+        if microcap_tools:
+            if "微盘" not in tool_rationale and "华证微盘" not in tool_rationale:
+                tool_rationale = "微盘策略问题必须先以华证微盘为主基准读取量价数据，再对比中证2000/中证1000/宽基和主线热度，验证流动性与风格吸金风险。"
+            if "华证微盘" not in data_strategy:
+                data_strategy = "优先读取华证微盘、中证2000、中证1000、中证全指/万得全A、沪深300等指数的价格和成交额；用 web_search 交叉验证微盘成交额占全市场成交额比重、跌停/断流、量化拥挤和强主线吸金，再结合服务端场景映射输出是否值得投资。"
+            if "微盘" not in route_summary and "华证微盘" not in route_summary:
+                route_summary = "这是微盘策略是否值得投资的量价验证任务，重点看华证微盘、成交额占比、相对强弱、流动性压力和市场主线强度。"
+            for item in ("具体微盘策略产品/管理人/指数增强规则", "可承受回撤和计划仓位", "微盘成交额占全市场成交额的可核验口径"):
+                if item not in missing_inputs:
+                    missing_inputs.append(item)
+            if not chart_opportunity:
+                chart_opportunity = True
+                chart_rationale = "微盘策略需要把华证微盘与中证2000/中证1000/沪深300的区间收益、相对强弱和成交额变化做量价对比。"
         if not chart_opportunity and any(word in query for word in ("图表", "画图", "对比", "走势", "收益", "回撤")):
             chart_opportunity = True
             if not chart_rationale:
@@ -6763,6 +6795,8 @@ class CLI:
         text = re.sub(r"\s+", "", (query or "").lower())
         tool_names = {self._text_field(item.get("name")) for item in tools if isinstance(item, dict)}
         result = []
+        if self._is_microcap_strategy_query(query):
+            result.append("microcap_liquidity_price_volume_to_decision")
         if self._is_vague_market_query(query) or self._text_field(intent).lower() == "market_overview":
             result.append("market_snapshot_to_narrative")
         if any(name in tool_names for name in {"search_astocks", "get_astock_realtime", "search_products", "get_product_detail"}):
@@ -6876,12 +6910,19 @@ class CLI:
                 plan_type = "none"
         title = self._text_field(data.get("title"))
         data_hint = self._text_field(data.get("data_hint"))
+        is_microcap = self._is_microcap_strategy_query(query)
         if plan_type == "chart":
             if not title:
                 is_market_overview = self._is_vague_market_query(query) or self._text_field(intent).lower() == "market_overview"
-                title = "市场快照对比" if is_market_overview else "关键指标对比"
+                if is_microcap:
+                    title = "华证微盘量价与相对强弱验证"
+                else:
+                    title = "市场快照对比" if is_market_overview else "关键指标对比"
             if not data_hint:
-                data_hint = chart_rationale or "使用本轮 MCP 行情快照中的指数、资产涨跌幅或收益序列"
+                if is_microcap:
+                    data_hint = "使用华证微盘、中证2000、中证1000、中证全指/万得全A、沪深300等 MCP 指数序列的收盘、涨跌幅和成交额，并结合 web_search 验证微盘成交额占比、跌停/断流和量化拥挤线索"
+                else:
+                    data_hint = chart_rationale or "使用本轮 MCP 行情快照中的指数、资产涨跌幅或收益序列"
         elif plan_type == "report":
             if not title:
                 title = "本轮投资分析报告"
@@ -6974,6 +7015,21 @@ class CLI:
                 "fallback": "事件信息不足时降低确定性，并列出需要补充的日期、地区、资产范围。",
             },
             {
+                "task": "microcap_strategy_due_diligence",
+                "goal": "回答“微盘策略是否值得投资”时，用华证微盘做主基准，并用量价、成交占比、流动性和主线强度做验证。",
+                "trigger": "用户问微盘、小微盘、小市值策略、华证微盘、量化微盘或微盘是否值得投。",
+                "preferred_chain": [
+                    "batch_get_index_data: 华证微盘/中证2000/中证1000/中证全指/万得全A/沪深300/创业板指",
+                    "get_macro_data: A股流动性、成交额、融资余额、利率和风险偏好",
+                    "get_hot_stocks: 成交额榜和强势主线吸金线索",
+                    "web_search: 微盘成交额占全市场成交额比重、跌停潮、量化拥挤、赎回和监管线索",
+                    "server map + local LLM: 形成可投/观察/回避的条件判断",
+                ],
+                "artifact_rule": "优先画华证微盘相对中证2000/中证1000/沪深300的走势、区间收益和成交额变化；没有成交额占比时明确缺口。",
+                "resource_rule": "成交额占比、跌停潮、量化拥挤等公开来源进入 resource_links。",
+                "fallback": "拿不到华证微盘或成交额口径时，不用中证1000代替下结论，只能给框架判断和待验证清单。",
+            },
+            {
                 "task": "visualization_or_report_followup",
                 "goal": "把上一轮分析、MCP 快照或用户数据沉淀成图表/报告。",
                 "trigger": "用户说图表、报告、对比、走势、收益、回撤、配置比例，或“把刚才那个做成图”。",
@@ -7000,8 +7056,13 @@ class CLI:
             "mcp_tools": [
                 {
                     "name": "get_index_data",
-                    "use_when": "A股指数、港股宽基指数、市场整体、沪深300、上证指数、创业板指、恒生科技指数、恒生指数等行情问题",
+                    "use_when": "A股指数、港股宽基指数、市场整体、华证微盘、沪深300、上证指数、创业板指、恒生科技指数、恒生指数等行情问题",
                     "args": {"index_name": "沪深300", "limit": 60},
+                },
+                {
+                    "name": "batch_get_index_data",
+                    "use_when": "需要比较华证微盘、中证2000、中证1000、全市场宽基和大盘指数的收益、相对强弱、成交额或量价结构",
+                    "args": {"index_names": ["华证微盘", "中证2000", "中证1000", "中证全指", "万得全A", "沪深300"], "limit": 120},
                 },
                 {
                     "name": "get_astock_realtime",
@@ -7072,6 +7133,8 @@ class CLI:
                 "行情和产品数据优先 super-66 MCP；新闻和公开网页补充 web_search",
                 "恒生科技指数、恒生指数、HSTECH、HSI、Hang Seng Tech 只能使用 get_index_data；不要使用 get_global_asset_data",
                 "恒生科技指数和恒生指数属于 super-66 国内宽基指数数据源；调用 MCP 时只传 index_name/indexName，丢弃 sourceTable/global_index/global_assets 等表名提示",
+                "微盘策略、小微盘、小市值策略问题必须以华证微盘为主基准；中证1000/中证2000只能作为比较对象，不得替代华证微盘代表微盘",
+                "微盘是否值得投必须验证量价：华证微盘区间收益、成交额/换手、微盘成交额占全市场成交额比重、相对中证2000/中证1000/沪深300强弱、跌停/断流、量化拥挤和强主线吸金",
                 "需要可视化时让服务端生成 chart artifact，再由客户端展示或保存",
                 "网页、图片、HTML、PDF 等非文本结果必须以命名 resource_links 返回，便于 /links open 1 或 /open link 1 打开",
             ],
@@ -7092,6 +7155,18 @@ class CLI:
                     "read_fields": ["index_name/asset_name", "date", "close/latest", "change_pct/pct_chg", "title/source/url"],
                     "fallback": "指数数据失败时保留 web_search 事件线索，并明确数据通道缺口和 /doctor 修复路径",
                     "artifact": "可把指数/资产涨跌幅整理为 bar，或把历史序列整理为 line",
+                },
+                {
+                    "name": "microcap_liquidity_price_volume_to_decision",
+                    "when": "用户问微盘策略、小微盘、小市值、华证微盘是否值得投、能不能买、要不要配置",
+                    "tools": ["batch_get_index_data", "get_macro_data", "get_hot_stocks", "web_search", "server map"],
+                    "read_fields": [
+                        "华证微盘/index_name/date/close/change_pct/amount/volume",
+                        "中证2000/中证1000/沪深300/中证全指或万得全A的区间收益和成交额",
+                        "微盘成交额占全市场成交额比重、换手、跌停/断流、量化拥挤、主线成交集中度",
+                    ],
+                    "fallback": "拿不到华证微盘或成交额占比时，不能用中证1000替代微盘下结论；必须把缺失口径列入 missing_data",
+                    "artifact": "line 用于华证微盘相对走势，bar 用于区间收益/成交额变化/成交占比对比",
                 },
                 {
                     "name": "product_history_to_risk",
@@ -7119,6 +7194,23 @@ class CLI:
                 },
             ],
             "data_recipes": [
+                {
+                    "name": "microcap_strategy_due_diligence",
+                    "use_when": "用户问最近微盘策略、华证微盘、小微盘或小市值策略是否值得投资",
+                    "steps": [
+                        "主基准: batch_get_index_data 读取华证微盘；同时读取中证2000、中证1000、中证全指/万得全A、沪深300、创业板指做相对强弱和风格比较",
+                        "量价验证: 检查华证微盘区间收益、成交额/成交量/换手变化、价涨量缩或价跌量增等背离",
+                        "成交占比: 用华证微盘成交额与中证全指/万得全A或公开口径验证微盘成交额占全市场成交额比重及其趋势",
+                        "流动性压力: 检查跌停潮、断流、买卖价差、量化拥挤、赎回/去杠杆、监管和融资环境",
+                        "主线吸金: 用 get_hot_stocks 和 web_search 判断成交额是否集中到强主线龙头/主题 ETF，微盘投机属性是否被抽走",
+                        "结论: 只能在可投、观察、回避/降仓三类中给条件判断，并列出触发提高/降低权重的量价信号",
+                    ],
+                    "examples": [
+                        "最近的微盘策略值得投资吗？",
+                        "华证微盘最近量价结构怎么样，微盘还能不能配？",
+                        "小市值策略是不是被主线抽血了？",
+                    ],
+                },
                 {
                     "name": "market_overview",
                     "use_when": "用户问今天行情、市场怎么样、盘面怎么看但没有给具体标的",
@@ -7195,6 +7287,18 @@ class CLI:
                     "output": "自然语言市场判断；必要时建议 chart/report follow-up",
                 },
                 {
+                    "name": "microcap_strategy_to_liquidity_decision",
+                    "trigger": "微盘策略、小微盘、小市值策略、华证微盘是否值得投资",
+                    "sequence": [
+                        "本机 LLM 将问题改写为微盘策略量价与流动性验证任务",
+                        "super-66 MCP: batch_get_index_data 读取华证微盘、中证2000、中证1000、中证全指/万得全A、沪深300等",
+                        "super-66 MCP/web_search: 验证微盘成交额占全市场成交额比重、换手、跌停/断流、量化拥挤和主线吸金",
+                        "server map: 命中微盘流动性/主线失效风险场景",
+                        "local LLM: 输出可投/观察/回避的条件判断、仓位边界、失效信号和缺失数据",
+                    ],
+                    "output": "华证微盘主基准 + 量价/成交占比/主线强度验证后的投资判断",
+                },
+                {
                     "name": "named_asset_to_fact_check",
                     "trigger": "用户给出股票、基金、产品、商品或指数名称，需要先核实实体和事实数据",
                     "sequence": [
@@ -7263,6 +7367,11 @@ class CLI:
                 "use_fields": ["index_name", "date", "close", "change_pct", "volume", "amount"],
                 "chart_fit": "line 用于走势，bar 用于当日/近期涨跌幅对比",
             },
+            "batch_get_index_data": {
+                "result_shape": "多个指数历史或最近行情序列；微盘策略必须包含华证微盘，并用中证2000/中证1000/沪深300/全市场指数做比较",
+                "use_fields": ["index_name", "date", "close", "change_pct", "volume", "amount"],
+                "chart_fit": "line 用于相对走势，bar 用于区间收益、成交额变化和成交占比对比",
+            },
             "get_astock_realtime": {
                 "result_shape": "单只 A 股实时或最近行情快照",
                 "use_fields": ["code", "name", "price", "change_pct", "volume", "amount"],
@@ -7296,6 +7405,23 @@ class CLI:
             return provided
         tools = intent_plan.get("mcp_tools") if isinstance(intent_plan, dict) else []
         tools = self._dedupe_mcp_tools(tools) if isinstance(tools, list) else []
+        microcap_tools = self._microcap_strategy_tools(query)
+        if microcap_tools:
+            before = list(tools)
+            tools = self._dedupe_mcp_tools(microcap_tools + tools)
+            if isinstance(intent_plan, dict):
+                intent_plan["needs_mcp"] = True
+                intent_plan["mcp_tools"] = tools
+                if tools != before or not self._has_microcap_benchmark_tool(before):
+                    source = self._text_field(intent_plan.get("tool_selection_source") or intent_plan.get("route_source") or "local_llm")
+                    intent_plan["tool_selection_source"] = (
+                        source
+                        if "client_microcap_strategy_guardrail" in source
+                        else f"{source}+client_microcap_strategy_guardrail"
+                    )
+                    note = "检测到微盘/小市值策略问题，客户端强制以华证微盘为主基准，并补充微盘成交额占比、量价、流动性和主线强度验证。"
+                    previous = self._text_field(intent_plan.get("tool_selection_note"))
+                    intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
         index_guardrail_tools = self._index_market_guardrail_tools(query)
         if index_guardrail_tools and tools:
             before = list(tools)
@@ -7312,7 +7438,7 @@ class CLI:
                 note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
                 previous = self._text_field(intent_plan.get("tool_selection_note"))
                 intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
-        astock_tools = [] if index_guardrail_tools else self._specific_astock_tools_from_query(query)
+        astock_tools = [] if (index_guardrail_tools or microcap_tools) else self._specific_astock_tools_from_query(query)
         astock_guardrail = "client_astock_guardrail"
         if not astock_tools:
             astock_tools = self._specific_astock_tools_from_followup_context(query, intent_plan)
@@ -7650,6 +7776,7 @@ class CLI:
         index_words = (
             "指数", "大盘", "宽基", "上证", "深证", "深成指", "创业板", "科创50",
             "沪深300", "中证", "恒生", "hstech", "hsi", "csi300", "sp500", "nasdaq",
+            "华证微盘", "微盘", "小微盘", "小市值",
         )
         action_words = (
             "昨天", "昨日", "今天", "今日", "近期", "最近", "最新", "表现", "涨跌",
@@ -7760,6 +7887,79 @@ class CLI:
         if "最近" in text or "近期" in text:
             date_hint = "近期"
         return f"A股 {date_hint} 热门股票 涨幅榜 成交额 主线 板块"
+
+    def _is_microcap_strategy_query(self, query: str) -> bool:
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        if not text:
+            return False
+        microcap_terms = (
+            "微盘", "微盘股", "小微盘", "小市值", "小盘策略", "小市值策略",
+            "华证微盘", "华证微盘指数", "microcap",
+        )
+        decision_terms = (
+            "策略", "投资", "配置", "值得", "能不能买", "要不要买", "能不能投",
+            "要不要投", "持有", "加仓", "减仓", "风险", "怎么看", "如何",
+            "分析", "表现", "走势", "收益", "回撤", "量价", "成交额", "流动性",
+        )
+        return any(term in text for term in microcap_terms) and any(term in text for term in decision_terms)
+
+    def _microcap_strategy_tools(self, query: str = "") -> list[dict]:
+        if not self._is_microcap_strategy_query(query):
+            return []
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        date_hint = "昨日" if ("昨天" in text or "昨日" in text) else "今日"
+        if "最近" in text or "近期" in text:
+            date_hint = "近期"
+        window = self._recent_market_window_args(days=180, query=query)
+        return [
+            {
+                "name": "batch_get_index_data",
+                "arguments": {
+                    "index_names": ["华证微盘", "中证2000", "中证1000", "中证全指", "万得全A", "沪深300", "创业板指"],
+                    **window,
+                },
+            },
+            {
+                "name": "get_macro_data",
+                "arguments": {
+                    "keyword": "A股 流动性 成交额 融资余额 M2 社融 利率 风险偏好",
+                    "latest_only": True,
+                    "limit": 80,
+                },
+            },
+            {
+                "name": "get_hot_stocks",
+                "arguments": {"market": "A股", "rank_by": "amount", "limit": 20},
+            },
+            {
+                "name": "web_search",
+                "arguments": {"query": f"华证微盘指数 {date_hint} 涨跌幅 成交额 换手率 量价", "count": 5},
+            },
+            {
+                "name": "web_search",
+                "arguments": {"query": f"A股 {date_hint} 全市场成交额 微盘成交额 占比 小微盘 流动性", "count": 5},
+            },
+            {
+                "name": "web_search",
+                "arguments": {"query": f"A股 {date_hint} 微盘策略 量化私募 拥挤 赎回 跌停潮 风格主线", "count": 5},
+            },
+        ]
+
+    def _has_microcap_benchmark_tool(self, tools: list[dict]) -> bool:
+        for item in tools or []:
+            if not isinstance(item, dict):
+                continue
+            args = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+            labels = []
+            if item.get("name") == "get_index_data":
+                labels = self._coerce_label_list(args.get("index_name") or args.get("indexName") or args.get("label"))
+            elif item.get("name") == "batch_get_index_data":
+                labels = self._coerce_label_list(
+                    args.get("index_names") or args.get("indexNames") or args.get("indices") or args.get("names")
+                )
+            if any("华证微盘" in re.sub(r"\s+", "", self._text_field(label)) for label in labels):
+                return True
+        return False
 
     def _is_event_market_query(self, query: str) -> bool:
         text = re.sub(r"\s+", "", self._text_field(query).lower())
@@ -8387,6 +8587,98 @@ class CLI:
             "warnings": error_keys,
             "instruction": "可用数据源必须进入综合判断；字段不标准时先概括数据源和方向，避免声称没有实时数据。",
         }
+
+    def _microcap_analysis_brief(self, query: str, mcp_data) -> dict:
+        if not self._is_microcap_strategy_query(query):
+            return {"required": False}
+        required_checks = [
+            "华证微盘区间收益/回撤",
+            "华证微盘成交额/成交量/换手变化",
+            "微盘成交额占全市场成交额比重",
+            "相对中证2000/中证1000/沪深300强弱",
+            "跌停/断流、量化拥挤、赎回去杠杆和强主线吸金",
+        ]
+        if not isinstance(mcp_data, dict) or not mcp_data:
+            return {
+                "required": True,
+                "status": "missing",
+                "primary_benchmark": "华证微盘",
+                "required_checks": required_checks,
+                "missing": required_checks,
+                "instruction": "没有微盘 MCP 数据时，只能给框架判断，不能用中证1000替代华证微盘下结论。",
+            }
+        grouped: dict[str, list[dict]] = {}
+        for key, value in mcp_data.items():
+            key_text = str(key)
+            if self._mcp_value_has_error(value) or "error" in key_text.lower():
+                continue
+            for label, rows in self._snapshot_grouped_market_rows(key_text, value).items():
+                grouped.setdefault(label, []).extend(rows)
+        label_summaries = {
+            label: self._microcap_label_summary(label, rows)
+            for label, rows in grouped.items()
+            if self._microcap_label_summary(label, rows)
+        }
+        microcap_label = self._find_label(label_summaries, ("华证微盘",))
+        market_label = self._find_label(label_summaries, ("中证全指", "万得全A", "万得全ａ", "全A", "全市场"))
+        turnover_share = None
+        if microcap_label and market_label:
+            micro_amount = label_summaries[microcap_label].get("amount")
+            market_amount = label_summaries[market_label].get("amount")
+            if isinstance(micro_amount, (int, float)) and isinstance(market_amount, (int, float)) and market_amount > 0:
+                turnover_share = {
+                    "microcap_label": microcap_label,
+                    "market_label": market_label,
+                    "ratio": micro_amount / market_amount,
+                    "ratio_pct": round(micro_amount / market_amount * 100, 4),
+                }
+        missing = []
+        if not microcap_label:
+            missing.append("华证微盘 MCP 行情")
+        if not turnover_share:
+            missing.append("微盘成交额占全市场成交额比重")
+        if not any(self._find_label(label_summaries, (label,)) for label in ("中证2000", "中证1000", "沪深300")):
+            missing.append("中证2000/中证1000/沪深300相对强弱比较")
+        if not any(
+            str(key).startswith("web_search:") and not self._mcp_value_has_error(value)
+            for key, value in mcp_data.items()
+        ):
+            missing.append("跌停/断流、量化拥挤、赎回去杠杆和强主线吸金的公开验证")
+        return {
+            "required": True,
+            "status": "partial" if missing else "available",
+            "primary_benchmark": "华证微盘",
+            "comparison_benchmarks": ["中证2000", "中证1000", "沪深300", "创业板指", "中证全指/万得全A"],
+            "available_labels": sorted(label_summaries.keys()),
+            "label_summaries": label_summaries,
+            "turnover_share": turnover_share,
+            "missing": missing,
+            "required_checks": required_checks,
+            "instruction": "回答微盘策略时必须优先使用本 brief；turnover_share 为空则说明成交额占比未被结构化验证，不能据此给高确定性结论。",
+        }
+
+    def _microcap_label_summary(self, label: str, rows: list[dict]) -> dict[str, object]:
+        clean_rows = [row for row in rows if isinstance(row, dict)]
+        if not clean_rows:
+            return {}
+        latest = self._latest_mcp_row_by_date(clean_rows) or clean_rows[-1]
+        return_pct = self._snapshot_close_return_pct(clean_rows)
+        return {
+            "label": label,
+            "date": self._format_compact_date(self._readable_mcp_date(latest)),
+            "close": self._first_numeric_value(latest, ("close", "close_price", "latest", "last", "price", "收盘", "收盘价", "最新价")),
+            "change_pct": self._first_numeric_value(latest, ("change_pct", "pct_chg", "change_percent", "涨跌幅", "涨幅")),
+            "return_pct": round(return_pct, 4) if return_pct is not None else None,
+            "amount": self._first_numeric_value(latest, ("amount", "turnover", "turnover_amount", "成交额", "成交额(元)")),
+            "volume": self._first_numeric_value(latest, ("volume", "vol", "成交量", "成交量(手)")),
+        }
+
+    def _find_label(self, summaries: dict[str, dict], terms: tuple[str, ...]) -> str:
+        for label in summaries.keys():
+            compact = re.sub(r"\s+", "", self._text_field(label).lower())
+            if any(re.sub(r"\s+", "", term.lower()) in compact for term in terms):
+                return label
+        return ""
 
     def _market_fact_grounding(self, query: str, mcp_data, intent_plan: dict | None = None) -> dict:
         plan = intent_plan if isinstance(intent_plan, dict) else {}
