@@ -3190,6 +3190,26 @@ def test_hot_stocks_fallback_progress_message_is_not_batch_miss():
     assert "批量接口未命中" not in message
 
 
+def test_batch_tool_fallback_tools_includes_macro_snapshot_web_search():
+    cli = CLI()
+    fallback = cli._batch_tool_fallback_tools(
+        "get_macro_snapshot",
+        {"keyword": "中国 宏观 指标", "indicator_codes": ["PMI_MFG", "LPR_1Y"]},
+    )
+
+    assert fallback == [{"name": "web_search", "arguments": {"query": "中国 宏观 指标", "count": 5}}]
+
+
+def test_fallback_progress_message_for_macro_tools():
+    message = CLI()._fallback_progress_message(
+        "get_macro_snapshot",
+        "web_search",
+        {"query": "港股 下跌 原因", "count": 5},
+    )
+
+    assert message == "宏观数据工具未命中，回退读取: web_search / 港股 下跌 原因"
+
+
 def test_market_overview_yesterday_ends_at_previous_day(monkeypatch):
     class FixedDatetime(datetime):
         @classmethod
@@ -3234,6 +3254,249 @@ async def test_collect_client_mcp_data_falls_back_when_batch_tool_fails(monkeypa
     assert "batch_get_index_data:沪深300,创业板指:error" in collected
     assert "get_index_data:沪深300" in collected
     assert "get_index_data:创业板指" in collected
+
+
+@pytest.mark.asyncio
+async def test_collect_client_mcp_data_falls_back_when_macro_snapshot_fails(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments or {}))
+            if tool_name == "get_macro_snapshot":
+                return {
+                    "code": "MCP_TOOL_TIMEOUT",
+                    "message": "Tool dc66_get_macro_snapshot timed out.",
+                    "meta": {"asOf": "2026-07-01T00:00:00Z"},
+                }
+            return {"tool": tool_name, "arguments": arguments}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    intent_plan = {
+        "needs_mcp": True,
+        "mcp_tools": [
+            {
+                "name": "get_macro_snapshot",
+                "arguments": {"indicator_codes": ["PMI_MFG", "LPR_1Y"], "limit": 80},
+            }
+        ],
+    }
+    collected = await CLI()._collect_client_mcp_data("港股抄底的信号是不是变了", {}, intent_plan)
+
+    assert calls[0] == ("get_macro_snapshot", {"indicator_codes": ["PMI_MFG", "LPR_1Y"], "limit": 80})
+    assert any(tool_name == "get_macro_data" and args.get("keyword") == "PMI_MFG" for tool_name, args in calls)
+    assert any(tool_name == "get_macro_data" and args.get("keyword") == "LPR_1Y" for tool_name, args in calls)
+    assert not any(":error" in key for key in collected)
+    assert any(key.startswith("get_macro_data:") and "PMI_MFG" in key for key in collected)
+    assert any(key.startswith("get_macro_data:") and "LPR_1Y" in key for key in collected)
+    assert not any(key.startswith("web_search:") for key in collected)
+
+
+@pytest.mark.asyncio
+async def test_collect_client_mcp_data_retries_macro_snapshot_by_chunks(monkeypatch):
+    calls = []
+    searches = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            args = arguments or {}
+            calls.append((tool_name, dict(args)))
+            if tool_name == "get_macro_snapshot":
+                indicators = self._coerce(args.get("indicator_codes") or [])
+                if len(indicators) > 4:
+                    return {
+                        "code": "MCP_TOOL_TIMEOUT",
+                        "message": "Tool dc66_get_macro_snapshot timed out.",
+                        "meta": {"asOf": "2026-07-01T00:00:00Z"},
+                    }
+                return {
+                    "rows": [
+                        {"indicator_code": indicator, "date": "2026-07-01", "latest": 100 + index}
+                        for index, indicator in enumerate(indicators)
+                    ]
+                }
+            return {"tool": tool_name, "arguments": args}
+
+        @staticmethod
+        def _coerce(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                return [item for item in value.split(",") if item]
+            return []
+
+    async def fake_search(query, arguments):
+        searches.append((query, arguments))
+        return {"query": query, "provider": "local_chrome", "results": []}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+    monkeypatch.setattr(CLI, "_run_local_chrome_search", fake_search)
+
+    intent_plan = {
+        "needs_mcp": True,
+        "mcp_tools": [
+            {
+                "name": "get_macro_snapshot",
+                "arguments": {
+                    "indicator_codes": ["PMI_MFG", "PMI_SVC", "INDUSTRIAL_VALUE_ADDED", "M2_YOY", "PPI"],
+                    "limit": 120,
+                },
+            }
+        ],
+    }
+    collected = await CLI()._collect_client_mcp_data("港股抄底的信号是不是变了", {}, intent_plan)
+
+    initial_calls = [call for call in calls if call[0] == "get_macro_snapshot"]
+    assert initial_calls[0][0] == "get_macro_snapshot"
+    assert len(initial_calls) == 3
+    assert initial_calls[0][1].get("indicator_codes") == ["PMI_MFG", "PMI_SVC", "INDUSTRIAL_VALUE_ADDED", "M2_YOY", "PPI"]
+    assert initial_calls[1][1].get("indicator_codes") == ["PMI_MFG", "PMI_SVC", "INDUSTRIAL_VALUE_ADDED", "M2_YOY"]
+    assert initial_calls[2][1].get("indicator_codes") == ["PPI"]
+    assert initial_calls[0][1].get("limit") == 120
+    assert initial_calls[1][1].get("limit") == 80
+    assert initial_calls[2][1].get("limit") == 80
+    assert searches == []
+    assert any(key.startswith("get_macro_snapshot:") and not key.endswith(":error") for key in collected)
+    assert not any(key.startswith("web_search:") for key in collected)
+    assert any(tool == "get_macro_data" and args.get("indicator_codes") == ["PMI_MFG"] for tool, args in calls if isinstance(args, dict))
+
+
+@pytest.mark.asyncio
+async def test_collect_client_mcp_data_retries_batch_get_macro_data_by_chunks_with_indicator_calls(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            args = arguments or {}
+            calls.append((tool_name, dict(args)))
+            if tool_name == "batch_get_macro_data":
+                indicators = self._coerce(args.get("indicator_codes") or [])
+                return {
+                    "code": "MCP_TOOL_TIMEOUT",
+                    "message": "Tool dc66_batch_get_macro_data timed out.",
+                    "meta": {"asOf": "2026-07-01T00:00:00Z"},
+                }
+            if tool_name == "get_macro_data":
+                return {
+                    "rows": [
+                        {"indicator_code": args.get("keyword"), "date": "2026-07-01", "latest": 100}
+                    ]
+                }
+            return {"tool": tool_name, "arguments": args}
+
+        @staticmethod
+        def _coerce(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                return [item for item in value.split(",") if item]
+            return []
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    intent_plan = {
+        "needs_mcp": True,
+        "mcp_tools": [
+            {
+                "name": "batch_get_macro_data",
+                "arguments": {
+                    "indicator_codes": ["PMI_MFG", "PMI_SVC", "INDUSTRIAL_VALUE_ADDED", "M2_YOY", "PPI"],
+                    "limit": 120,
+                },
+            }
+        ],
+    }
+    collected = await CLI()._collect_client_mcp_data("红利资产宏观数据", {}, intent_plan)
+
+    macro_batch_calls = [call for call in calls if call[0] == "batch_get_macro_data"]
+    assert len(macro_batch_calls) == 9
+    assert macro_batch_calls[0][1].get("indicator_codes") == [
+        "PMI_MFG",
+        "PMI_SVC",
+        "INDUSTRIAL_VALUE_ADDED",
+        "M2_YOY",
+        "PPI",
+    ]
+    assert macro_batch_calls[1][1].get("indicator_codes") == ["PMI_MFG", "PMI_SVC", "INDUSTRIAL_VALUE_ADDED", "M2_YOY"]
+    assert macro_batch_calls[2][1].get("indicator_codes") == ["PMI_MFG", "PMI_SVC"]
+    assert macro_batch_calls[3][1].get("indicator_codes") == ["PMI_MFG"]
+    assert macro_batch_calls[4][1].get("indicator_codes") == ["PMI_SVC"]
+    assert macro_batch_calls[5][1].get("indicator_codes") == ["INDUSTRIAL_VALUE_ADDED", "M2_YOY"]
+    assert macro_batch_calls[6][1].get("indicator_codes") == ["INDUSTRIAL_VALUE_ADDED"]
+    assert macro_batch_calls[7][1].get("indicator_codes") == ["M2_YOY"]
+    assert macro_batch_calls[8][1].get("indicator_codes") == ["PPI"]
+    assert not any(key.startswith("web_search:") for key in collected)
+    assert any(tool_name == "get_macro_data" and args.get("keyword") == "PMI_MFG" for tool_name, args in calls)
+    assert any(tool_name == "get_macro_data" and args.get("keyword") == "PPI" for tool_name, args in calls)
+    assert any(tool_name == "get_macro_data" and args.get("indicator_codes") == ["PMI_MFG"] for tool_name, args in calls)
+    assert any(tool_name == "get_macro_data" and args.get("indicator_codes") == ["PPI"] for tool_name, args in calls)
+    assert any(tool_name == "get_macro_data" and args.get("startDate") == "2026-01-01" for tool_name, args in calls)
+    assert any(tool_name == "get_macro_data" and args.get("endDate") == "2026-06-16" for tool_name, args in calls)
+    assert sum(1 for tool_name, _ in calls if tool_name == "get_macro_data") == 5
+    assert any("get_macro_data:" in key for key in collected if isinstance(key, str))
+    assert all("batch_get_macro_data" not in key for key in collected)
+
+
+@pytest.mark.asyncio
+async def test_collect_client_mcp_data_retries_macro_snapshot_on_http_504_by_chunks(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            args = arguments or {}
+            calls.append((tool_name, dict(args)))
+            if tool_name == "get_macro_snapshot":
+                indicators = self._coerce(args.get("indicator_codes") or [])
+                if len(indicators) > 4:
+                    return {
+                        "error": "HTTP 504 Gateway Timeout",
+                        "detail": {
+                            "message": "Server error '504 Gateway Timeout' for url /tools/call",
+                            "code": "MCP_TOOL_TIMEOUT",
+                        },
+                    }
+                return {
+                    "rows": [
+                        {"indicator_code": indicator, "date": "2026-07-01", "latest": 100 + index}
+                        for index, indicator in enumerate(indicators)
+                    ]
+                }
+            return {"tool": tool_name, "arguments": args}
+
+        @staticmethod
+        def _coerce(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                return [item for item in value.split(",") if item]
+            return []
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    intent_plan = {
+        "needs_mcp": True,
+        "mcp_tools": [
+            {
+                "name": "get_macro_snapshot",
+                "arguments": {
+                    "indicator_codes": ["PMI_MFG", "PMI_SVC", "INDUSTRIAL_VALUE_ADDED", "M2_YOY", "PPI"],
+                    "limit": 120,
+                },
+            }
+        ],
+    }
+    collected = await CLI()._collect_client_mcp_data("港股抄底的信号是不是变了", {}, intent_plan)
+
+    initial_calls = [call for call in calls if call[0] == "get_macro_snapshot"]
+    assert len(initial_calls) == 3
+    assert initial_calls[0][1].get("indicator_codes") == ["PMI_MFG", "PMI_SVC", "INDUSTRIAL_VALUE_ADDED", "M2_YOY", "PPI"]
+    assert initial_calls[1][1].get("indicator_codes") == ["PMI_MFG", "PMI_SVC", "INDUSTRIAL_VALUE_ADDED", "M2_YOY"]
+    assert initial_calls[2][1].get("indicator_codes") == ["PPI"]
+    assert initial_calls[1][1].get("limit") == 80
+    assert initial_calls[2][1].get("limit") == 80
+    assert any(key.startswith("get_macro_snapshot:") and not key.endswith(":error") for key in collected)
+    assert not any(key.startswith("web_search:") for key in collected)
 
 
 def test_mcp_snapshot_lines_expand_batch_rows_to_readable_summary():
@@ -6133,6 +6396,23 @@ def test_super66_maps_mcp_arguments_to_production_schema():
         "get_astock_realtime",
         {"stockCode": "600519", "limit": 2},
     ) == ("dc66_get_astock_realtime", {"codes": "600519", "limit": 2})
+    assert mcp._normalize_tool_call(
+        "get_macro_snapshot",
+        {
+            "indicator_codes": ["PMI_MFG", "LPR_1Y"],
+            "latest_only": True,
+            "start_date": "2026-01-01",
+            "end_date": "2026-06-16",
+        },
+    ) == (
+        "dc66_get_macro_snapshot",
+        {
+            "indicatorCodes": ["PMI_MFG", "LPR_1Y"],
+            "latestOnly": True,
+            "startDate": "2026-01-01",
+            "endDate": "2026-06-16",
+        },
+    )
     assert mcp._normalize_tool_call(
         "get_astock_history",
         {"code": "600519", "start_date": "2026-01-01", "end_date": "2026-06-16", "adjust": "qfq"},

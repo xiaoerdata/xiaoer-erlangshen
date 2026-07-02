@@ -6952,6 +6952,7 @@ class CLI:
             "get_index_data",
             "batch_get_global_asset_data",
             "get_global_asset_data",
+            "get_macro_snapshot",
             "batch_get_macro_data",
             "get_macro_data",
             "get_macro_indicator",
@@ -7535,8 +7536,22 @@ class CLI:
                 else:
                     result = await self._call_mcp_tool_checked(mcp, name, arguments)
                     if self._mcp_value_has_error(result) and self._batch_tool_fallback_tools(name, arguments):
-                        collected[f"{key}:error"] = result
-                        await self._collect_batch_fallback_data(collected, name, arguments, mcp)
+                        retried = False
+                        if name in {"get_macro_snapshot", "batch_get_macro_data"} and self._should_retry_macro_tool_with_chunks(
+                            name,
+                            arguments,
+                            result,
+                        ):
+                            retried, all_macro_ok = await self._collect_macro_tool_fallback_by_chunks(
+                                collected,
+                                name,
+                                arguments,
+                                payload,
+                                mcp,
+                            )
+                        if not (retried and all_macro_ok):
+                            collected[f"{key}:error"] = result
+                            await self._collect_batch_fallback_data(collected, name, arguments, mcp)
                     else:
                         collected[key] = result
             except Exception as exc:
@@ -7545,6 +7560,198 @@ class CLI:
         if not collected:
             collected["note"] = "super-66 MCP / 本地网页线索暂不可用，本次仅使用用户问题和服务端场景映射。"
         return collected
+
+    def _macro_indicator_codes_from_args(self, arguments: dict) -> list[str]:
+        args = arguments if isinstance(arguments, dict) else {}
+        return self._coerce_label_list(
+            args.get("indicator_codes")
+            or args.get("indicatorCodes")
+            or args.get("indicator_keywords")
+            or args.get("indicatorKeywords")
+        )
+
+    def _macro_tool_chunk_size(self) -> int:
+        return 4
+
+    def _macro_tool_chunk_sizes(self) -> tuple[int, ...]:
+        return (self._macro_tool_chunk_size(), 2, 1)
+
+    def _macro_tool_default_date_window(self, payload: dict | None = None) -> dict[str, str]:
+        checked_at = self._text_field(payload.get("checked_at") if isinstance(payload, dict) else "")
+        if not checked_at:
+            checked_at = CLI_BENCHMARK_CHECKED_AT
+        try:
+            checked_at_date = datetime.fromisoformat(checked_at[:10]).date()
+        except ValueError:
+            return {}
+        return {
+            "startDate": f"{checked_at_date.year}-01-01",
+            "endDate": checked_at_date.isoformat(),
+        }
+
+    def _should_retry_macro_tool_with_chunks(self, name: str, arguments: dict, result) -> bool:
+        if name not in {"get_macro_snapshot", "batch_get_macro_data"}:
+            return False
+        if not self._mcp_value_has_error(result):
+            return False
+        if not self._macro_indicator_codes_from_args(arguments):
+            return False
+        for key in ("code", "message", "error", "detail"):
+            value = (result or {}).get(key, "")
+            value_text = self._text_field(value)
+            if isinstance(value, dict):
+                value_text = self._text_field(value.get("message", "")).lower()
+            else:
+                value_text = value_text.lower()
+            if any(token in value_text for token in ("timeout", "timed out", "gateway timeout", "504")):
+                return True
+        return False
+
+    def _coerce_macro_tool_limit(self, arguments: dict) -> dict:
+        fallback_args = dict(arguments or {})
+        if "limit" in fallback_args:
+            try:
+                fallback_args["limit"] = min(int(fallback_args["limit"]), 80)
+            except (TypeError, ValueError):
+                pass
+        return fallback_args
+
+    async def _collect_macro_tool_fallback_by_chunks(
+        self,
+        collected: dict,
+        name: str,
+        arguments: dict,
+        payload: dict | None,
+        mcp,
+    ) -> tuple[bool, bool]:
+        codes = self._macro_indicator_codes_from_args(arguments)
+        if not codes:
+            return False, False
+        date_window = self._macro_tool_default_date_window(payload)
+        retried = False
+        all_macro_ok = True
+        single_fallback_called = False
+
+        chunk_sizes = self._macro_tool_chunk_sizes()
+
+        async def collect_chunk(block: list[str], size_index: int) -> None:
+            nonlocal all_macro_ok, retried, single_fallback_called
+            if not block:
+                return
+
+            idx = min(size_index, len(chunk_sizes) - 1)
+            chunk_size = max(1, chunk_sizes[idx])
+            if idx + 1 < len(chunk_sizes):
+                next_size = max(1, chunk_sizes[idx + 1])
+                if next_size >= chunk_size:
+                    next_size = max(1, chunk_size // 2)
+            else:
+                next_size = 1
+            chunks = [block[i : i + chunk_size] for i in range(0, len(block), chunk_size)]
+            for chunk in chunks:
+                retried = True
+                chunk_args = self._coerce_macro_tool_limit(dict(arguments or {}))
+                chunk_args["indicator_codes"] = list(chunk)
+                for key, value in date_window.items():
+                    chunk_args.setdefault(key, value)
+                if name == "batch_get_macro_data":
+                    chunk_args.setdefault("latest_only", False)
+                self._show_progress(
+                    f"宏观指标工具分片重试: {self._mcp_tool_label(name, chunk_args)}"
+                )
+                try:
+                    chunk_result = await self._call_mcp_tool_checked(mcp, name, chunk_args)
+                except Exception as exc:
+                    chunk_result = self._sanitize_api_key_error(exc, "")
+
+                if not self._mcp_value_has_error(chunk_result):
+                    chunk_key = self._mcp_result_key(name, chunk_args, len(collected))
+                    collected[chunk_key] = chunk_result
+                    continue
+
+                if len(chunk) > 1 and size_index + 1 < len(chunk_sizes):
+                    split_chunks = [chunk[i : i + next_size] for i in range(0, len(chunk), next_size)]
+                    for split_chunk in split_chunks:
+                        await collect_chunk(split_chunk, size_index + 1)
+                    continue
+
+                if len(chunk) == 1:
+                    single_fallback_called = True
+                    if not await self._collect_macro_single_indicator_fallback(
+                        collected,
+                        name,
+                        chunk[0],
+                        arguments,
+                        payload,
+                        mcp,
+                    ):
+                        chunk_key = self._mcp_result_key(name, chunk_args, len(collected))
+                        collected[f"{chunk_key}:error"] = chunk_result
+                        all_macro_ok = False
+                    continue
+
+                chunk_key = self._mcp_result_key(name, chunk_args, len(collected))
+                collected[f"{chunk_key}:error"] = chunk_result
+                all_macro_ok = False
+
+        await collect_chunk(list(codes), 0)
+        if not single_fallback_called and not any(
+            str(key).startswith("get_macro_data:")
+            for key in collected
+            if isinstance(key, str)
+        ):
+            single_fallback_called = True
+            await self._collect_macro_single_indicator_fallback(
+                collected,
+                name,
+                codes[0],
+                arguments,
+                payload,
+                mcp,
+            )
+        return retried, all_macro_ok and single_fallback_called
+
+    async def _collect_macro_single_indicator_fallback(
+        self,
+        collected: dict,
+        source_name: str,
+        indicator_code: str,
+        arguments: dict,
+        payload: dict | None,
+        mcp,
+    ) -> bool:
+        args = self._coerce_macro_tool_limit(dict(arguments or {}))
+        latest_only = arguments.get("latest_only")
+        if latest_only is None:
+            latest_only = arguments.get("latestOnly")
+        if latest_only is None:
+            latest_only = True if source_name == "get_macro_snapshot" else False
+        normalized_code = self._text_field(indicator_code)
+        if not normalized_code:
+            normalized_code = self._text_field(arguments.get("keyword"))
+
+        fallback_args: dict[str, Any] = {
+            "keyword": normalized_code,
+            "indicator_codes": [normalized_code],
+            "latest_only": latest_only,
+            "limit": args.get("limit", 80),
+        }
+        for key, value in self._macro_tool_default_date_window(payload).items():
+            fallback_args.setdefault(key, value)
+        for key in ("startDate", "endDate", "start_date", "end_date"):
+            if key in args:
+                fallback_args[key] = args[key]
+        self._show_progress(f"单指标宏观回退: get_macro_data keyword={fallback_args['keyword']}")
+        key = self._mcp_result_key("get_macro_data", fallback_args, len(collected))
+        try:
+            fallback_result = await self._call_mcp_tool_checked(mcp, "get_macro_data", fallback_args)
+        except Exception as exc:
+            fallback_result = self._sanitize_api_key_error(exc, "")
+        if self._mcp_value_has_error(fallback_result):
+            collected[f"{key}:error"] = fallback_result
+            return False
+        collected[key] = fallback_result
+        return True
 
     async def _collect_batch_fallback_data(self, collected: dict, name: str, arguments: dict, mcp) -> None:
         if mcp is None:
@@ -7567,7 +7774,7 @@ class CLI:
             return f"批量接口未命中，回退读取: {label}"
         if name == "get_hot_stocks":
             return f"热门股票工具未命中，回退读取: {label}"
-        if name in {"batch_get_macro_data", "get_macro_data", "get_macro_indicator", "list_macro_indicators"}:
+        if name in {"batch_get_macro_data", "get_macro_snapshot", "get_macro_data", "get_macro_indicator", "list_macro_indicators"}:
             return f"宏观数据工具未命中，回退读取: {label}"
         return f"数据工具未命中，回退读取: {label}"
 
@@ -7685,6 +7892,9 @@ class CLI:
         if name in {"batch_get_astock_realtime", "get_astock_realtime_batch"}:
             codes = self._coerce_label_list(args.get("codes") or args.get("stock_codes") or args.get("stockCodes"))
             return [{"name": "get_astock_realtime", "arguments": {"code": code}} for code in codes[:12]]
+        if name == "get_macro_snapshot":
+            query = self._text_field(args.get("keyword")) or "中国 宏观 PMI CPI PPI LPR 社融 M2 汇率 利率 最新"
+            return [{"name": "web_search", "arguments": {"query": query, "count": 5}}]
         if name in {"batch_get_macro_data", "get_macro_data", "get_macro_indicator", "list_macro_indicators"}:
             query = self._text_field(args.get("keyword")) or "中国 宏观 PMI CPI PPI LPR 社融 M2 汇率 利率 最新"
             return [{"name": "web_search", "arguments": {"query": query, "count": 5}}]
@@ -9385,8 +9595,31 @@ class CLI:
         return links
 
     def _mcp_value_has_error(self, value) -> bool:
-        if isinstance(value, dict):
-            return any(str(key).lower() in {"error", "auth"} for key in value.keys())
+        if not isinstance(value, dict):
+            return False
+        if any(str(key).lower() in {"error", "auth"} for key in value.keys()):
+            return True
+        code = value.get("code")
+        if isinstance(code, str):
+            upper = code.strip().upper()
+            if (
+                upper.startswith("MCP_")
+                or upper.startswith("ERROR_")
+                or upper == "ERROR"
+                or "TIMEOUT" in upper
+                or "FAIL" in upper
+            ):
+                return True
+        message = value.get("message")
+        if isinstance(message, str):
+            lowered = message.lower()
+            if (
+                "timeout" in lowered
+                or "timed out" in lowered
+                or "failed" in lowered
+                or "error" in lowered
+            ):
+                return True
         return False
 
     def _extract_mcp_highlights(self, value) -> list[str]:

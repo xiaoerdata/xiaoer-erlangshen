@@ -476,6 +476,14 @@ class Super66MCP:
                 "latest_only": "latestOnly",
                 "latestOnly": "latestOnly",
             },
+            "get_macro_snapshot": {
+                "indicator_codes": "indicatorCodes",
+                "indicatorCodes": "indicatorCodes",
+                "indicator_keywords": "indicatorKeywords",
+                "indicatorNames": "indicatorKeywords",
+                "latest_only": "latestOnly",
+                "latestOnly": "latestOnly",
+            },
             "batch_get_macro_data": {
                 "indicator_codes": "indicatorCodes",
                 "indicatorCodes": "indicatorCodes",
