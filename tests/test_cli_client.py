@@ -5350,6 +5350,39 @@ def test_unknown_company_name_without_market_uses_global_discovery_not_astock():
     assert "search_astocks" not in {item["name"] for item in nasdaq_plan["mcp_tools"]}
 
 
+def test_general_investment_named_stock_defaults_to_global_discovery():
+    plan = CLI()._normalize_intent_plan(
+        {"intent": "general_investment", "needs_mcp": False, "mcp_tools": [], "tool_selection_source": "none"},
+        "分析英伟达",
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    assert plan["needs_mcp"] is True
+    assert plan["tool_selection_source"] == "client_default_by_intent"
+    assert "get_global_asset_list" in tool_names
+    assert "get_global_asset_data" in tool_names
+    assert {"name": "get_global_asset_list", "arguments": {"keyword": "英伟达", "limit": 10}} in plan["mcp_tools"]
+    assert "search_astocks" not in tool_names
+
+
+@pytest.mark.asyncio
+async def test_infer_intent_general_investment_named_stock_still_requests_mcp(monkeypatch):
+    class FakeLLMClient:
+        def __init__(self, settings, timeout=60.0):
+            pass
+
+        async def complete(self, messages, temperature=0.7, max_tokens=4096):
+            return '{"intent":"general_investment","needs_server_mapping":true,"needs_mcp":false,"mcp_tools":[],"rewritten_query":"分析英伟达","tool_selection_source":"local_llm"}'
+
+    plan = await CLI()._infer_client_intent("分析英伟达", {}, object(), FakeLLMClient)
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+
+    assert plan["needs_mcp"] is True
+    assert "get_global_asset_list" in tool_names
+    assert "get_global_asset_data" in tool_names
+    assert "search_astocks" not in tool_names
+
+
 def test_explicit_astock_unknown_name_adds_name_search_and_web_code_lookup():
     tools = CLI()._specific_astock_tools_from_query("分析 A股 宁德时代今年表现")
 
@@ -5572,6 +5605,37 @@ async def test_collect_global_asset_data_follows_asset_list_result(monkeypatch):
     assert calls[0] == ("get_global_asset_list", {"keyword": "英伟达", "limit": 10})
     assert any(name == "get_global_asset_data" and args["asset_name"] == "NVDA" for name, args in calls)
     assert "get_global_asset_data:NVDA" in data
+
+
+@pytest.mark.asyncio
+async def test_collect_general_investment_named_stock_plan_calls_global_asset_tools(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments or {}))
+            if tool_name == "get_global_asset_list":
+                return {"rows": [{"ticker": "NVDA", "name": "NVIDIA", "market": "NASDAQ"}]}
+            return {"latest": {"asset_name": (arguments or {}).get("asset_name"), "close": 158.2, "date": "2026-07-01"}}
+
+    async def fake_search(self, query, arguments):
+        return {"query": query, "provider": "local_chrome", "results": []}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+    monkeypatch.setattr(CLI, "_run_local_chrome_search", fake_search)
+
+    cli = CLI()
+    plan = cli._normalize_intent_plan(
+        {"intent": "general_investment", "needs_mcp": False, "mcp_tools": []},
+        "分析英伟达",
+    )
+    data = await cli._collect_client_mcp_data("分析英伟达", {}, plan)
+
+    called_names = [name for name, _ in calls]
+    assert called_names[0] == "get_global_asset_list"
+    assert "get_global_asset_data" in called_names
+    assert any(key.startswith("get_global_asset_list:") for key in data)
+    assert any(key.startswith("get_global_asset_data:") for key in data)
 
 
 @pytest.mark.asyncio

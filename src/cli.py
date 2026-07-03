@@ -8952,9 +8952,9 @@ class CLI:
         specific_tools = self._specific_market_tools_from_query(query)
         event_tools = self._event_market_default_tools(query) if self._is_event_market_query(query) else []
         discovery_tools = [] if (astock_tools or event_tools) else self._market_discovery_tools_from_query(query)
-        if normalized in {"single_asset", "data_lookup"} and astock_tools:
+        if normalized in {"single_asset", "data_lookup", "market_overview", "general_investment"} and astock_tools:
             return self._dedupe_mcp_tools(astock_tools + specific_tools + event_tools)
-        if normalized in {"single_asset", "data_lookup"} and discovery_tools:
+        if normalized in {"single_asset", "data_lookup", "market_overview", "general_investment"} and discovery_tools:
             return self._dedupe_mcp_tools(discovery_tools + specific_tools + event_tools)
         if normalized in {"single_asset", "data_lookup", "market_overview"} and specific_tools:
             return self._dedupe_mcp_tools(specific_tools + event_tools)
