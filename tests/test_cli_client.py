@@ -5755,6 +5755,46 @@ def test_grounded_astock_mcp_repairs_incomplete_model_answer():
     assert "具体交易结论还需要看你关注的市场" not in answer
 
 
+def test_grounded_global_asset_mcp_repairs_placeholder_final_answer():
+    cli = CLI()
+    mcp_data = {
+        "get_global_asset_list:英伟达": {
+            "rows": [
+                {"name": "英伟达", "ticker": "NVDA", "market": "美股", "exchange": "NASDAQ"}
+            ]
+        },
+        "get_global_asset_data:NVDA": {
+            "records": [
+                {"date": "2026-01-05", "symbol": "NVDA", "close": 188.12, "high": 190.0, "low": 180.0},
+                {"date": "2026-05-14", "symbol": "NVDA", "close": 230.0, "high": 235.74, "low": 228.0},
+                {"date": "2026-07-01", "symbol": "NVDA", "close": 197.58, "high": 200.0, "low": 193.0},
+                {"date": "2026-07-02", "symbol": "NVDA", "close": 194.83, "high": 198.0, "low": 192.35, "amount": 27_680_000_000},
+            ]
+        },
+    }
+
+    repaired = cli._repair_client_synthesis_with_grounded_mcp(
+        "分析英伟达",
+        {
+            "final_answer": "自然语言分析，包括总结、观点、建议、风控、缺失数据。",
+            "view": "自然语言综合判断",
+        },
+        mcp_data,
+        {"mcp_tools": [{"name": "get_global_asset_data", "arguments": {"asset_name": "NVDA"}}]},
+    )
+
+    answer = repaired["final_answer"]
+    assert "英伟达（NVDA）" in answer
+    assert "194.83美元" in answer
+    assert "-1.39%" in answer
+    assert "2026-01-05 收盘 188.12美元" in answer
+    assert "2026-07-02 收盘 194.83美元" in answer
+    assert "+3.57%" in answer
+    assert "235.74美元" in answer
+    assert "自然语言分析，包括" not in answer
+    assert "没有数据" not in answer
+
+
 def test_global_index_daily_table_name_does_not_trigger_ai_event_defaults():
     plan = CLI()._normalize_intent_plan(
         {"intent": "data_lookup", "needs_mcp": False, "mcp_tools": []},
@@ -6304,6 +6344,33 @@ def test_client_side_advice_uses_final_answer_without_reformatting():
     )
 
     assert result == final_answer
+
+
+def test_client_side_advice_does_not_display_placeholder_final_answer():
+    cli = CLI()
+    placeholder = "自然语言分析，包括总结、观点、建议、风控、缺失数据。"
+
+    assert cli._direct_client_final_answer({"final_answer": placeholder}) == ""
+
+    result = cli._format_client_advice(
+        query="分析英伟达",
+        matches=[{"scene": "市场监测与事件响应", "confidence": 0.72}],
+        synthesis={
+            "final_answer": placeholder,
+            "view": "基于 MCP 数据，英伟达（NVDA）最新收盘价为 194.83 美元，短期处在回调后的观察区间。",
+            "suggestions": ["等待企稳后再分批验证"],
+            "risk_controls": ["不要把短期反弹直接当成趋势确认"],
+            "missing_data": [],
+        },
+        raw_text="",
+        provider="Xiaomi MiMo",
+        model="mimo-v2.5",
+        data_inputs={"mcp_data": ["get_global_asset_data:NVDA"]},
+    )
+
+    assert placeholder not in result
+    assert "194.83 美元" in result
+    assert "等待企稳后再分批验证" in result
 
 
 def test_client_side_advice_recovers_final_answer_json_from_reasoning():
