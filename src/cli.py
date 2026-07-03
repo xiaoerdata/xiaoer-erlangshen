@@ -6651,6 +6651,7 @@ class CLI:
         return {
             "decision_owner": "本机大模型是主要编排者，负责理解上下文、选择 MCP/web_search、决定是否请求服务端映射和 chart artifact。",
             "client_role": "客户端只做工具白名单、参数归一化、授权沙箱、安全脱敏、连接失败兜底和资源链接落盘。",
+            "target_resolution": "具体股票/公司先判断所属市场；上市公司基本面、财报、业绩、估值或市场预期问题必须把 web_search 作为结构化数据库缺口补证。",
             "do_not": [
                 "不要先写死规则再让模型填空",
                 "不要只按关键词触发固定工具链",
@@ -6680,6 +6681,7 @@ class CLI:
             "primary_router": "local_llm_context_router",
             "principle": "本机大模型根据完整上下文判断用户真实任务，客户端只做工具白名单、参数归一化和故障兜底。",
             "orchestration_protocol": self._agent_orchestration_protocol(),
+            "target_resolution_contract": "用户问股票/公司时由模型判断所属市场；中文名称不等于 A股。用户问财报、基本面或市场预期时，模型必须主动生成 web_search 查询以补齐公开财报和一致预期线索。",
             "avoid": [
                 "不要只因为出现某个关键词就固定路由",
                 "不要在已有 MCP/web_search 数据时继续机械追问基础行情",
@@ -6797,6 +6799,7 @@ class CLI:
                             "你是编排决策者，不要先写死规则再让模型填空；必须根据 agent_orchestration_protocol 输出可复盘的 route_summary、tool_rationale、data_strategy 和 artifact_plan。"
                             "当用户问具体股票/公司时，必须先在 evidence_targets 判断所属市场；中文名称不等于 A股，"
                             "例如英伟达/NVIDIA/NVDA 应识别为美股或全球资产候选，先走 get_global_asset_list 或 get_global_asset_data。"
+                            "当用户问上市公司基本面、财报、业绩、估值或市场预期时，如果结构化数据库没有财报字段，必须主动追加 web_search 查询最新财报、盈利指引、分析师预期和目标价。"
                             "当用户问宏观形势、经济环境、利率、流动性等问题时，evidence_targets.asset_scope 必须是宏观，"
                             "并选择宏观指标工具，不要生成 search_astocks 或“股票代码 A股”查询。"
                             "你要灵活理解用户真正想问什么，并依据 selection_policy、data_recipes、route_plans、"
@@ -6958,7 +6961,22 @@ class CLI:
                 )
                 note = "检测到微盘/小市值策略问题，客户端强制以华证微盘为主基准，并补充微盘成交额占比、量价、流动性和主线强度验证。"
                 tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
-        macro_guardrail_tools = [] if microcap_tools else self._macro_overview_guardrail_tools(query)
+        global_stock_tools = [] if microcap_tools else self._market_discovery_tools_from_query(query)
+        if global_stock_tools:
+            before = list(tools)
+            tools = self._drop_misdirected_macro_tools(self._drop_misdirected_astock_lookup_tools(tools))
+            tools = self._dedupe_mcp_tools(global_stock_tools + tools)
+            needs_mcp = True
+            if tools != before:
+                source = tool_selection_source or route_source or "local_llm"
+                tool_selection_source = (
+                    source
+                    if "client_global_stock_discovery" in source
+                    else f"{source}+client_global_stock_discovery"
+                )
+                note = "检测到具体海外/全球上市公司标的，客户端追加全球资产目录、行情和必要的财报/预期 web_search，避免误走宏观概览。"
+                tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
+        macro_guardrail_tools = [] if (microcap_tools or global_stock_tools) else self._macro_overview_guardrail_tools(query)
         if macro_guardrail_tools:
             before = list(tools)
             tools = self._drop_misdirected_astock_lookup_tools(tools)
@@ -6988,7 +7006,7 @@ class CLI:
                 note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
                 tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
             needs_mcp = True
-        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools) else self._specific_astock_tools_from_query(query)
+        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools or global_stock_tools) else self._specific_astock_tools_from_query(query)
         if astock_tools:
             before = list(tools)
             tools = self._dedupe_mcp_tools(astock_tools + tools)
@@ -7467,6 +7485,7 @@ class CLI:
             "selection_policy": [
                 "优先让大模型根据上下文选择工具组合，不用硬编码关键词替代理解",
                 "用户给出具体股票/公司时，先由大模型判断所属市场；中文名称不等于 A股，海外公司和美股科技公司应走 get_global_asset_list/get_global_asset_data",
+                "用户问上市公司基本面、财报、业绩、估值或市场预期时，如果结构化数据库没有财报字段，必须主动追加 web_search 查询最新财报、盈利指引、分析师预期和目标价",
                 "只有明确 A股、给出沪深 A股代码，或模型已经判断为 A股时，才使用 search_astocks/get_astock_realtime/get_astock_history",
                 "上市市场不确定时，先用 get_global_asset_list + 中性 web_search 核验代码/交易所，再决定后续行情工具",
                 "行情和产品数据优先 super-66 MCP；新闻和公开网页补充 web_search",
@@ -7784,7 +7803,25 @@ class CLI:
                     note = "检测到微盘/小市值策略问题，客户端强制以华证微盘为主基准，并补充微盘成交额占比、量价、流动性和主线强度验证。"
                     previous = self._text_field(intent_plan.get("tool_selection_note"))
                     intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
-        macro_guardrail_tools = [] if microcap_tools else self._macro_overview_guardrail_tools(query)
+        global_stock_tools = [] if microcap_tools else self._market_discovery_tools_from_query(query)
+        if global_stock_tools:
+            before = list(tools)
+            tools = self._drop_misdirected_macro_tools(self._drop_misdirected_astock_lookup_tools(tools))
+            tools = self._dedupe_mcp_tools(global_stock_tools + tools)
+            if isinstance(intent_plan, dict):
+                intent_plan["needs_mcp"] = True
+                intent_plan["mcp_tools"] = tools
+                if tools != before:
+                    source = self._text_field(intent_plan.get("tool_selection_source") or intent_plan.get("route_source") or "local_llm")
+                    intent_plan["tool_selection_source"] = (
+                        source
+                        if "client_global_stock_discovery" in source
+                        else f"{source}+client_global_stock_discovery"
+                    )
+                    note = "检测到具体海外/全球上市公司标的，客户端追加全球资产目录、行情和必要的财报/预期 web_search，避免误走宏观概览。"
+                    previous = self._text_field(intent_plan.get("tool_selection_note"))
+                    intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
+        macro_guardrail_tools = [] if (microcap_tools or global_stock_tools) else self._macro_overview_guardrail_tools(query)
         if macro_guardrail_tools:
             before = list(tools)
             tools = self._drop_misdirected_astock_lookup_tools(tools)
@@ -7816,7 +7853,7 @@ class CLI:
                 note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
                 previous = self._text_field(intent_plan.get("tool_selection_note"))
                 intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
-        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools) else self._specific_astock_tools_from_query(query)
+        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools or global_stock_tools) else self._specific_astock_tools_from_query(query)
         astock_guardrail = "client_astock_guardrail"
         if not astock_tools:
             astock_tools = self._specific_astock_tools_from_followup_context(query, intent_plan)
@@ -8539,6 +8576,7 @@ class CLI:
                 continue
             if self._evidence_target_is_astock(target):
                 tools.extend(self._astock_tools_for_target(code=ticker, keyword=topic or ticker))
+                tools.extend(self._company_fundamental_search_tools(query, keyword=topic or ticker, ticker=ticker))
                 continue
             if self._evidence_target_is_global_or_unknown_stock(target):
                 keyword = topic or ticker
@@ -8552,6 +8590,7 @@ class CLI:
                     search_queries = [f"{keyword} 股票代码 所属市场 交易所 最新"]
                 for search_query in search_queries[:2]:
                     tools.append({"name": "web_search", "arguments": {"query": search_query, "count": 5}})
+                tools.extend(self._company_fundamental_search_tools(query, keyword=keyword, ticker=ticker))
         return self._dedupe_mcp_tools(tools)
 
     def _drop_tools_conflicting_with_evidence_targets(self, tools: list[dict], evidence_targets: list[dict]) -> list[dict]:
@@ -8691,6 +8730,32 @@ class CLI:
             cleaned.append(item)
         return cleaned
 
+    def _drop_misdirected_macro_tools(self, tools: list[dict]) -> list[dict]:
+        macro_tool_names = {
+            "get_macro_snapshot",
+            "batch_get_macro_data",
+            "get_macro_data",
+            "get_macro_indicator",
+            "list_macro_indicators",
+        }
+        cleaned = []
+        for item in tools or []:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if name in macro_tool_names:
+                continue
+            if name == "web_search":
+                arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+                query = re.sub(r"\s+", "", self._text_field(arguments.get("query")).lower())
+                if "宏观" in query or (
+                    "中国" in query
+                    and any(marker in query for marker in ("pmi", "cpi", "ppi", "社融", "工业增加值", "lpr", "利率", "流动性"))
+                ):
+                    continue
+            cleaned.append(item)
+        return cleaned
+
     def _default_market_overview_tools(self, query: str = "") -> list[dict]:
         search_query = self._market_overview_search_query(query)
         macro_query = self._market_overview_macro_search_query(query)
@@ -8760,7 +8825,6 @@ class CLI:
             "经济形势",
             "经济环境",
             "经济数据",
-            "基本面",
             "pmi",
             "cpi",
             "ppi",
@@ -9016,7 +9080,9 @@ class CLI:
             keyword = self._named_asset_keyword_from_query(query)
         if not keyword:
             return []
-        return self._astock_tools_for_target(code=code, keyword=keyword)
+        tools = self._astock_tools_for_target(code=code, keyword=keyword)
+        tools.extend(self._company_fundamental_search_tools(query, keyword=keyword, ticker=code))
+        return self._dedupe_mcp_tools(tools)
 
     def _query_explicitly_astock(self, query: str) -> bool:
         text = self._text_field(query)
@@ -9126,18 +9192,78 @@ class CLI:
     def _market_discovery_tools_from_query(self, query: str) -> list[dict]:
         if self._query_explicitly_astock(query):
             return []
-        keyword = self._named_asset_keyword_from_query(query)
+        known_keyword, known_ticker = self._known_global_stock_target_from_query(query)
+        keyword = known_keyword or self._named_asset_keyword_from_query(query)
         if not keyword:
             return []
         window = self._recent_market_window_args(days=180, query=query)
-        return [
+        asset_name = known_ticker or keyword
+        tools = [
             {"name": "get_global_asset_list", "arguments": {"keyword": keyword, "limit": 10}},
-            {"name": "get_global_asset_data", "arguments": {"asset_name": keyword, **window, "limit": 5000}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": asset_name, **window, "limit": 5000}},
             {
                 "name": "web_search",
                 "arguments": {"query": f"{keyword} 股票代码 所属市场 交易所 美股 港股 A股 最新", "count": 5},
             },
         ]
+        tools.extend(self._company_fundamental_search_tools(query, keyword=keyword, ticker=known_ticker))
+        return self._dedupe_mcp_tools(tools)
+
+    def _known_global_stock_target_from_query(self, query: str) -> tuple[str, str]:
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        if not text:
+            return "", ""
+        known = (
+            (("谷歌", "google", "alphabet", "googl", "goog"), "谷歌", "GOOGL"),
+            (("英伟达", "nvidia", "nvda"), "英伟达", "NVDA"),
+            (("苹果", "apple", "aapl"), "苹果", "AAPL"),
+            (("微软", "microsoft", "msft"), "微软", "MSFT"),
+            (("亚马逊", "amazon", "amzn"), "亚马逊", "AMZN"),
+            (("特斯拉", "tesla", "tsla"), "特斯拉", "TSLA"),
+            (("meta", "facebook", "脸书"), "Meta", "META"),
+        )
+        for aliases, keyword, ticker in known:
+            if any(alias in text for alias in aliases):
+                return keyword, ticker
+        return "", ""
+
+    def _company_fundamental_search_tools(self, query: str, *, keyword: str = "", ticker: str = "") -> list[dict]:
+        if not self._needs_company_fundamental_web_search(query):
+            return []
+        label = self._text_field(keyword or ticker)
+        code = self._text_field(ticker)
+        if not label and not code:
+            return []
+        target = " ".join(item for item in (label, code) if item)
+        queries = [
+            f"{target} 最新财报 营收 利润 指引 资本开支 现金流 估值",
+            f"{target} 市场预期 分析师 目标价 盈利预测 业务增长 风险",
+        ]
+        return [{"name": "web_search", "arguments": {"query": item, "count": 5}} for item in queries]
+
+    def _needs_company_fundamental_web_search(self, query: str) -> bool:
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        if not text:
+            return False
+        markers = (
+            "财报",
+            "基本面",
+            "估值",
+            "营收",
+            "利润",
+            "盈利",
+            "业绩",
+            "现金流",
+            "市场预期",
+            "分析师",
+            "目标价",
+            "fundamental",
+            "earnings",
+            "revenue",
+            "guidance",
+            "valuation",
+        )
+        return any(marker in text for marker in markers)
 
     def _specific_astock_tools_from_followup_context(self, query: str, intent_plan: dict | None = None) -> list[dict]:
         if not self._is_contextual_followup_query(query, intent_plan):
@@ -9205,15 +9331,15 @@ class CLI:
     def _default_tools_for_intent(self, intent: str, query: str = "") -> list[dict]:
         normalized = self._text_field(intent).lower()
         macro_tools = self._macro_overview_guardrail_tools(query)
-        if macro_tools and normalized in {"single_asset", "data_lookup", "market_overview", "macro", "risk", "general_investment"}:
-            return self._dedupe_mcp_tools(macro_tools)
         astock_tools = self._specific_astock_tools_from_query(query)
         specific_tools = self._specific_market_tools_from_query(query)
         event_tools = self._event_market_default_tools(query) if self._is_event_market_query(query) else []
         discovery_tools = [] if (astock_tools or event_tools) else self._market_discovery_tools_from_query(query)
-        if normalized in {"single_asset", "data_lookup", "market_overview", "general_investment"} and astock_tools:
+        if macro_tools and not (astock_tools or discovery_tools) and normalized in {"single_asset", "data_lookup", "market_overview", "macro", "risk", "general_investment"}:
+            return self._dedupe_mcp_tools(macro_tools)
+        if normalized in {"single_asset", "data_lookup", "market_overview", "general_investment", "macro"} and astock_tools:
             return self._dedupe_mcp_tools(astock_tools + specific_tools + event_tools)
-        if normalized in {"single_asset", "data_lookup", "market_overview", "general_investment"} and discovery_tools:
+        if normalized in {"single_asset", "data_lookup", "market_overview", "general_investment", "macro"} and discovery_tools:
             return self._dedupe_mcp_tools(discovery_tools + specific_tools + event_tools)
         if normalized in {"single_asset", "data_lookup", "market_overview"} and specific_tools:
             return self._dedupe_mcp_tools(specific_tools + event_tools)

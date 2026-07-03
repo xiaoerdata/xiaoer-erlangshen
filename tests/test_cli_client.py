@@ -5350,6 +5350,34 @@ def test_unknown_company_name_without_market_uses_global_discovery_not_astock():
     assert "search_astocks" not in {item["name"] for item in nasdaq_plan["mcp_tools"]}
 
 
+def test_google_company_fundamental_query_overrides_bad_macro_plan():
+    query = "你再分析一下谷歌的全方位情况，从股价到基本面财报再到市场预期，做一个综合的分析。"
+    plan = CLI()._normalize_intent_plan(
+        {
+            "intent": "macro",
+            "needs_mcp": True,
+            "mcp_tools": [
+                {"name": "get_macro_snapshot", "arguments": {"indicator_codes": ["PMI_MFG"], "limit": 80}},
+                {"name": "batch_get_macro_data", "arguments": {"indicator_codes": ["PMI_MFG"], "limit": 240}},
+                {"name": "web_search", "arguments": {"query": "中国 今日 宏观 数据 PMI CPI 利率", "count": 5}},
+            ],
+            "tool_selection_source": "local_llm",
+        },
+        query,
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    web_queries = [item["arguments"].get("query", "") for item in plan["mcp_tools"] if item["name"] == "web_search"]
+    assert "get_macro_snapshot" not in tool_names
+    assert "batch_get_macro_data" not in tool_names
+    assert {"name": "get_global_asset_list", "arguments": {"keyword": "谷歌", "limit": 10}} in plan["mcp_tools"]
+    assert any(item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "GOOGL" for item in plan["mcp_tools"])
+    assert any("谷歌 GOOGL 最新财报" in query for query in web_queries)
+    assert any("谷歌 GOOGL 市场预期" in query for query in web_queries)
+    assert all("中国 今日 宏观" not in query for query in web_queries)
+    assert "client_global_stock_discovery" in plan["tool_selection_source"]
+
+
 def test_general_investment_named_stock_defaults_to_global_discovery():
     plan = CLI()._normalize_intent_plan(
         {"intent": "general_investment", "needs_mcp": False, "mcp_tools": [], "tool_selection_source": "none"},
@@ -5676,6 +5704,55 @@ async def test_collect_evidence_target_global_stock_drops_bad_astock_tool(monkey
     assert calls[0] == ("get_global_asset_list", {"keyword": "英伟达", "limit": 10})
     assert any(name == "get_global_asset_data" and args["asset_name"] == "NVDA" for name, args in calls)
     assert "get_global_asset_data:NVDA" in data
+
+
+@pytest.mark.asyncio
+async def test_collect_google_fundamental_query_drops_macro_tools_and_searches_web(monkeypatch):
+    calls = []
+    web_queries = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments or {}))
+            if tool_name in {"get_macro_snapshot", "batch_get_macro_data", "get_macro_data"}:
+                raise AssertionError("company analysis should not execute macro defaults")
+            if tool_name == "get_global_asset_list":
+                return {"rows": [{"ticker": "GOOGL", "name": "Alphabet", "market": "NASDAQ"}]}
+            return {"latest": {"asset_name": (arguments or {}).get("asset_name"), "close": 181.0, "date": "2026-07-01"}}
+
+    async def fake_search(self, query, arguments):
+        web_queries.append(query)
+        return {"query": query, "provider": "local_chrome", "results": [{"title": query, "url": "https://example.com"}]}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+    monkeypatch.setattr(CLI, "_run_local_chrome_search", fake_search)
+
+    query = "你再分析一下谷歌的全方位情况，从股价到基本面财报再到市场预期，做一个综合的分析。"
+    plan = {
+        "intent": "macro",
+        "needs_mcp": True,
+        "mcp_tools": [
+            {"name": "get_macro_snapshot", "arguments": {"indicator_codes": ["PMI_MFG"], "limit": 80}},
+            {"name": "batch_get_macro_data", "arguments": {"indicator_codes": ["PMI_MFG"], "limit": 240}},
+        ],
+    }
+
+    data = await CLI()._collect_client_mcp_data(query, {}, plan)
+
+    called_names = [name for name, _ in calls]
+    assert "get_macro_snapshot" not in called_names
+    assert "batch_get_macro_data" not in called_names
+    assert calls[0] == ("get_global_asset_list", {"keyword": "谷歌", "limit": 10})
+    assert any(name == "get_global_asset_data" and args["asset_name"] == "GOOGL" for name, args in calls)
+    assert any("谷歌 GOOGL 最新财报" in item for item in web_queries)
+    assert any("谷歌 GOOGL 市场预期" in item for item in web_queries)
+    assert "get_global_asset_data:GOOGL" in data
+    assert any(
+        str(key).startswith("web_search:")
+        and isinstance(value, dict)
+        and "谷歌 GOOGL 最新财报" in value.get("query", "")
+        for key, value in data.items()
+    )
 
 
 @pytest.mark.asyncio
