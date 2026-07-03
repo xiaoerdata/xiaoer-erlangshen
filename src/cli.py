@@ -6566,6 +6566,7 @@ class CLI:
                 "严格事实边界：股票价格、指数点位、涨跌幅、支撑位、压力位、区间收益和图表数值只能来自 mcp_data 或用户显式提供的数据；不能用模型记忆、历史印象或估算补数",
                 "如果是具体股票问题但 mcp_data 没有 get_astock_realtime/get_astock_history 的真实价格或收盘价，必须明确说本轮没有拿到可核验行情；禁止输出任何具体股价、支撑位、压力位或走势图 artifacts",
                 "如需给支撑/压力，只能基于 MCP 历史 high/low/close 明确推导，并说明是观察位而不是凭经验判断",
+                "涉及公司基本面、财报、估值、今年涨跌、核心驱动或事件性结论（如财报是否驱动、政策是否传导、监管是否扰动）时，必须先确认 web_search 有对应事件、公告、官方来源；未确认到证据前，不得给‘可能/一定/大概率’等因果判断，直接按‘待验证事件’降级并补齐 missing_data",
                 "凡涉及区间收益率、资产表现对比、图表收益值，优先使用起始收盘价和结束收盘价按 end_close / start_close - 1 计算；不要把单日涨跌幅字段当作区间收益",
                 "对于“今天行情怎么样/市场怎么看”这类宽泛问题，要把它当成市场概览任务处理，必须先引用 market_data_brief.snapshots 或网页线索，再给方向性解读",
                 "宽泛行情问题已经有 market_data_brief.snapshots 时，missing_data 不要再列具体指数、实时点位、新闻事件等基础行情项；只保留用户持仓、周期、仓位、风险偏好等个性化落地信息，没有就留空",
@@ -6800,6 +6801,7 @@ class CLI:
                             "你是编排决策者，不要先写死规则再让模型填空；必须根据 agent_orchestration_protocol 输出可复盘的 route_summary、tool_rationale、data_strategy 和 artifact_plan。"
                             "当用户问具体股票/公司时，必须先在 evidence_targets 判断所属市场；中文名称不等于 A股，"
                             "例如英伟达/NVIDIA/NVDA 应识别为美股或全球资产候选，先走 get_global_asset_list 或 get_global_asset_data。"
+                            "当用户要求解释‘核心驱动’‘今年涨跌原因’‘事件驱动’‘估值变化原因’时，必须把因果验证线索写进 evidence_targets.search_queries，并确保包含 web_search；没有检索到事件证据前不要输出因果结论。"
                             "当用户问上市公司基本面、财报、业绩、估值或市场预期时，如果结构化数据库没有财报字段，必须主动追加 web_search 查询最新财报、盈利指引、分析师预期和目标价。"
                             "基本面 web_search 优先使用中国网络可访问且较专业的信息源，例如东方财富美股、英为财情、新浪财经美股，再用公司 IR/SEC/Nasdaq 做官方交叉验证。"
                             "当用户问宏观形势、经济环境、利率、流动性等问题时，evidence_targets.asset_scope 必须是宏观，"
