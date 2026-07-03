@@ -315,6 +315,38 @@ async def test_live_answer_stream_finalizes_in_place_and_suppresses_duplicate(mo
     assert cli._live_answer_state is None
 
 
+@pytest.mark.asyncio
+async def test_live_answer_stream_non_tty_does_not_repeat_full_preview(monkeypatch, capsys):
+    monkeypatch.setenv("ERLANGSHEN_LLM_STREAM", "on")
+    monkeypatch.setenv("ERLANGSHEN_ANSWER_STREAM", "force")
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+    class FakeClient:
+        async def stream_complete_events(self, messages, *, temperature, max_tokens):
+            yield {"type": "content", "text": '{"view":"第一段，'}
+            yield {"type": "content", "text": '第二段，'}
+            yield {"type": "content", "text": '第三段。","suggestions":[]}'}
+
+        async def complete(self, messages, *, temperature, max_tokens):
+            raise AssertionError("non-streaming fallback should not run")
+
+    cli = CLI()
+    result = await cli._complete_llm_response(
+        FakeClient(),
+        [{"role": "user", "content": "hello"}],
+        temperature=0.1,
+        max_tokens=64,
+        json_preview_field="view",
+    )
+
+    output = capsys.readouterr().out
+    assert result == '{"view":"第一段，第二段，第三段。","suggestions":[]}'
+    assert output.count("╭─ 二郎神") == 1
+    assert output.count("第一段") == 1
+    assert "第三段" not in output
+
+
 def test_partial_json_string_field_extracts_incomplete_view():
     cli = CLI()
     assert cli._extract_partial_json_string_field('{"view":"先看\\n第二段', "view") == "先看\n第二段"
@@ -3261,6 +3293,59 @@ async def test_collect_client_mcp_data_falls_back_when_batch_tool_fails(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_collect_macro_overview_query_drops_astock_and_calls_macro_tools(monkeypatch):
+    calls = []
+    searches = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            args = arguments or {}
+            calls.append((tool_name, dict(args)))
+            if tool_name in {"get_macro_snapshot", "batch_get_macro_data"}:
+                codes = args.get("indicator_codes") or []
+                return {
+                    "rows": [
+                        {"indicator_code": code, "date": "2026-07-01", "latest": 50 + index}
+                        for index, code in enumerate(codes)
+                    ]
+                }
+            if tool_name == "batch_get_index_data":
+                return {"rows": [{"index_name": "沪深300", "date": "2026-07-01", "close": 4000}]}
+            if tool_name == "batch_get_global_asset_data":
+                return {"rows": [{"asset_name": "美元指数", "date": "2026-07-01", "close": 100}]}
+            raise AssertionError(f"unexpected MCP tool: {tool_name}")
+
+    async def fake_search(self, query, arguments):
+        searches.append((query, arguments))
+        return {"query": query, "provider": "local_chrome", "results": []}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+    monkeypatch.setattr(CLI, "_run_local_chrome_search", fake_search)
+
+    intent_plan = {
+        "intent": "single_asset",
+        "needs_mcp": True,
+        "mcp_tools": [
+            {"name": "search_astocks", "arguments": {"keyword": "宏观形势", "limit": 5}},
+            {"name": "web_search", "arguments": {"query": "宏观形势 股票代码 A股 最新", "count": 5}},
+        ],
+        "tool_selection_source": "local_llm",
+    }
+    collected = await CLI()._collect_client_mcp_data("分析最近的宏观形势", {}, intent_plan)
+
+    called_names = [name for name, _ in calls]
+    assert "search_astocks" not in called_names
+    assert "get_macro_snapshot" in called_names
+    assert "batch_get_macro_data" in called_names
+    assert "batch_get_index_data" in called_names
+    assert "batch_get_global_asset_data" in called_names
+    assert "client_macro_guardrail" in intent_plan["tool_selection_source"]
+    assert all("股票代码 A股" not in query for query, _ in searches)
+    assert any(key.startswith("get_macro_snapshot:") for key in collected)
+    assert any(key.startswith("batch_get_macro_data:") for key in collected)
+
+
+@pytest.mark.asyncio
 async def test_collect_client_mcp_data_falls_back_when_macro_snapshot_fails(monkeypatch):
     calls = []
 
@@ -4957,6 +5042,79 @@ def test_macro_intent_defaults_include_hk_index_and_global_assets():
     )
 
 
+def test_macro_overview_query_overrides_bad_astock_tool_plan():
+    cli = CLI()
+    plan = cli._normalize_intent_plan(
+        {
+            "intent": "single_asset",
+            "needs_mcp": True,
+            "mcp_tools": [
+                {"name": "search_astocks", "arguments": {"keyword": "宏观形势", "limit": 5}},
+                {"name": "web_search", "arguments": {"query": "宏观形势 股票代码 A股 最新", "count": 5}},
+            ],
+            "tool_selection_source": "local_llm",
+        },
+        "分析最近的宏观形势",
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    assert "search_astocks" not in tool_names
+    assert "get_macro_snapshot" in tool_names
+    assert "batch_get_macro_data" in tool_names
+    assert "batch_get_index_data" in tool_names
+    assert "batch_get_global_asset_data" in tool_names
+    assert "client_macro_guardrail" in plan["tool_selection_source"]
+    assert all("股票代码 A股" not in item.get("arguments", {}).get("query", "") for item in plan["mcp_tools"])
+    macro_codes = {
+        code
+        for item in plan["mcp_tools"]
+        if item["name"] in {"get_macro_snapshot", "batch_get_macro_data"}
+        for code in item["arguments"].get("indicator_codes", [])
+    }
+    assert {"PMI_MFG", "INDUSTRIAL_VALUE_ADDED", "SOCIAL_FINANCE", "LPR_1Y", "CN_10Y_YIELD"}.issubset(macro_codes)
+
+
+def test_macro_evidence_targets_override_bad_astock_tool_plan_without_keyword_route():
+    cli = CLI()
+    plan = cli._normalize_intent_plan(
+        {
+            "intent": "single_asset",
+            "needs_mcp": True,
+            "evidence_targets": [
+                {
+                    "raw_mention": "宏观形势",
+                    "resolved_topic": "中国宏观形势",
+                    "asset_scope": "宏观",
+                    "asset_type": "macro",
+                    "evidence_need": "宏观环境",
+                    "indicator_codes": ["PMI_MFG", "SOCIAL_FINANCE", "LPR_1Y"],
+                    "preferred_tools": ["get_macro_snapshot", "batch_get_macro_data"],
+                }
+            ],
+            "mcp_tools": [
+                {"name": "search_astocks", "arguments": {"keyword": "宏观形势", "limit": 5}},
+                {"name": "web_search", "arguments": {"query": "宏观形势 股票代码 A股 最新", "count": 5}},
+            ],
+            "tool_selection_source": "local_llm",
+        },
+        "分析最近的宏观形势",
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    assert "search_astocks" not in tool_names
+    assert "get_macro_snapshot" in tool_names
+    assert "batch_get_macro_data" in tool_names
+    assert "client_evidence_target_contract" in plan["tool_selection_source"]
+    assert all("股票代码 A股" not in item.get("arguments", {}).get("query", "") for item in plan["mcp_tools"])
+    macro_codes = {
+        code
+        for item in plan["mcp_tools"]
+        if item["name"] in {"get_macro_snapshot", "batch_get_macro_data"}
+        for code in item["arguments"].get("indicator_codes", [])
+    }
+    assert {"PMI_MFG", "SOCIAL_FINANCE", "LPR_1Y"}.issubset(macro_codes)
+
+
 def test_index_tool_accepts_asset_alias_arguments():
     plan = CLI()._normalize_intent_plan(
         {
@@ -5222,6 +5380,43 @@ def test_llm_selected_global_asset_tools_are_not_augmented_with_astock_guardrail
     assert {"name": "get_global_asset_data", "arguments": {"asset_name": "NVDA", "limit": 5000}} in plan["mcp_tools"]
 
 
+def test_evidence_targets_global_stock_override_bad_astock_tool_plan():
+    cli = CLI()
+    plan = cli._normalize_intent_plan(
+        {
+            "intent": "single_asset",
+            "needs_mcp": True,
+            "evidence_targets": [
+                {
+                    "raw_mention": "英伟达",
+                    "resolved_topic": "英伟达",
+                    "asset_scope": "美股",
+                    "asset_type": "stock",
+                    "listing_market": "NASDAQ",
+                    "ticker_or_code": "NVDA",
+                    "preferred_tools": ["get_global_asset_list", "get_global_asset_data"],
+                }
+            ],
+            "mcp_tools": [
+                {"name": "search_astocks", "arguments": {"keyword": "英伟达", "limit": 5}},
+                {"name": "web_search", "arguments": {"query": "英伟达 股票代码 A股 最新", "count": 5}},
+            ],
+            "tool_selection_source": "local_llm",
+        },
+        "分析一下英伟达",
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    assert "search_astocks" not in tool_names
+    assert {"name": "get_global_asset_list", "arguments": {"keyword": "英伟达", "limit": 10}} in plan["mcp_tools"]
+    assert any(
+        item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "NVDA"
+        for item in plan["mcp_tools"]
+    )
+    assert all("股票代码 A股" not in item.get("arguments", {}).get("query", "") for item in plan["mcp_tools"])
+    assert "client_evidence_target_contract" in plan["tool_selection_source"]
+
+
 def test_index_performance_query_does_not_trigger_astock_guardrail():
     cli = CLI()
 
@@ -5374,6 +5569,46 @@ async def test_collect_global_asset_data_follows_asset_list_result(monkeypatch):
         },
     )
 
+    assert calls[0] == ("get_global_asset_list", {"keyword": "英伟达", "limit": 10})
+    assert any(name == "get_global_asset_data" and args["asset_name"] == "NVDA" for name, args in calls)
+    assert "get_global_asset_data:NVDA" in data
+
+
+@pytest.mark.asyncio
+async def test_collect_evidence_target_global_stock_drops_bad_astock_tool(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments or {}))
+            if tool_name == "search_astocks":
+                raise AssertionError("global stock evidence target should not call A-share search")
+            if tool_name == "get_global_asset_list":
+                return {"rows": [{"ticker": "NVDA", "name": "NVIDIA", "market": "NASDAQ"}]}
+            return {"latest": {"asset_name": (arguments or {}).get("asset_name"), "close": 158.2, "date": "2026-07-01"}}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    plan = {
+        "intent": "single_asset",
+        "needs_mcp": True,
+        "evidence_targets": [
+            {
+                "raw_mention": "英伟达",
+                "resolved_topic": "英伟达",
+                "asset_scope": "美股",
+                "asset_type": "stock",
+                "listing_market": "NASDAQ",
+                "ticker_or_code": "NVDA",
+                "preferred_tools": ["get_global_asset_list", "get_global_asset_data"],
+            }
+        ],
+        "mcp_tools": [{"name": "search_astocks", "arguments": {"keyword": "英伟达", "limit": 5}}],
+    }
+    data = await CLI()._collect_client_mcp_data("分析一下英伟达", {}, plan)
+
+    called_names = [name for name, _ in calls]
+    assert "search_astocks" not in called_names
     assert calls[0] == ("get_global_asset_list", {"keyword": "英伟达", "limit": 10})
     assert any(name == "get_global_asset_data" and args["asset_name"] == "NVDA" for name, args in calls)
     assert "get_global_asset_data:NVDA" in data

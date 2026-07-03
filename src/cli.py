@@ -5249,7 +5249,7 @@ class CLI:
         }
 
     def _should_show_answer_stream(self) -> bool:
-        setting = os.getenv("ERLANGSHEN_ANSWER_STREAM", "on").lower()
+        setting = os.getenv("ERLANGSHEN_ANSWER_STREAM", "off").lower()
         if setting in {"0", "off", "false", "no"}:
             return False
         if setting in {"1", "force"}:
@@ -5284,6 +5284,10 @@ class CLI:
         if not force and not final and not self._should_render_live_update(state, block, min_interval=0.08, min_chars=32):
             return
         try:
+            if state.get("visible") and not sys.stdout.isatty() and not final:
+                state["rendered_text"] = block
+                state["last_rendered_at"] = time.perf_counter()
+                return
             if state.get("visible"):
                 self._clear_live_region(state)
             sys.stdout.write(block + "\n")
@@ -5301,22 +5305,32 @@ class CLI:
     def _finish_answer_stream(self, state: dict[str, object]) -> None:
         if state.get("closed"):
             return
-        preview = self._text_field(state.get("preview"))
-        if preview and state.get("visible") and state.get("rendered_text"):
-            self._render_answer_stream(state, preview, force=True)
         state["stream_done"] = True
 
     def _finalize_live_answer_stream(self, final_text: str) -> bool:
         state = self._live_answer_state
-        if not isinstance(state, dict) or not state.get("visible") or state.get("closed"):
+        if not isinstance(state, dict) or state.get("closed"):
             return False
-        self._render_answer_stream(state, final_text, final=True)
+        final_text = self._text_field(final_text)
+        if not final_text:
+            final_text = self._text_field(state.get("preview"))
+        if not final_text:
+            state["closed"] = True
+            return False
+        if not state.get("visible"):
+            state["closed"] = True
+            return False
+        if state.get("preview") == final_text:
+            state["closed"] = True
+            state["finalized"] = True
+            self._live_answer_finalized = True
+            return True
+        self._render_answer_stream(state, final_text, final=True, force=True)
         state["closed"] = True
         return bool(state.get("finalized"))
 
     def _answer_stream_preview_body(self, text: str) -> str:
-        text = str(text or "").strip()
-        return text
+        return self._compact_answer_stream_preview(text)
 
     def _compact_answer_stream_preview(self, text: str) -> str:
         text = " ".join(str(text or "").split())
@@ -6470,6 +6484,22 @@ class CLI:
                 "intent": "smalltalk|market_overview|single_asset|portfolio|data_lookup|macro|risk|general_investment",
                 "needs_server_mapping": True,
                 "needs_mcp": False,
+                "evidence_targets": [
+                    {
+                        "raw_mention": "用户原话里的标的、主题、行业、产品、资产或宏观事件片段",
+                        "resolved_topic": "你理解后的可检索目标，不包含口语动作词、任务词或无关修饰词",
+                        "asset_scope": "A股|港股|美股|全球资产|基金产品|宏观|行业主题|未知",
+                        "asset_type": "stock|index|fund|commodity|macro|theme|unknown",
+                        "listing_market": "A股|HK|US|NASDAQ|NYSE|全球|未知",
+                        "ticker_or_code": "如果已知，填写股票代码、ticker、指数名、基金代码或宏观指标代码",
+                        "evidence_need": "行情表现|成分/标的解析|新闻事件|基本面|宏观环境|产品净值|风险验证",
+                        "preferred_tools": ["get_global_asset_list", "get_global_asset_data"],
+                        "candidate_index_names": ["如果是指数/主题/板块，给出 1-3 个候选指数名称"],
+                        "aliases": ["同一目标可能的别名、英文名或交易代码"],
+                        "search_queries": ["用于 web_search 的自然语言查询，由你根据问题语义生成"],
+                        "why_relevant": "说明这个目标为什么和用户问题相关",
+                    }
+                ],
                 "mcp_tools": [{"name": "get_index_data", "arguments": {"index_name": "沪深300", "limit": 60}}],
                 "rewritten_query": query,
                 "is_followup": False,
@@ -6506,6 +6536,10 @@ class CLI:
                             "你是主路由器，不要把单个关键词命中当成主要判断方式；要结合用户原话、最近对话、"
                             "用户数据、previous_mcp_context、recent_resources 和 routing_contract 判断真实任务。"
                             "你是编排决策者，不要先写死规则再让模型填空；必须根据 agent_orchestration_protocol 输出可复盘的 route_summary、tool_rationale、data_strategy 和 artifact_plan。"
+                            "当用户问具体股票/公司时，必须先在 evidence_targets 判断所属市场；中文名称不等于 A股，"
+                            "例如英伟达/NVIDIA/NVDA 应识别为美股或全球资产候选，先走 get_global_asset_list 或 get_global_asset_data。"
+                            "当用户问宏观形势、经济环境、利率、流动性等问题时，evidence_targets.asset_scope 必须是宏观，"
+                            "并选择宏观指标工具，不要生成 search_astocks 或“股票代码 A股”查询。"
                             "你要灵活理解用户真正想问什么，并依据 selection_policy、data_recipes、route_plans、"
                             "composition_patterns 和 routing_contract 决定是否需要调用 super-66 MCP/web_search、"
                             "如何组合工具、是否需要 chart artifact。"
@@ -6627,6 +6661,23 @@ class CLI:
                 tool_selection_source = route_source if route_source in {"local_llm", "provided_payload"} else "local_llm"
             else:
                 tool_selection_source = "none"
+        evidence_targets = self._coerce_evidence_targets(plan.get("evidence_targets"))
+        target_tools = self._tools_from_evidence_targets(evidence_targets, query)
+        if target_tools:
+            before = list(tools)
+            tools = self._drop_tools_conflicting_with_evidence_targets(tools, evidence_targets)
+            merged = self._dedupe_mcp_tools(target_tools + tools)
+            if merged != tools or tools != before:
+                tools = merged
+                needs_mcp = True
+                source = tool_selection_source or route_source or "local_llm"
+                tool_selection_source = (
+                    source
+                    if "client_evidence_target_contract" in source
+                    else f"{source}+client_evidence_target_contract"
+                )
+                note = "本机大模型已在 evidence_targets 解析市场/资产归属，客户端按该结构化理解校验并补齐 MCP 工具。"
+                tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
         default_tools = self._default_tools_for_intent(intent, query)
         if default_tools and not tools:
             tools = default_tools
@@ -6648,6 +6699,21 @@ class CLI:
                 )
                 note = "检测到微盘/小市值策略问题，客户端强制以华证微盘为主基准，并补充微盘成交额占比、量价、流动性和主线强度验证。"
                 tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
+        macro_guardrail_tools = [] if microcap_tools else self._macro_overview_guardrail_tools(query)
+        if macro_guardrail_tools:
+            before = list(tools)
+            tools = self._drop_misdirected_astock_lookup_tools(tools)
+            if tools != before or not self._has_macro_tool(tools):
+                tools = self._dedupe_mcp_tools(macro_guardrail_tools + tools)
+                source = tool_selection_source or route_source or "local_llm"
+                tool_selection_source = (
+                    source
+                    if "client_macro_guardrail" in source
+                    else f"{source}+client_macro_guardrail"
+                )
+                note = "检测到宏观形势/经济环境问题，客户端强制补充宏观指标快照、历史序列和市场参照，避免误走 A 股个股搜索。"
+                tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
+            needs_mcp = True
         index_guardrail_tools = self._index_market_guardrail_tools(query)
         if index_guardrail_tools and tools:
             before = list(tools)
@@ -6663,7 +6729,7 @@ class CLI:
                 note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
                 tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
             needs_mcp = True
-        astock_tools = [] if (index_guardrail_tools or microcap_tools) else self._specific_astock_tools_from_query(query)
+        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools) else self._specific_astock_tools_from_query(query)
         if astock_tools:
             before = list(tools)
             tools = self._dedupe_mcp_tools(astock_tools + tools)
@@ -6749,6 +6815,7 @@ class CLI:
             "route_warning": self._text_field(plan.get("route_warning") or plan.get("intent_error")),
             "needs_server_mapping": bool(plan.get("needs_server_mapping", True)),
             "needs_mcp": needs_mcp,
+            "evidence_targets": evidence_targets,
             "mcp_tools": self._dedupe_mcp_tools(tools)[:12],
             "tool_selection_source": tool_selection_source,
             "tool_selection_note": tool_selection_note,
@@ -7420,6 +7487,27 @@ class CLI:
             return provided
         tools = intent_plan.get("mcp_tools") if isinstance(intent_plan, dict) else []
         tools = self._dedupe_mcp_tools(tools) if isinstance(tools, list) else []
+        evidence_targets = self._coerce_evidence_targets(intent_plan.get("evidence_targets")) if isinstance(intent_plan, dict) else []
+        target_tools = self._tools_from_evidence_targets(evidence_targets, query)
+        if target_tools:
+            before = list(tools)
+            tools = self._drop_tools_conflicting_with_evidence_targets(tools, evidence_targets)
+            merged = self._dedupe_mcp_tools(target_tools + tools)
+            if isinstance(intent_plan, dict):
+                intent_plan["needs_mcp"] = True
+                intent_plan["mcp_tools"] = merged
+                intent_plan["evidence_targets"] = evidence_targets
+                if merged != before:
+                    source = self._text_field(intent_plan.get("tool_selection_source") or intent_plan.get("route_source") or "local_llm")
+                    intent_plan["tool_selection_source"] = (
+                        source
+                        if "client_evidence_target_contract" in source
+                        else f"{source}+client_evidence_target_contract"
+                    )
+                    note = "本机大模型已在 evidence_targets 解析市场/资产归属，客户端按该结构化理解校验并补齐 MCP 工具。"
+                    previous = self._text_field(intent_plan.get("tool_selection_note"))
+                    intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
+            tools = merged
         microcap_tools = self._microcap_strategy_tools(query)
         if microcap_tools:
             before = list(tools)
@@ -7437,6 +7525,22 @@ class CLI:
                     note = "检测到微盘/小市值策略问题，客户端强制以华证微盘为主基准，并补充微盘成交额占比、量价、流动性和主线强度验证。"
                     previous = self._text_field(intent_plan.get("tool_selection_note"))
                     intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
+        macro_guardrail_tools = [] if microcap_tools else self._macro_overview_guardrail_tools(query)
+        if macro_guardrail_tools:
+            before = list(tools)
+            tools = self._drop_misdirected_astock_lookup_tools(tools)
+            if tools != before or not self._has_macro_tool(tools):
+                tools = self._dedupe_mcp_tools(macro_guardrail_tools + tools)
+            if isinstance(intent_plan, dict):
+                intent_plan["needs_mcp"] = True
+                intent_plan["mcp_tools"] = tools
+                source = self._text_field(intent_plan.get("tool_selection_source") or intent_plan.get("route_source") or "local_llm")
+                intent_plan["tool_selection_source"] = (
+                    source if "client_macro_guardrail" in source else f"{source}+client_macro_guardrail"
+                )
+                note = "检测到宏观形势/经济环境问题，客户端强制补充宏观指标快照、历史序列和市场参照，避免误走 A 股个股搜索。"
+                previous = self._text_field(intent_plan.get("tool_selection_note"))
+                intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
         index_guardrail_tools = self._index_market_guardrail_tools(query)
         if index_guardrail_tools and tools:
             before = list(tools)
@@ -7453,7 +7557,7 @@ class CLI:
                 note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
                 previous = self._text_field(intent_plan.get("tool_selection_note"))
                 intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
-        astock_tools = [] if (index_guardrail_tools or microcap_tools) else self._specific_astock_tools_from_query(query)
+        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools) else self._specific_astock_tools_from_query(query)
         astock_guardrail = "client_astock_guardrail"
         if not astock_tools:
             astock_tools = self._specific_astock_tools_from_followup_context(query, intent_plan)
@@ -7549,6 +7653,7 @@ class CLI:
                     result = await self._call_mcp_tool_checked(mcp, name, arguments)
                     if self._mcp_value_has_error(result) and self._batch_tool_fallback_tools(name, arguments):
                         retried = False
+                        all_macro_ok = True
                         if name in {"get_macro_snapshot", "batch_get_macro_data"} and self._should_retry_macro_tool_with_chunks(
                             name,
                             arguments,
@@ -8108,6 +8213,209 @@ class CLI:
             for item in tools or []
         )
 
+    def _has_macro_tool(self, tools: list[dict]) -> bool:
+        return any(
+            isinstance(item, dict)
+            and item.get("name") in {
+                "get_macro_snapshot",
+                "batch_get_macro_data",
+                "get_macro_data",
+                "get_macro_indicator",
+                "list_macro_indicators",
+            }
+            for item in tools or []
+        )
+
+    def _coerce_evidence_targets(self, value) -> list[dict]:
+        if not isinstance(value, list):
+            return []
+        text_keys = (
+            "raw_mention",
+            "resolved_topic",
+            "asset_scope",
+            "asset_type",
+            "listing_market",
+            "ticker_or_code",
+            "canonical_symbol",
+            "market",
+            "exchange",
+            "evidence_need",
+            "why_relevant",
+        )
+        list_keys = ("preferred_tools", "candidate_index_names", "aliases", "search_queries", "indicator_codes")
+        targets: list[dict] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            target: dict = {}
+            for key in text_keys:
+                text = self._text_field(item.get(key))
+                if text:
+                    target[key] = text
+            for key in list_keys:
+                items = self._coerce_text_items(item.get(key))
+                if items:
+                    target[key] = items[:8]
+            if target:
+                targets.append(target)
+        return targets[:8]
+
+    def _tools_from_evidence_targets(self, evidence_targets: list[dict], query: str = "") -> list[dict]:
+        tools: list[dict] = []
+        window = self._recent_market_window_args(days=180, query=query)
+        for target in evidence_targets or []:
+            if not isinstance(target, dict):
+                continue
+            topic = self._evidence_target_topic(target)
+            ticker = self._evidence_target_ticker(target)
+            preferred = set(self._coerce_text_items(target.get("preferred_tools")))
+            if self._evidence_target_is_macro(target):
+                tools.extend(self._macro_evidence_tools(query, target))
+                continue
+            index_label = self._evidence_target_index_label(target)
+            if index_label:
+                tools.append({"name": "get_index_data", "arguments": {"index_name": index_label, **window}})
+                for search_query in self._evidence_target_search_queries(target):
+                    tools.append({"name": "web_search", "arguments": {"query": search_query, "count": 5}})
+                continue
+            if self._evidence_target_is_astock(target):
+                tools.extend(self._astock_tools_for_target(code=ticker, keyword=topic or ticker))
+                continue
+            if self._evidence_target_is_global_or_unknown_stock(target):
+                keyword = topic or ticker
+                asset_name = ticker or topic
+                if keyword:
+                    tools.append({"name": "get_global_asset_list", "arguments": {"keyword": keyword, "limit": 10}})
+                if asset_name and (ticker or "get_global_asset_data" in preferred):
+                    tools.append({"name": "get_global_asset_data", "arguments": {"asset_name": asset_name, **window, "limit": 5000}})
+                search_queries = self._evidence_target_search_queries(target)
+                if not search_queries and keyword and not ticker:
+                    search_queries = [f"{keyword} 股票代码 所属市场 交易所 最新"]
+                for search_query in search_queries[:2]:
+                    tools.append({"name": "web_search", "arguments": {"query": search_query, "count": 5}})
+        return self._dedupe_mcp_tools(tools)
+
+    def _drop_tools_conflicting_with_evidence_targets(self, tools: list[dict], evidence_targets: list[dict]) -> list[dict]:
+        if not evidence_targets:
+            return tools
+        has_astock_target = any(self._evidence_target_is_astock(target) for target in evidence_targets)
+        has_non_astock_target = any(
+            self._evidence_target_is_macro(target)
+            or self._evidence_target_is_global_or_unknown_stock(target)
+            or bool(self._evidence_target_index_label(target))
+            for target in evidence_targets
+        )
+        if has_non_astock_target and not has_astock_target:
+            return self._drop_misdirected_astock_lookup_tools(tools)
+        return tools
+
+    def _evidence_target_topic(self, target: dict) -> str:
+        for key in ("resolved_topic", "raw_mention", "asset_name", "name"):
+            text = self._text_field(target.get(key))
+            if text:
+                return text
+        return ""
+
+    def _evidence_target_ticker(self, target: dict) -> str:
+        for key in ("ticker_or_code", "canonical_symbol", "symbol", "code"):
+            text = self._text_field(target.get(key))
+            if text:
+                return text
+        return ""
+
+    def _evidence_target_scope_text(self, target: dict) -> str:
+        pieces = []
+        for key in ("asset_scope", "asset_type", "listing_market", "market", "exchange", "evidence_need"):
+            text = self._text_field(target.get(key))
+            if text:
+                pieces.append(text)
+        pieces.extend(self._coerce_text_items(target.get("preferred_tools")))
+        return re.sub(r"\s+", "", " ".join(pieces).lower())
+
+    def _evidence_target_search_queries(self, target: dict) -> list[str]:
+        return self._coerce_text_items(target.get("search_queries"))[:4]
+
+    def _evidence_target_is_macro(self, target: dict) -> bool:
+        scope = self._evidence_target_scope_text(target)
+        return any(
+            term in scope
+            for term in (
+                "宏观",
+                "macro",
+                "economic",
+                "经济",
+                "利率",
+                "流动性",
+                "pmi",
+                "cpi",
+                "ppi",
+                "社融",
+                "get_macro_snapshot",
+                "batch_get_macro_data",
+                "get_macro_data",
+            )
+        )
+
+    def _evidence_target_is_astock(self, target: dict) -> bool:
+        scope = self._evidence_target_scope_text(target)
+        return any(term in scope for term in ("a股", "沪深", "上交所", "深交所", "科创板", "创业板", "search_astocks"))
+
+    def _evidence_target_is_global_or_unknown_stock(self, target: dict) -> bool:
+        scope = self._evidence_target_scope_text(target)
+        if self._evidence_target_is_astock(target):
+            return False
+        global_terms = (
+            "美股",
+            "美国股票",
+            "us",
+            "nasdaq",
+            "nyse",
+            "全球资产",
+            "global",
+            "海外",
+            "get_global_asset_list",
+            "get_global_asset_data",
+        )
+        stock_terms = ("stock", "股票", "公司", "equity", "unknown", "未知")
+        return any(term in scope for term in global_terms) or any(term in scope for term in stock_terms)
+
+    def _evidence_target_index_label(self, target: dict) -> str:
+        labels = [
+            self._evidence_target_topic(target),
+            *self._coerce_text_items(target.get("candidate_index_names")),
+            *self._coerce_text_items(target.get("aliases")),
+        ]
+        scope = self._evidence_target_scope_text(target)
+        for label in labels:
+            canonical = self._canonical_index_market_label(re.sub(r"\s+", "", self._text_field(label).lower()))
+            if canonical:
+                return canonical
+        if "index" in scope or "指数" in scope:
+            return self._text_field(labels[0]) if labels else ""
+        return ""
+
+    def _macro_evidence_tools(self, query: str, target: dict | None = None) -> list[dict]:
+        indicator_codes = self._coerce_text_items((target or {}).get("indicator_codes")) or self._macro_overview_indicator_codes()
+        window = self._recent_market_window_args(days=240, query=query)
+        tools = [
+            *self._chunked_macro_tools("get_macro_snapshot", indicator_codes, window=window, latest_only=True, limit=80),
+            *self._chunked_macro_tools("batch_get_macro_data", indicator_codes, window=window, latest_only=False, limit=240),
+            {
+                "name": "batch_get_index_data",
+                "arguments": {
+                    "index_names": ["沪深300", "创业板指", "中证红利", "恒生科技指数"],
+                    **self._recent_market_window_args(days=120, query=query),
+                },
+            },
+            {
+                "name": "batch_get_global_asset_data",
+                "arguments": {"asset_names": ["美元指数", "黄金", "原油"], **self._recent_market_window_args(days=120, query=query)},
+            },
+        ]
+        search_queries = self._evidence_target_search_queries(target or {}) or [self._market_overview_macro_search_query(query)]
+        tools.extend({"name": "web_search", "arguments": {"query": item, "count": 5}} for item in search_queries[:2])
+        return self._dedupe_mcp_tools(tools)
+
     def _drop_misdirected_astock_lookup_tools(self, tools: list[dict]) -> list[dict]:
         cleaned = []
         for item in tools or []:
@@ -8183,6 +8491,93 @@ class CLI:
         if "最近" in text or "近期" in text:
             date_hint = "近期"
         return f"中国 {date_hint} 宏观 数据 PMI CPI 利率 汇率 流动性 政策"
+
+    def _is_macro_overview_query(self, query: str) -> bool:
+        text = re.sub(r"\s+", "", self._text_field(query).lower())
+        if not text:
+            return False
+        macro_terms = (
+            "宏观",
+            "经济形势",
+            "经济环境",
+            "经济数据",
+            "基本面",
+            "pmi",
+            "cpi",
+            "ppi",
+            "社融",
+            "m2",
+            "信贷",
+            "工业增加值",
+            "利率",
+            "lpr",
+            "mlf",
+            "国债收益率",
+            "通胀",
+            "汇率",
+            "流动性",
+        )
+        action_terms = (
+            "分析",
+            "怎么看",
+            "怎么样",
+            "形势",
+            "环境",
+            "趋势",
+            "最近",
+            "近期",
+            "当前",
+            "现在",
+            "最新",
+            "判断",
+            "展望",
+            "影响",
+        )
+        return any(term in text for term in macro_terms) and any(term in text for term in action_terms)
+
+    def _macro_overview_indicator_codes(self) -> list[str]:
+        return [
+            "PMI_MFG",
+            "PMI_SVC",
+            "INDUSTRIAL_VALUE_ADDED",
+            "CPI_YOY",
+            "PPI_YOY",
+            "SOCIAL_FINANCE",
+            "M2_YOY",
+            "PBOC_MLF",
+            "LPR_1Y",
+            "CN_10Y_YIELD",
+        ]
+
+    def _chunked_macro_tools(
+        self,
+        name: str,
+        indicator_codes: list[str],
+        *,
+        window: dict,
+        latest_only: bool,
+        limit: int,
+    ) -> list[dict]:
+        tools: list[dict] = []
+        chunk_size = max(1, self._macro_tool_chunk_size())
+        for start in range(0, len(indicator_codes), chunk_size):
+            chunk = indicator_codes[start:start + chunk_size]
+            arguments = {
+                "indicator_codes": chunk,
+                **window,
+                "limit": limit,
+            }
+            if name == "get_macro_snapshot":
+                arguments["latest_only"] = latest_only
+            if name == "batch_get_macro_data":
+                arguments["latest_only"] = latest_only
+            tools.append({"name": name, "arguments": arguments})
+        return tools
+
+    def _macro_overview_guardrail_tools(self, query: str = "") -> list[dict]:
+        if not self._is_macro_overview_query(query):
+            return []
+        return self._macro_evidence_tools(query)
 
     def _market_hot_stock_search_query(self, query: str = "") -> str:
         text = re.sub(r"\s+", "", self._text_field(query).lower())
@@ -8444,6 +8839,14 @@ class CLI:
             "原油",
             "美元",
             "美元指数",
+            "宏观",
+            "宏观形势",
+            "宏观经济",
+            "经济",
+            "经济形势",
+            "经济环境",
+            "基本面",
+            "流动性",
             "ai",
             "AI",
             "美股AI",
@@ -8542,6 +8945,9 @@ class CLI:
 
     def _default_tools_for_intent(self, intent: str, query: str = "") -> list[dict]:
         normalized = self._text_field(intent).lower()
+        macro_tools = self._macro_overview_guardrail_tools(query)
+        if macro_tools and normalized in {"single_asset", "data_lookup", "market_overview", "macro", "risk", "general_investment"}:
+            return self._dedupe_mcp_tools(macro_tools)
         astock_tools = self._specific_astock_tools_from_query(query)
         specific_tools = self._specific_market_tools_from_query(query)
         event_tools = self._event_market_default_tools(query) if self._is_event_market_query(query) else []
