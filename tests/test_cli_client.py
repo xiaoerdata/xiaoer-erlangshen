@@ -5184,6 +5184,13 @@ def test_unknown_company_name_without_market_uses_global_discovery_not_astock():
         for item in plan["mcp_tools"]
     )
 
+    nasdaq_plan = cli._normalize_intent_plan(
+        {"intent": "single_asset", "needs_mcp": False, "mcp_tools": []},
+        "纳斯达克英伟达今天怎么看",
+    )
+    assert {"name": "get_global_asset_list", "arguments": {"keyword": "英伟达", "limit": 10}} in nasdaq_plan["mcp_tools"]
+    assert "search_astocks" not in {item["name"] for item in nasdaq_plan["mcp_tools"]}
+
 
 def test_explicit_astock_unknown_name_adds_name_search_and_web_code_lookup():
     tools = CLI()._specific_astock_tools_from_query("分析 A股 宁德时代今年表现")

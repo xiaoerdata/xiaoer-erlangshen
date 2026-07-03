@@ -8390,7 +8390,7 @@ class CLI:
     def _named_asset_keyword_from_query(self, query: str) -> str:
         text = self._text_field(query)
         compact = re.sub(r"\s+", "", text.lower())
-        if not compact or self._canonical_index_market_label(compact) or self._is_index_market_query(query):
+        if not compact or self._canonical_index_market_label(compact):
             return ""
         entity_context_words = (
             "股票",
@@ -8399,12 +8399,19 @@ class CLI:
             "财报",
             "公司",
             "分析",
+            "今天",
+            "怎么看",
+            "怎么样",
+            "如何",
             "表现",
             "走势",
             "趋势",
             "今年",
             "年内",
             "涨跌",
+            "可以吗",
+            "可以",
+            "能不能",
             "能不能买",
             "可以买",
             "能买吗",
@@ -8412,7 +8419,7 @@ class CLI:
         if not any(word in compact for word in entity_context_words):
             return ""
         cleaned = re.sub(
-            r"(分析一下|帮我分析|帮我|分析|查询一下|查询|查一下|查查|查看|看一下|看看|今天|今日|昨日|昨天|今年|年内|最近|近期|最新|当前|现在|的|结果|结论|是|呢|吗|可以吗|可不可以|能不能买|能买吗|能买|买吗|表现|走势|趋势|股价|涨跌|怎么样|如何|怎么走|A股|a股|美股|港股|股票|个股|公司|指数|大盘|宽基|交易所|市场)",
+            r"(分析一下|帮我分析|帮我|分析|查询一下|查询|查一下|查查|查看|看一下|看看|今天|今日|昨日|昨天|今年|年内|最近|近期|最新|当前|现在|的|结果|结论|是|呢|吗|可以吗|可不可以|能不能买|能买吗|能买|买吗|表现|走势|趋势|股价|涨跌|怎么样|如何|怎么看|怎么走|A股|a股|美股|港股|股票|个股|公司|指数|大盘|宽基|交易所|市场|纳斯达克|纽交所|nyse|nasdaq)",
             "",
             text,
             flags=re.I,
@@ -8437,6 +8444,11 @@ class CLI:
             "原油",
             "美元",
             "美元指数",
+            "ai",
+            "AI",
+            "美股AI",
+            "科技",
+            "光模块",
         }
         generic_suffixes = ("资产", "市场", "行情", "策略", "指数", "板块", "方向")
         if (
@@ -8533,13 +8545,13 @@ class CLI:
         astock_tools = self._specific_astock_tools_from_query(query)
         specific_tools = self._specific_market_tools_from_query(query)
         event_tools = self._event_market_default_tools(query) if self._is_event_market_query(query) else []
-        discovery_tools = [] if (astock_tools or specific_tools or event_tools) else self._market_discovery_tools_from_query(query)
+        discovery_tools = [] if (astock_tools or event_tools) else self._market_discovery_tools_from_query(query)
         if normalized in {"single_asset", "data_lookup"} and astock_tools:
             return self._dedupe_mcp_tools(astock_tools + specific_tools + event_tools)
+        if normalized in {"single_asset", "data_lookup"} and discovery_tools:
+            return self._dedupe_mcp_tools(discovery_tools + specific_tools + event_tools)
         if normalized in {"single_asset", "data_lookup", "market_overview"} and specific_tools:
             return self._dedupe_mcp_tools(specific_tools + event_tools)
-        if normalized in {"single_asset", "data_lookup"} and discovery_tools:
-            return self._dedupe_mcp_tools(discovery_tools)
         if normalized in {"risk", "general_investment"} and (specific_tools or event_tools):
             return self._dedupe_mcp_tools(specific_tools + event_tools)
         if normalized in {"market_overview", "data_lookup"}:
