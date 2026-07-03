@@ -6950,6 +6950,7 @@ class CLI:
             "get_astock_history",
             "batch_get_index_data",
             "get_index_data",
+            "get_global_asset_list",
             "batch_get_global_asset_data",
             "get_global_asset_data",
             "get_macro_snapshot",
@@ -6992,8 +6993,9 @@ class CLI:
                 "goal": "回答具体股票、指数、基金、私募产品或商品的走势、风险和跟踪信号。",
                 "trigger": "用户给出名称、代码、产品简称、管理人或某个资产。",
                 "preferred_chain": [
-                    "search_astocks/search_products: 名称解析",
-                    "get_index_data/get_astock_realtime/get_product_detail/get_product_history/get_global_asset_data",
+                    "先判断股票/资产所属市场；不因中文名称默认 A股",
+                    "get_global_asset_list/search_astocks/search_products: 名称和市场解析",
+                    "get_index_data/get_global_asset_data/get_astock_realtime/get_product_detail/get_product_history",
                     "web_search: 公告、新闻、公开页面",
                     "server map",
                     "local LLM",
@@ -7074,12 +7076,17 @@ class CLI:
                 },
                 {
                     "name": "search_astocks",
-                    "use_when": "用户给了股票简称但没有代码，先搜索候选代码再取行情",
+                    "use_when": "明确是 A股、给出沪深 A股代码，或模型已判断该公司是 A股时，搜索候选代码再取行情",
                     "args": {"keyword": "股票简称", "limit": 5},
                 },
                 {
+                    "name": "get_global_asset_list",
+                    "use_when": "具体股票/公司/资产但上市市场未明确，或模型判断属于美股等全球资产时，先查资产目录确认名称、代码和市场",
+                    "args": {"keyword": "资产名或代码", "limit": 10},
+                },
+                {
                     "name": "get_global_asset_data",
-                    "use_when": "黄金、原油、美元、汇率、美股资产等全球风险资产联动；港股指数优先用 get_index_data",
+                    "use_when": "黄金、原油、美元、汇率、美股个股和其他全球风险资产；港股指数优先用 get_index_data",
                     "args": {"asset_name": "黄金", "limit": 60},
                 },
                 {
@@ -7133,6 +7140,9 @@ class CLI:
             },
             "selection_policy": [
                 "优先让大模型根据上下文选择工具组合，不用硬编码关键词替代理解",
+                "用户给出具体股票/公司时，先由大模型判断所属市场；中文名称不等于 A股，海外公司和美股科技公司应走 get_global_asset_list/get_global_asset_data",
+                "只有明确 A股、给出沪深 A股代码，或模型已经判断为 A股时，才使用 search_astocks/get_astock_realtime/get_astock_history",
+                "上市市场不确定时，先用 get_global_asset_list + 中性 web_search 核验代码/交易所，再决定后续行情工具",
                 "行情和产品数据优先 super-66 MCP；新闻和公开网页补充 web_search",
                 "恒生科技指数、恒生指数、HSTECH、HSI、Hang Seng Tech 只能使用 get_index_data；不要使用 get_global_asset_data",
                 "恒生科技指数和恒生指数属于 super-66 国内宽基指数数据源；调用 MCP 时只传 index_name/indexName，丢弃 sourceTable/global_index/global_assets 等表名提示",
@@ -7145,9 +7155,9 @@ class CLI:
             "composition_patterns": [
                 {
                     "name": "name_to_realtime_snapshot",
-                    "when": "用户给股票/基金/产品简称但缺少代码或 product_id",
-                    "tools": ["search_astocks/search_products", "get_astock_realtime/get_product_detail", "web_search(optional)", "server map"],
-                    "read_fields": ["code", "name", "price/latest/close", "change_pct/pct_chg", "amount/volume", "title/url"],
+                    "when": "用户给股票/基金/产品简称但缺少代码、市场或 product_id",
+                    "tools": ["get_global_asset_list/search_astocks/search_products", "get_global_asset_data/get_astock_realtime/get_product_detail", "web_search(optional)", "server map"],
+                    "read_fields": ["market/exchange", "code/ticker/symbol", "name", "price/latest/close", "change_pct/pct_chg", "amount/volume", "title/url"],
                     "fallback": "搜索不到实体时先向用户确认标的；不要编造代码或产品ID",
                     "artifact": "通常不直接画图；若用户要求对比或走势，再请求 chart artifact",
                 },
@@ -7234,9 +7244,10 @@ class CLI:
                     "name": "single_asset",
                     "use_when": "用户问具体股票、指数、商品、基金或产品",
                     "steps": [
-                        "先用 search_astocks/search_products 解析名称到代码或产品ID",
+                        "先判断股票/资产所属市场；不要因为公司中文名就默认 A股",
                         "如果标的是恒生科技指数/HSTECH/Hang Seng Tech/HSCEI/恒生指数/HSI，直接用 get_index_data，参数 index_name/indexName，不要当作 global asset，也不要传 sourceTable",
-                        "再用 get_astock_realtime/get_product_detail/get_product_history 拉取事实数据",
+                        "如果市场未确认，先用 get_global_asset_list 和中性 web_search 查代码/交易所；A股再用 search_astocks，美股等全球资产用 get_global_asset_data",
+                        "再用 get_astock_realtime/get_global_asset_data/get_product_detail/get_product_history 拉取事实数据",
                         "必要时用 web_search 补公告或新闻",
                     ],
                     "examples": [
@@ -7306,9 +7317,10 @@ class CLI:
                     "trigger": "用户给出股票、基金、产品、商品或指数名称，需要先核实实体和事实数据",
                     "sequence": [
                         "本机 LLM 判断实体类型和是否需要 disambiguation",
+                        "先判断具体股票/公司所属市场；不要把中文公司名自动当成 A股",
                         "若实体是恒生科技指数/HSTECH/Hang Seng Tech/HSCEI/恒生指数/HSI，选择 get_index_data，并丢弃 sourceTable/global_index/global_assets 等表名参数",
-                        "名称不完整时先 search_astocks/search_products",
-                        "再调用 get_astock_realtime/get_product_detail/get_product_history 或 global/future 数据",
+                        "市场不确定时先 get_global_asset_list + 中性 web_search；确认 A股才 search_astocks，确认美股/全球资产才 get_global_asset_data",
+                        "再调用 get_astock_realtime/get_global_asset_data/get_product_detail/get_product_history 或 future 数据",
                         "web_search 补公告、新闻或未覆盖公开信息",
                         "server map: 用改写后的完整问题映射场景",
                     ],
@@ -7556,6 +7568,7 @@ class CLI:
                         collected[key] = result
             except Exception as exc:
                 collected[f"{key}:error"] = self._sanitize_api_key_error(exc, "")
+        await self._collect_global_asset_followup_data(collected, tools, mcp)
         await self._collect_astock_followup_data(collected, tools, mcp)
         if not collected:
             collected["note"] = "super-66 MCP / 本地网页线索暂不可用，本次仅使用用户问题和服务端场景映射。"
@@ -7948,6 +7961,69 @@ class CLI:
                         collected[f"{result_key}:error"] = self._sanitize_api_key_error(exc, "")
                 break
 
+    async def _collect_global_asset_followup_data(self, collected: dict, tools: list[dict], mcp) -> None:
+        if not isinstance(collected, dict) or mcp is None:
+            return
+        if not any(isinstance(item, dict) and item.get("name") == "get_global_asset_list" for item in tools or []):
+            return
+        existing_labels = {
+            self._text_field((item.get("arguments") or {}).get("asset_name") or (item.get("arguments") or {}).get("assetName"))
+            for item in tools or []
+            if isinstance(item, dict) and item.get("name") == "get_global_asset_data" and isinstance(item.get("arguments"), dict)
+        }
+        existing_labels.update(
+            str(key).split(":", 1)[1]
+            for key in collected.keys()
+            if str(key).startswith("get_global_asset_data:") and ":" in str(key)
+        )
+        window = self._recent_market_window_args(days=180)
+        for key, value in list(collected.items()):
+            if not str(key).startswith("get_global_asset_list:") or self._mcp_value_has_error(value):
+                continue
+            for label in self._extract_global_asset_labels_from_value(value):
+                if label in existing_labels:
+                    continue
+                existing_labels.add(label)
+                args = {"asset_name": label, **window, "limit": 5000}
+                result_key = self._mcp_result_key("get_global_asset_data", args, len(collected))
+                if result_key in collected:
+                    continue
+                self._show_progress(f"正在补充全球资产行情: {self._mcp_tool_label('get_global_asset_data', args)}")
+                try:
+                    collected[result_key] = await self._call_mcp_tool_checked(mcp, "get_global_asset_data", args)
+                except Exception as exc:
+                    collected[f"{result_key}:error"] = self._sanitize_api_key_error(exc, "")
+                break
+
+    def _extract_global_asset_labels_from_value(self, value) -> list[str]:
+        labels: list[str] = []
+        preferred_keys = (
+            "ticker",
+            "symbol",
+            "asset_code",
+            "assetCode",
+            "code",
+            "asset_name",
+            "assetName",
+            "name",
+            "名称",
+        )
+        for row in self._flatten_mcp_dict_rows(value):
+            for key in preferred_keys:
+                text = self._text_field(row.get(key))
+                if not text or self._looks_like_astock_code_only(text):
+                    continue
+                if text not in labels:
+                    labels.append(text)
+                    break
+            if len(labels) >= 3:
+                break
+        return labels
+
+    def _looks_like_astock_code_only(self, value: str) -> bool:
+        text = self._text_field(value)
+        return bool(re.fullmatch(r"(?:sh|sz)?[036]\d{5}(?:\.[A-Z]{2})?", text, flags=re.I))
+
     def _extract_astock_codes_from_value(self, value) -> list[str]:
         codes: list[str] = []
         for row in self._flatten_mcp_dict_rows(value):
@@ -8282,29 +8358,112 @@ class CLI:
                 break
         if not keyword and code:
             keyword = code
-        if not keyword:
-            astock_context_words = (
-                "股票", "个股", "股价", "财报", "公司", "分析", "表现", "走势", "今年", "年内", "涨跌",
-            )
-            if not any(word in compact for word in astock_context_words):
-                return []
-            cleaned = re.sub(
-                r"(分析一下|帮我分析|帮我|分析|查询一下|查询|查一下|查查|查看|看一下|看看|今天|今日|昨日|昨天|今年|年内|最近|近期|的|结果|结论|是|呢|表现|走势|股价|涨跌|怎么样|如何|怎么走|A股|a股|股票|个股|指数|大盘|宽基)",
-                "",
-                text,
-                flags=re.I,
-            ).strip(" ，。！？?;；")
-            generic_assets = {"资产", "市场", "行情", "大盘", "指数", "宽基", "股市", "股票", "个股", "公司", "结果", "结果是", "结论", "结论是", "黄金", "原油", "美元", "美元指数"}
-            if (
-                cleaned
-                and 2 <= len(cleaned) <= 12
-                and cleaned not in generic_assets
-                and not self._canonical_index_market_label(re.sub(r"\s+", "", cleaned.lower()))
-            ):
-                keyword = cleaned
+        if not keyword and self._query_explicitly_astock(query):
+            keyword = self._named_asset_keyword_from_query(query)
         if not keyword:
             return []
         return self._astock_tools_for_target(code=code, keyword=keyword)
+
+    def _query_explicitly_astock(self, query: str) -> bool:
+        text = self._text_field(query)
+        compact = re.sub(r"\s+", "", text.lower())
+        if not compact:
+            return False
+        if re.search(r"(?<!\d)(?:sh|sz)?[036]\d{5}(?!\d)", compact, flags=re.I):
+            return True
+        astock_markers = (
+            "a股",
+            "沪深",
+            "上交所",
+            "深交所",
+            "沪市",
+            "深市",
+            "创业板",
+            "科创板",
+            "北交所",
+            "国内股票",
+            "内地股票",
+            "中国股票",
+        )
+        return any(marker in compact for marker in astock_markers)
+
+    def _named_asset_keyword_from_query(self, query: str) -> str:
+        text = self._text_field(query)
+        compact = re.sub(r"\s+", "", text.lower())
+        if not compact or self._canonical_index_market_label(compact) or self._is_index_market_query(query):
+            return ""
+        entity_context_words = (
+            "股票",
+            "个股",
+            "股价",
+            "财报",
+            "公司",
+            "分析",
+            "表现",
+            "走势",
+            "趋势",
+            "今年",
+            "年内",
+            "涨跌",
+            "能不能买",
+            "可以买",
+            "能买吗",
+        )
+        if not any(word in compact for word in entity_context_words):
+            return ""
+        cleaned = re.sub(
+            r"(分析一下|帮我分析|帮我|分析|查询一下|查询|查一下|查查|查看|看一下|看看|今天|今日|昨日|昨天|今年|年内|最近|近期|最新|当前|现在|的|结果|结论|是|呢|吗|可以吗|可不可以|能不能买|能买吗|能买|买吗|表现|走势|趋势|股价|涨跌|怎么样|如何|怎么走|A股|a股|美股|港股|股票|个股|公司|指数|大盘|宽基|交易所|市场)",
+            "",
+            text,
+            flags=re.I,
+        )
+        cleaned = re.sub(r"\s+", "", cleaned).strip(" ，。！？?;；")
+        generic_assets = {
+            "资产",
+            "市场",
+            "行情",
+            "大盘",
+            "指数",
+            "宽基",
+            "股市",
+            "股票",
+            "个股",
+            "公司",
+            "结果",
+            "结果是",
+            "结论",
+            "结论是",
+            "黄金",
+            "原油",
+            "美元",
+            "美元指数",
+        }
+        generic_suffixes = ("资产", "市场", "行情", "策略", "指数", "板块", "方向")
+        if (
+            cleaned
+            and 2 <= len(cleaned) <= 16
+            and cleaned not in generic_assets
+            and not cleaned.endswith(generic_suffixes)
+            and not self._canonical_index_market_label(re.sub(r"\s+", "", cleaned.lower()))
+        ):
+            return cleaned
+        return ""
+
+    def _market_discovery_tools_from_query(self, query: str) -> list[dict]:
+        if self._query_explicitly_astock(query):
+            return []
+        keyword = self._named_asset_keyword_from_query(query)
+        if not keyword:
+            return []
+        window = self._recent_market_window_args(days=180, query=query)
+        return [
+            {"name": "get_global_asset_list", "arguments": {"keyword": keyword, "limit": 10}},
+            {"name": "get_global_asset_data", "arguments": {"asset_name": keyword, **window, "limit": 5000}},
+            {
+                "name": "web_search",
+                "arguments": {"query": f"{keyword} 股票代码 所属市场 交易所 美股 港股 A股 最新", "count": 5},
+            },
+        ]
 
     def _specific_astock_tools_from_followup_context(self, query: str, intent_plan: dict | None = None) -> list[dict]:
         if not self._is_contextual_followup_query(query, intent_plan):
@@ -8374,10 +8533,13 @@ class CLI:
         astock_tools = self._specific_astock_tools_from_query(query)
         specific_tools = self._specific_market_tools_from_query(query)
         event_tools = self._event_market_default_tools(query) if self._is_event_market_query(query) else []
+        discovery_tools = [] if (astock_tools or specific_tools or event_tools) else self._market_discovery_tools_from_query(query)
         if normalized in {"single_asset", "data_lookup"} and astock_tools:
             return self._dedupe_mcp_tools(astock_tools + specific_tools + event_tools)
         if normalized in {"single_asset", "data_lookup", "market_overview"} and specific_tools:
             return self._dedupe_mcp_tools(specific_tools + event_tools)
+        if normalized in {"single_asset", "data_lookup"} and discovery_tools:
+            return self._dedupe_mcp_tools(discovery_tools)
         if normalized in {"risk", "general_investment"} and (specific_tools or event_tools):
             return self._dedupe_mcp_tools(specific_tools + event_tools)
         if normalized in {"market_overview", "data_lookup"}:
@@ -8428,6 +8590,8 @@ class CLI:
             return {"index_names": [item for item in label.split(",") if item]}
         if name == "get_global_asset_data":
             return {"asset_name": label}
+        if name == "get_global_asset_list":
+            return {"keyword": label}
         if name == "batch_get_global_asset_data":
             return {"asset_names": [item for item in label.split(",") if item]}
         if name == "web_search":
@@ -8529,6 +8693,12 @@ class CLI:
                 "asset_code": "asset_code",
                 "assetCode": "asset_code",
                 "sourceTable": "source_table",
+            },
+            "get_global_asset_list": {
+                "query": "keyword",
+                "asset_name": "keyword",
+                "assetName": "keyword",
+                "name": "keyword",
             },
             "batch_get_global_asset_data": {
                 "assetNames": "asset_names",

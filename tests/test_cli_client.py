@@ -1231,6 +1231,7 @@ def test_mcp_catalog_includes_super66_registry_tools():
     assert catalog["registry_source"] == "Super66MCP.list_registry_tools"
     assert "search_astocks" in registry_names
     assert "get_astock_realtime" in registry_names
+    assert "get_global_asset_list" in registry_names
     assert "get_product_history" in registry_names
     assert set(catalog["tool_names"]) == registry_names
     assert registry_names.issubset(CLI()._allowed_super66_tools())
@@ -1242,6 +1243,9 @@ def test_mcp_catalog_includes_super66_registry_tools():
     assert "macro_event_cross_asset" in playbook_tasks
     assert "microcap_strategy_due_diligence" in playbook_tasks
     assert "visualization_or_report_followup" in playbook_tasks
+    selection_policy = "\n".join(catalog["selection_policy"])
+    assert "中文名称不等于 A股" in selection_policy
+    assert "get_global_asset_list" in selection_policy
     pattern_names = {item["name"] for item in catalog["composition_patterns"]}
     assert "market_snapshot_to_narrative" in pattern_names
     assert "microcap_liquidity_price_volume_to_decision" in pattern_names
@@ -5160,13 +5164,55 @@ def test_astock_query_augments_llm_market_overview_tools():
     assert "client_astock_guardrail" in plan["tool_selection_source"]
 
 
-def test_unknown_astock_name_adds_name_search_and_web_code_lookup():
-    tools = CLI()._specific_astock_tools_from_query("分析宁德时代今年表现")
+def test_unknown_company_name_without_market_uses_global_discovery_not_astock():
+    cli = CLI()
+    tools = cli._specific_astock_tools_from_query("分析一下英伟达可以吗")
+
+    assert tools == []
+
+    plan = cli._normalize_intent_plan(
+        {"intent": "single_asset", "needs_mcp": False, "mcp_tools": []},
+        "分析一下英伟达可以吗",
+    )
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    assert "search_astocks" not in tool_names
+    assert "get_global_asset_list" in tool_names
+    assert "get_global_asset_data" in tool_names
+    assert {"name": "get_global_asset_list", "arguments": {"keyword": "英伟达", "limit": 10}} in plan["mcp_tools"]
+    assert any(
+        item["name"] == "web_search" and "英伟达 股票代码 所属市场" in item["arguments"]["query"]
+        for item in plan["mcp_tools"]
+    )
+
+
+def test_explicit_astock_unknown_name_adds_name_search_and_web_code_lookup():
+    tools = CLI()._specific_astock_tools_from_query("分析 A股 宁德时代今年表现")
 
     assert tools[0] == {"name": "search_astocks", "arguments": {"keyword": "宁德时代", "limit": 5}}
     assert tools[1]["name"] == "web_search"
     assert "宁德时代 股票代码 A股" in tools[1]["arguments"]["query"]
     assert "get_astock_realtime" not in {item["name"] for item in tools}
+
+
+def test_llm_selected_global_asset_tools_are_not_augmented_with_astock_guardrail():
+    cli = CLI()
+    plan = cli._normalize_intent_plan(
+        {
+            "intent": "single_asset",
+            "needs_mcp": True,
+            "mcp_tools": [
+                {"name": "get_global_asset_list", "arguments": {"keyword": "英伟达", "limit": 10}},
+                {"name": "get_global_asset_data", "arguments": {"asset_name": "NVDA", "limit": 5000}},
+            ],
+            "tool_selection_source": "local_llm",
+        },
+        "分析一下英伟达",
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    assert "search_astocks" not in tool_names
+    assert "client_astock_guardrail" not in plan["tool_selection_source"]
+    assert {"name": "get_global_asset_data", "arguments": {"asset_name": "NVDA", "limit": 5000}} in plan["mcp_tools"]
 
 
 def test_index_performance_query_does_not_trigger_astock_guardrail():
@@ -5295,6 +5341,35 @@ async def test_collect_astock_data_follows_search_result_with_realtime_and_histo
     assert ("get_astock_realtime", {"code": "600519"}) in calls
     assert any(call[0] == "get_astock_history" and call[1]["code"] == "600519" for call in calls)
     assert cli._market_fact_grounding("贵州茅台表现", data, {"mcp_tools": [{"name": "search_astocks"}]})["status"] == "grounded"
+
+
+@pytest.mark.asyncio
+async def test_collect_global_asset_data_follows_asset_list_result(monkeypatch):
+    calls = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments))
+            if tool_name == "get_global_asset_list":
+                return {"rows": [{"ticker": "NVDA", "name": "NVIDIA", "market": "NASDAQ"}]}
+            return {"latest": {"asset_name": arguments["asset_name"], "close": 158.2, "date": "2026-07-01"}}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+
+    cli = CLI()
+    data = await cli._collect_client_mcp_data(
+        "分析一下英伟达",
+        {},
+        {
+            "intent": "single_asset",
+            "needs_mcp": True,
+            "mcp_tools": [{"name": "get_global_asset_list", "arguments": {"keyword": "英伟达", "limit": 10}}],
+        },
+    )
+
+    assert calls[0] == ("get_global_asset_list", {"keyword": "英伟达", "limit": 10})
+    assert any(name == "get_global_asset_data" and args["asset_name"] == "NVDA" for name, args in calls)
+    assert "get_global_asset_data:NVDA" in data
 
 
 @pytest.mark.asyncio
