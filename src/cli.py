@@ -9278,8 +9278,10 @@ class CLI:
             return []
         target = " ".join(item for item in (label, code) if item)
         queries = [
-            f"{target} 东方财富 新浪财经 美股 财报 财务指标 研报 评级",
+            f"{target} 东方财富 新浪财经 美股 财报 财务报表 现金流 研报 评级",
             f"{target} 英为财情 Investing 财报 EPS 营收 预测 分析师 目标价",
+            f"{target} 财联社 格隆汇 新浪财经 研报 财报公告 估值口径",
+            f"{target} 腾讯自选股/老虎证券/富途牛牛 财报 公开页",
             f"{target} investor relations SEC 10-Q earnings release revenue operating income capex buyback",
             f"{target} 今年 股价 涨跌 原因 AI 搜索 云业务 资本开支 反垄断 估值",
         ]
@@ -9293,6 +9295,10 @@ class CLI:
             "财报",
             "基本面",
             "估值",
+            "全方位",
+            "全面",
+            "深度",
+            "深度分析",
             "营收",
             "利润",
             "盈利",
@@ -9306,11 +9312,22 @@ class CLI:
             "revenue",
             "guidance",
             "valuation",
+            "核心驱动",
+            "关键驱动",
+            "驱动因素",
+            "影响因素",
             "核心因素",
-            "涨跌原因",
             "主要原因",
+            "涨跌原因",
             "深入分析",
             "今年涨跌",
+            "今年涨幅",
+            "今年表现",
+            "今年走势",
+            "原因",
+            "事件",
+            "新闻",
+            "公告",
         )
         return any(marker in text for marker in markers)
 

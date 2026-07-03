@@ -5379,6 +5379,17 @@ def test_google_company_fundamental_query_overrides_bad_macro_plan():
     assert "client_global_stock_discovery" in plan["tool_selection_source"]
 
 
+def test_cli_triggers_fundamental_web_search_on_deep_analysis_queries():
+    cli = CLI()
+    assert cli._needs_company_fundamental_web_search(
+        "你再分析一下谷歌的全方位情况，从股价到基本面财报再到市场预期，做一个综合的分析。"
+    ) is True
+    assert cli._needs_company_fundamental_web_search(
+        "这个分析得有点太简单了，你能不能深入分析一下影响股价估值和股价的核心因素，以及今年涨跌的主要原因？"
+    ) is True
+    assert cli._needs_company_fundamental_web_search("分析英伟达") is False
+
+
 def test_global_stock_fundamental_followup_recovers_previous_google_context():
     cli = CLI()
     cli._last_mcp_data = {
