@@ -6651,7 +6651,7 @@ class CLI:
         return {
             "decision_owner": "本机大模型是主要编排者，负责理解上下文、选择 MCP/web_search、决定是否请求服务端映射和 chart artifact。",
             "client_role": "客户端只做工具白名单、参数归一化、授权沙箱、安全脱敏、连接失败兜底和资源链接落盘。",
-            "target_resolution": "具体股票/公司先判断所属市场；上市公司基本面、财报、业绩、估值或市场预期问题必须把 web_search 作为结构化数据库缺口补证。",
+            "target_resolution": "具体股票/公司先判断所属市场；上市公司基本面、财报、业绩、估值或市场预期问题必须把 web_search 作为结构化数据库缺口补证，优先查东方财富美股、英为财情、新浪财经美股等中国网络可访问源，再用公司 IR/SEC/Nasdaq 交叉验证。",
             "do_not": [
                 "不要先写死规则再让模型填空",
                 "不要只按关键词触发固定工具链",
@@ -6738,6 +6738,7 @@ class CLI:
             "artifact_channel": capability_catalog["artifact_channel"],
             "resource_link_channel": capability_catalog["resource_link_channel"],
             "local_web_search": capability_catalog["local_web_search"],
+            "company_fundamental_sources": capability_catalog.get("company_fundamental_sources", []),
             "server_client_contract": self._server_client_contract(),
             "routing_contract": self._agent_routing_contract(),
             "agent_orchestration_protocol": self._agent_orchestration_protocol(),
@@ -6800,6 +6801,7 @@ class CLI:
                             "当用户问具体股票/公司时，必须先在 evidence_targets 判断所属市场；中文名称不等于 A股，"
                             "例如英伟达/NVIDIA/NVDA 应识别为美股或全球资产候选，先走 get_global_asset_list 或 get_global_asset_data。"
                             "当用户问上市公司基本面、财报、业绩、估值或市场预期时，如果结构化数据库没有财报字段，必须主动追加 web_search 查询最新财报、盈利指引、分析师预期和目标价。"
+                            "基本面 web_search 优先使用中国网络可访问且较专业的信息源，例如东方财富美股、英为财情、新浪财经美股，再用公司 IR/SEC/Nasdaq 做官方交叉验证。"
                             "当用户问宏观形势、经济环境、利率、流动性等问题时，evidence_targets.asset_scope 必须是宏观，"
                             "并选择宏观指标工具，不要生成 search_astocks 或“股票代码 A股”查询。"
                             "你要灵活理解用户真正想问什么，并依据 selection_policy、data_recipes、route_plans、"
@@ -7006,7 +7008,22 @@ class CLI:
                 note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
                 tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
             needs_mcp = True
-        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools or global_stock_tools) else self._specific_astock_tools_from_query(query)
+        global_followup_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools or global_stock_tools) else self._specific_global_stock_tools_from_followup_context(query, plan)
+        if global_followup_tools:
+            before = list(tools)
+            tools = self._drop_misdirected_macro_tools(self._drop_misdirected_astock_lookup_tools(tools))
+            tools = self._dedupe_mcp_tools(global_followup_tools + tools)
+            needs_mcp = True
+            if tools != before:
+                source = tool_selection_source or route_source or "local_llm"
+                tool_selection_source = (
+                    source
+                    if "client_global_stock_followup_guardrail" in source
+                    else f"{source}+client_global_stock_followup_guardrail"
+                )
+                note = "检测到承接上一轮海外/全球上市公司的基本面追问，客户端从 previous_mcp_context 恢复标的并追加行情、财报和市场预期 web_search。"
+                tool_selection_note = f"{tool_selection_note} {note}".strip() if tool_selection_note else note
+        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools or global_stock_tools or global_followup_tools) else self._specific_astock_tools_from_query(query)
         if astock_tools:
             before = list(tools)
             tools = self._dedupe_mcp_tools(astock_tools + tools)
@@ -7482,10 +7499,15 @@ class CLI:
                 "resource_behavior": "results 中的 url/title 会被提取成命名链接；用户可用 /links 1 或 /open 1 打开。",
                 "boundary": "只在客户端本机调用 Chrome/Chromium；不读取浏览器隐私数据，不把模型 API Key 发送给二郎神服务端。",
             },
+            "company_fundamental_sources": [
+                "中国网络优先: 东方财富美股、英为财情 cn.investing.com、新浪财经美股、腾讯自选股、富途牛牛/老虎证券公开页、格隆汇/智通财经/财联社",
+                "官方交叉验证: 公司 Investor Relations、SEC 10-Q/10-K/8-K、Nasdaq financials；若中国网络不可达，仍保留为官方口径链接",
+                "字段目标: 最新季度营收、EPS、经营利润率、分业务收入、云业务/广告/搜索/YouTube、资本开支、回购、指引、分析师一致预期和目标价",
+            ],
             "selection_policy": [
                 "优先让大模型根据上下文选择工具组合，不用硬编码关键词替代理解",
                 "用户给出具体股票/公司时，先由大模型判断所属市场；中文名称不等于 A股，海外公司和美股科技公司应走 get_global_asset_list/get_global_asset_data",
-                "用户问上市公司基本面、财报、业绩、估值或市场预期时，如果结构化数据库没有财报字段，必须主动追加 web_search 查询最新财报、盈利指引、分析师预期和目标价",
+                "用户问上市公司基本面、财报、业绩、估值或市场预期时，如果结构化数据库没有财报字段，必须主动追加 web_search；优先查东方财富美股、英为财情、新浪财经美股等中国网络可访问源，再用公司 IR/SEC/Nasdaq 交叉验证",
                 "只有明确 A股、给出沪深 A股代码，或模型已经判断为 A股时，才使用 search_astocks/get_astock_realtime/get_astock_history",
                 "上市市场不确定时，先用 get_global_asset_list + 中性 web_search 核验代码/交易所，再决定后续行情工具",
                 "行情和产品数据优先 super-66 MCP；新闻和公开网页补充 web_search",
@@ -7853,7 +7875,25 @@ class CLI:
                 note = "检测到指数/大盘表现查询，客户端强制改用指数行情工具，避免误走 A 股个股搜索。"
                 previous = self._text_field(intent_plan.get("tool_selection_note"))
                 intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
-        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools or global_stock_tools) else self._specific_astock_tools_from_query(query)
+        global_followup_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools or global_stock_tools) else self._specific_global_stock_tools_from_followup_context(query, intent_plan)
+        if global_followup_tools:
+            before = list(tools)
+            tools = self._drop_misdirected_macro_tools(self._drop_misdirected_astock_lookup_tools(tools))
+            tools = self._dedupe_mcp_tools(global_followup_tools + tools)
+            if isinstance(intent_plan, dict):
+                intent_plan["needs_mcp"] = True
+                intent_plan["mcp_tools"] = tools
+                if tools != before:
+                    source = self._text_field(intent_plan.get("tool_selection_source") or intent_plan.get("route_source") or "local_llm")
+                    intent_plan["tool_selection_source"] = (
+                        source
+                        if "client_global_stock_followup_guardrail" in source
+                        else f"{source}+client_global_stock_followup_guardrail"
+                    )
+                    note = "检测到承接上一轮海外/全球上市公司的基本面追问，客户端从 previous_mcp_context 恢复标的并追加行情、财报和市场预期 web_search。"
+                    previous = self._text_field(intent_plan.get("tool_selection_note"))
+                    intent_plan["tool_selection_note"] = f"{previous} {note}".strip() if previous else note
+        astock_tools = [] if (index_guardrail_tools or microcap_tools or macro_guardrail_tools or global_stock_tools or global_followup_tools) else self._specific_astock_tools_from_query(query)
         astock_guardrail = "client_astock_guardrail"
         if not astock_tools:
             astock_tools = self._specific_astock_tools_from_followup_context(query, intent_plan)
@@ -9236,8 +9276,10 @@ class CLI:
             return []
         target = " ".join(item for item in (label, code) if item)
         queries = [
-            f"{target} 最新财报 营收 利润 指引 资本开支 现金流 估值",
-            f"{target} 市场预期 分析师 目标价 盈利预测 业务增长 风险",
+            f"{target} 东方财富 新浪财经 美股 财报 财务指标 研报 评级",
+            f"{target} 英为财情 Investing 财报 EPS 营收 预测 分析师 目标价",
+            f"{target} investor relations SEC 10-Q earnings release revenue operating income capex buyback",
+            f"{target} 今年 股价 涨跌 原因 AI 搜索 云业务 资本开支 反垄断 估值",
         ]
         return [{"name": "web_search", "arguments": {"query": item, "count": 5}} for item in queries]
 
@@ -9262,8 +9304,73 @@ class CLI:
             "revenue",
             "guidance",
             "valuation",
+            "核心因素",
+            "涨跌原因",
+            "主要原因",
+            "深入分析",
+            "今年涨跌",
         )
         return any(marker in text for marker in markers)
+
+    def _specific_global_stock_tools_from_followup_context(self, query: str, intent_plan: dict | None = None) -> list[dict]:
+        if not self._is_contextual_followup_query(query, intent_plan):
+            return []
+        if not self._needs_company_fundamental_web_search(query):
+            return []
+        if not isinstance(self._last_mcp_data, dict) or not self._last_mcp_data:
+            return []
+        rows = self._global_asset_market_rows_from_mcp(self._last_mcp_data)
+        identity = self._global_asset_identity_from_mcp(query, self._last_mcp_data, rows)
+        keyword = self._global_stock_keyword_from_identity(identity)
+        ticker = self._text_field(identity.get("code")).upper()
+        if not keyword and not ticker:
+            return []
+        tools = self._global_stock_tools_for_target(keyword=keyword or ticker, ticker=ticker)
+        tools.extend(self._company_fundamental_search_tools(query, keyword=keyword or ticker, ticker=ticker))
+        return self._dedupe_mcp_tools(tools)
+
+    def _global_stock_tools_for_target(self, *, keyword: str = "", ticker: str = "") -> list[dict]:
+        keyword = self._text_field(keyword or ticker)
+        ticker = re.sub(r"[^A-Za-z.]", "", self._text_field(ticker)).upper()
+        if not keyword and not ticker:
+            return []
+        asset_name = ticker or keyword
+        window = self._recent_market_window_args(days=180)
+        tools = []
+        if keyword:
+            tools.append({"name": "get_global_asset_list", "arguments": {"keyword": keyword, "limit": 10}})
+        if asset_name:
+            tools.append({"name": "get_global_asset_data", "arguments": {"asset_name": asset_name, **window, "limit": 5000}})
+        return tools
+
+    def _global_stock_keyword_from_identity(self, identity: dict) -> str:
+        code = self._text_field(identity.get("code")).upper()
+        name = self._text_field(identity.get("name") or identity.get("display"))
+        combined = re.sub(r"\s+", "", f"{name}{code}".lower())
+        known_by_code = {
+            "GOOGL": "谷歌",
+            "GOOG": "谷歌",
+            "NVDA": "英伟达",
+            "AAPL": "苹果",
+            "MSFT": "微软",
+            "AMZN": "亚马逊",
+            "TSLA": "特斯拉",
+            "META": "Meta",
+        }
+        if code in known_by_code:
+            return known_by_code[code]
+        for aliases, keyword, ticker in (
+            (("谷歌", "google", "alphabet"), "谷歌", "GOOGL"),
+            (("英伟达", "nvidia"), "英伟达", "NVDA"),
+            (("苹果", "apple"), "苹果", "AAPL"),
+            (("微软", "microsoft"), "微软", "MSFT"),
+            (("亚马逊", "amazon"), "亚马逊", "AMZN"),
+            (("特斯拉", "tesla"), "特斯拉", "TSLA"),
+            (("meta", "facebook", "脸书"), "Meta", "META"),
+        ):
+            if any(alias in combined for alias in aliases):
+                return keyword
+        return name
 
     def _specific_astock_tools_from_followup_context(self, query: str, intent_plan: dict | None = None) -> list[dict]:
         if not self._is_contextual_followup_query(query, intent_plan):

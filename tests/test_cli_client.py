@@ -5372,10 +5372,35 @@ def test_google_company_fundamental_query_overrides_bad_macro_plan():
     assert "batch_get_macro_data" not in tool_names
     assert {"name": "get_global_asset_list", "arguments": {"keyword": "谷歌", "limit": 10}} in plan["mcp_tools"]
     assert any(item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "GOOGL" for item in plan["mcp_tools"])
-    assert any("谷歌 GOOGL 最新财报" in query for query in web_queries)
-    assert any("谷歌 GOOGL 市场预期" in query for query in web_queries)
+    assert any("谷歌 GOOGL 东方财富 新浪财经" in query for query in web_queries)
+    assert any("谷歌 GOOGL 英为财情 Investing" in query for query in web_queries)
+    assert any("谷歌 GOOGL investor relations SEC" in query for query in web_queries)
     assert all("中国 今日 宏观" not in query for query in web_queries)
     assert "client_global_stock_discovery" in plan["tool_selection_source"]
+
+
+def test_global_stock_fundamental_followup_recovers_previous_google_context():
+    cli = CLI()
+    cli._last_mcp_data = {
+        "get_global_asset_list:谷歌": {"rows": [{"name": "Alphabet", "ticker": "GOOGL", "market": "NASDAQ"}]},
+        "get_global_asset_data:GOOGL": {"rows": [{"asset_name": "GOOGL", "date": "2026-07-01", "close": 350.0}]},
+    }
+    query = "这个分析得有点太简单了，你能不能深入分析一下影响股价估值和股价的核心因素，以及今年涨跌的主要原因？"
+    plan = cli._normalize_intent_plan(
+        {"intent": "general_investment", "needs_mcp": False, "mcp_tools": [], "is_followup": True},
+        query,
+    )
+
+    tool_names = [item["name"] for item in plan["mcp_tools"]]
+    web_queries = [item["arguments"].get("query", "") for item in plan["mcp_tools"] if item["name"] == "web_search"]
+    assert "get_global_asset_list" in tool_names
+    assert "get_global_asset_data" in tool_names
+    assert {"name": "get_global_asset_list", "arguments": {"keyword": "谷歌", "limit": 10}} in plan["mcp_tools"]
+    assert any(item["name"] == "get_global_asset_data" and item["arguments"].get("asset_name") == "GOOGL" for item in plan["mcp_tools"])
+    assert any("谷歌 GOOGL 东方财富 新浪财经" in query for query in web_queries)
+    assert any("谷歌 GOOGL 英为财情 Investing" in query for query in web_queries)
+    assert any("谷歌 GOOGL 今年 股价 涨跌 原因" in query for query in web_queries)
+    assert "client_global_stock_followup_guardrail" in plan["tool_selection_source"]
 
 
 def test_general_investment_named_stock_defaults_to_global_discovery():
@@ -5744,15 +5769,55 @@ async def test_collect_google_fundamental_query_drops_macro_tools_and_searches_w
     assert "batch_get_macro_data" not in called_names
     assert calls[0] == ("get_global_asset_list", {"keyword": "谷歌", "limit": 10})
     assert any(name == "get_global_asset_data" and args["asset_name"] == "GOOGL" for name, args in calls)
-    assert any("谷歌 GOOGL 最新财报" in item for item in web_queries)
-    assert any("谷歌 GOOGL 市场预期" in item for item in web_queries)
+    assert any("谷歌 GOOGL 东方财富 新浪财经" in item for item in web_queries)
+    assert any("谷歌 GOOGL 英为财情 Investing" in item for item in web_queries)
+    assert any("谷歌 GOOGL investor relations SEC" in item for item in web_queries)
     assert "get_global_asset_data:GOOGL" in data
     assert any(
         str(key).startswith("web_search:")
         and isinstance(value, dict)
-        and "谷歌 GOOGL 最新财报" in value.get("query", "")
+        and "谷歌 GOOGL 东方财富 新浪财经" in value.get("query", "")
         for key, value in data.items()
     )
+
+
+@pytest.mark.asyncio
+async def test_collect_global_stock_fundamental_followup_refetches_and_searches_web(monkeypatch):
+    calls = []
+    web_queries = []
+
+    class FakeSuper66MCP:
+        async def call_tool(self, tool_name, arguments=None, use_cache=True):
+            calls.append((tool_name, arguments or {}))
+            if tool_name == "get_global_asset_list":
+                return {"rows": [{"ticker": "GOOGL", "name": "Alphabet", "market": "NASDAQ"}]}
+            return {"latest": {"asset_name": (arguments or {}).get("asset_name"), "close": 351.0, "date": "2026-07-02"}}
+
+    async def fake_search(self, query, arguments):
+        web_queries.append(query)
+        return {"query": query, "provider": "local_chrome", "results": [{"title": query, "url": "https://example.com"}]}
+
+    monkeypatch.setattr("src.mcp.super66.Super66MCP", FakeSuper66MCP)
+    monkeypatch.setattr(CLI, "_run_local_chrome_search", fake_search)
+
+    cli = CLI()
+    cli._last_mcp_data = {
+        "get_global_asset_list:谷歌": {"rows": [{"name": "Alphabet", "ticker": "GOOGL", "market": "NASDAQ"}]},
+        "get_global_asset_data:GOOGL": {"rows": [{"asset_name": "GOOGL", "date": "2026-07-01", "close": 350.0}]},
+    }
+    query = "这个分析得有点太简单了，你能不能深入分析一下影响股价估值和股价的核心因素，以及今年涨跌的主要原因？"
+    plan = {"intent": "general_investment", "needs_mcp": False, "mcp_tools": [], "is_followup": True}
+
+    data = await cli._collect_client_mcp_data(query, {}, plan)
+
+    called_names = [name for name, _ in calls]
+    assert called_names[0] == "get_global_asset_list"
+    assert any(name == "get_global_asset_data" and args["asset_name"] == "GOOGL" for name, args in calls)
+    assert any("谷歌 GOOGL 东方财富 新浪财经" in item for item in web_queries)
+    assert any("谷歌 GOOGL 英为财情 Investing" in item for item in web_queries)
+    assert "previous_mcp_context" != plan.get("tool_selection_source")
+    assert "client_global_stock_followup_guardrail" in plan["tool_selection_source"]
+    assert "get_global_asset_data:GOOGL" in data
 
 
 @pytest.mark.asyncio
