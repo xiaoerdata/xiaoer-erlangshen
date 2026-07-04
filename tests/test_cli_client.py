@@ -11,7 +11,7 @@ from src.cli import CLI, _display_width, _extract_startup_workspace_args, _json_
 from src.commands.auth import AuthCommand
 from src.commands.server import ServerCommand
 from src.client.server_client import _normalize_login_payload
-from src.client.chrome_search import build_search_url, _is_noise_search_result
+from src.client.chrome_search import build_search_url, professional_source_fallback_results, _is_noise_search_result, _is_relevant_finance_result
 from src.config import get_config, reset_config, update_config
 from src.llm.providers import LLMClient, resolve_llm_settings
 from src.mcp.super66 import Super66MCP
@@ -7394,9 +7394,40 @@ def test_chrome_search_defaults_to_bing_and_filters_block_pages(monkeypatch):
     assert "mkt=zh-CN" in url
     assert _is_noise_search_result("Why did this happen?", "https://www.google.com/sorry/index")
     assert _is_noise_search_result("Terms of Service", "https://policies.google.com/terms")
+    assert _is_noise_search_result("Google", "https://www.google.com/")
+    assert _is_noise_search_result("Google", "https://google.cn/")
+    assert _is_noise_search_result("下载和安装 Google Chrome", "https://support.google.cn/chrome/answer/95346")
     assert _is_noise_search_result("网页", "https://www.bing.com/?scope=web&FORM=HDRSC1")
     assert _is_noise_search_result("学术", "https://www.bing.com/academic/search?q=market")
     assert not _is_noise_search_result("央行释放流动性信号", "https://finance.example.com/news")
+
+
+def test_chrome_search_finance_fallback_returns_professional_sources():
+    results = professional_source_fallback_results("谷歌 GOOGL 财报 财务报表 现金流 研报 评级", count=5)
+    urls = [item["url"] for item in results]
+    titles = [item["title"] for item in results]
+
+    assert any("eastmoney.com" in url for url in urls)
+    assert any("finance.sina.com.cn" in url for url in urls)
+    assert any("sec.gov" in url for url in urls)
+    assert any("Investor Relations" in title or "SEC" in title for title in titles)
+    assert not _is_relevant_finance_result(
+        "谷歌 GOOGL investor relations SEC 10-Q",
+        {"title": "Google Search - A new kind of help", "url": "https://search.google/"},
+    )
+
+
+def test_chrome_search_fund_manager_fallback_returns_manager_sources():
+    results = professional_source_fallback_results("金梓才 基金经理 任职 基金 公司 持仓 业绩 回撤", count=5)
+    urls = [item["url"] for item in results]
+
+    assert any("eastmoney.com" in url for url in urls)
+    assert any("fund.eastmoney.com/manager" in url for url in urls)
+    assert any("iwencai.com" in url for url in urls)
+    assert not _is_relevant_finance_result(
+        "金梓才 基金经理 任职 基金 公司 持仓 业绩 回撤",
+        {"title": "24小时黄金价格走势图-黄金价格", "url": "https://www.cngold.org/livegold.html"},
+    )
 
 
 def test_mcp_snapshot_lines_extracts_web_search_titles_without_secret_fields():
