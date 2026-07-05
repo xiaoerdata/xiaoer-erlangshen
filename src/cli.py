@@ -388,7 +388,22 @@ def _pad_display(text: str, width: int) -> str:
 
 
 def _logo() -> str:
-    return "\n".join(_color(line, "36;1") for line in LOGO_COMPACT)
+    width = _terminal_width()
+    logo_mode = os.getenv("ERLANGSHEN_LOGO", "auto").strip().lower()
+    if logo_mode in {"off", "none", "0", "false", "no"}:
+        return ""
+    if logo_mode in {"wide", "art", "full"} or (logo_mode == "auto" and width >= 96):
+        lines = [
+            *LOGO_WIDE,
+            "",
+            "╭─ ERLANGSHEN 二郎神 · Agent Console " + "─" * 38 + "╮",
+            "│  /thesis 观点验证 · 直接提问 · 图表/报告进入 /links                         │",
+            "│  MCP data check · protected mapping · local LLM answer · confidence            │",
+            "╰" + "─" * 78 + "╯",
+        ]
+    else:
+        lines = LOGO_COMPACT
+    return "\n".join(_color(line, "36;1") for line in lines)
 
 
 def _panel(title: str, rows: list[tuple[str, str]]) -> str:

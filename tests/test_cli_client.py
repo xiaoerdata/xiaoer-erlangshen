@@ -60,7 +60,8 @@ def test_wide_logo_keeps_technical_mark(monkeypatch):
     logo = _logo()
 
     assert "███████╗██████╗" in logo
-    assert "二郎神 ERLANGSHEN" in logo
+    assert "ERLANGSHEN 二郎神 · Agent Console" in logo
+    assert "MCP data check" in logo
 
 
 def test_panels_use_terminal_display_width_for_chinese_text(monkeypatch):
