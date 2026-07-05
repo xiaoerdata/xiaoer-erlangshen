@@ -6663,7 +6663,7 @@ asyncio.run(main())
         return {
             "mcp_data_keys": "每个 key 形如 tool:label，例如 get_index_data:沪深300 或 web_search:最新政策影响。",
             "market_series": "指数、资产、产品历史通常在 data/result/records/items/history/prices 等字段中，优先使用最近一条可读记录。",
-            "web_search": "web_search 返回 results 数组，优先提取 title、source/site 或 url 域名作为事件线索；不要把搜索结果当成已验证结论。",
+            "web_search": "web_search 返回 results 数组，优先提取 title、snippet/page_snippet、source/site 和 url；snippet 可作为网页摘要线索，仍需按来源可靠性区分 verified 与待核验。",
             "chart_artifact": (
                 "当用户要求图表、报告、对比、走势、收益或回撤展示时，可在 artifacts 返回 chart 请求；"
                 "客户端会调用服务端 chart artifact 通道，并在授权工作区保存 JSON/HTML。"
@@ -9325,11 +9325,9 @@ asyncio.run(main())
             return []
         target = " ".join(item for item in (label, code) if item)
         queries = [
-            f"{target} 东方财富 新浪财经 美股 财报 财务报表 现金流 研报 评级",
-            f"{target} 英为财情 Investing 财报 EPS 营收 预测 分析师 目标价",
-            f"{target} 财联社 格隆汇 新浪财经 研报 财报公告 估值口径",
-            f"{target} 腾讯自选股/老虎证券/富途牛牛 财报 公开页",
-            f"{target} investor relations SEC 10-Q earnings release revenue operating income capex buyback",
+            f"{target} 新浪财经 美股 市盈率 每股收益 市值 52周",
+            f"{target} investor relations earnings results 10-Q revenue operating income capex buyback",
+            f"{target} analyst consensus target price EPS revenue forecast Nasdaq Investing",
             f"{target} 今年 股价 涨跌 原因 AI 搜索 云业务 资本开支 反垄断 估值",
         ]
         return [{"name": "web_search", "arguments": {"query": item, "count": 5}} for item in queries]
@@ -10831,7 +10829,9 @@ asyncio.run(main())
             suffix = f" ({source[:32]})" if source else ""
             url = self._text_field(item.get("url"))
             link = f" {url}" if re.match(r"^https?://", url, flags=re.I) else ""
-            highlights.append(f"网页线索 {title}{suffix}{link}")
+            snippet = self._text_field(item.get("snippet") or item.get("summary") or item.get("description"))
+            detail = f"；摘要: {snippet[:160]}" if snippet else ""
+            highlights.append(f"网页线索 {title}{suffix}{detail}{link}")
             if len(highlights) >= 3:
                 break
         return highlights

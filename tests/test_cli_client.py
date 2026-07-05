@@ -7440,14 +7440,14 @@ def test_mcp_snapshot_lines_extracts_web_search_titles_without_secret_fields():
             "api_key": "should-not-render",
             "results": [
                 {"title": "央行释放流动性信号", "url": "https://www.example.com/news/1"},
-                {"title": "科技成长板块成交活跃", "source": "财经网"},
+                {"title": "科技成长板块成交活跃", "source": "财经网", "snippet": "成交额放大，成长风格继续占优。"},
             ],
         },
     })
 
     joined = "\n".join(lines)
     assert "网页线索: 网页线索 央行释放流动性信号 (example.com) https://www.example.com/news/1" in joined
-    assert "网页线索: 网页线索 科技成长板块成交活跃 (财经网)" in joined
+    assert "网页线索: 网页线索 科技成长板块成交活跃 (财经网)；摘要: 成交额放大，成长风格继续占优。" in joined
     assert "should-not-render" not in joined
     assert "api_key" not in joined
 

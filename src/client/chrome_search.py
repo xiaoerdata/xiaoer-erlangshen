@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
@@ -330,14 +331,6 @@ def professional_source_fallback_results(query: str, count: int = 5) -> list[dic
             "official_source/sec",
             "官方 10-Q/10-K/8-K 披露入口，用于交叉验证财报事实。",
         )
-        _add_result(
-            results,
-            seen,
-            f"Nasdaq {ticker} earnings/forecast",
-            f"https://www.nasdaq.com/market-activity/stocks/{ticker_lower}/earnings",
-            "professional_source/nasdaq",
-            "用于核对 earnings、consensus estimate 和 surprise。",
-        )
         ir_url = KNOWN_IR_URLS.get(ticker)
         if ir_url:
             _add_result(
@@ -348,6 +341,14 @@ def professional_source_fallback_results(query: str, count: int = 5) -> list[dic
                 "official_source/investor_relations",
                 "公司官方投资者关系页面，用于核对财报新闻稿、电话会材料和回购/CapEx 信息。",
             )
+        _add_result(
+            results,
+            seen,
+            f"Nasdaq {ticker} earnings/forecast",
+            f"https://www.nasdaq.com/market-activity/stocks/{ticker_lower}/earnings",
+            "professional_source/nasdaq",
+            "用于核对 earnings、consensus estimate 和 surprise。",
+        )
     else:
         _add_result(
             results,
@@ -359,6 +360,184 @@ def professional_source_fallback_results(query: str, count: int = 5) -> list[dic
         )
 
     return results[:limit]
+
+
+def _build_web_search_results(
+    items: list[dict[str, str]],
+    query: str,
+    *,
+    count: int,
+    browser_label: str,
+    engine: str,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    seen = set()
+    results = []
+    for item in items:
+        link = normalize_search_result_url(item.get("url", ""))
+        title = " ".join(str(item.get("title", "")).split())
+        snippet = " ".join(str(item.get("snippet", "")).split())
+        if not title:
+            parsed = urlparse(str(link))
+            title = parsed.netloc.replace("www.", "") if parsed.netloc else ""
+        if not title or link in seen or _is_noise_search_result(title, link):
+            continue
+        seen.add(link)
+        result = {"title": title, "url": link, "source": f"local_{browser_label}/{engine}"}
+        if snippet:
+            result["snippet"] = snippet[:500]
+        results.append(result)
+        if len(results) >= max(1, min(count, 10)):
+            break
+
+    fallback_results: list[dict[str, str]] = []
+    if _looks_like_finance_research_query(query):
+        relevant_results = [item for item in results if _is_relevant_finance_result(query, item)]
+        if len(relevant_results) < len(results):
+            results = relevant_results
+            seen = {item.get("url", "") for item in results}
+    if _looks_like_finance_research_query(query) and len(results) < min(max(1, count), 5):
+        fallback_results = professional_source_fallback_results(query, count=max(1, min(count, 10)))
+        for item in fallback_results:
+            link = item.get("url", "")
+            if link in seen:
+                continue
+            seen.add(link)
+            results.append(item)
+            if len(results) >= max(1, min(count, 10)):
+                break
+    return results, fallback_results
+
+
+def _finance_page_snippet(text: str, query: str, *, max_len: int = 900) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return ""
+    keywords = [
+        "基本面摘要",
+        "市盈率",
+        "每股收益",
+        "市值",
+        "52周",
+        "成交量",
+        "财报",
+        "营收",
+        "现金流",
+        "目标价",
+        "评级",
+        "分析师",
+        "Revenues",
+        "revenue",
+        "Operating income",
+        "Net income",
+        "Diluted earnings per share",
+        "earnings per share",
+        "capital expenditures",
+        "CapEx",
+        "buyback",
+        "repurchase",
+        "Google Cloud",
+        "advertising",
+        "Search",
+    ]
+    ticker, company = _extract_us_stock_identity(query)
+    for token in (ticker, company.split("/", 1)[0] if company else ""):
+        if token:
+            keywords.append(token)
+    lower = clean.lower()
+    windows: list[str] = []
+    for keyword in keywords:
+        needle = keyword.lower()
+        idx = lower.find(needle)
+        if idx < 0:
+            continue
+        start = max(0, idx - 180)
+        end = min(len(clean), idx + 520)
+        window = clean[start:end].strip(" ，。；|")
+        if window and not any(window in item or item in window for item in windows):
+            windows.append(window)
+        if len("；".join(windows)) >= max_len:
+            break
+    if not windows and _looks_like_finance_research_query(query):
+        windows.append(clean[:max_len])
+    snippet = "；".join(windows)
+    return snippet[:max_len].strip()
+
+
+async def _extract_page_text_snippet(browser: Any, url: str, query: str) -> tuple[str, list[dict[str, str]]]:
+    if not url or url.lower().endswith((".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp")):
+        return "", []
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if host.endswith("eastmoney.com") and "/web/s" in path:
+        return "", []
+    if host == "cn.investing.com" and path.startswith("/search"):
+        return "", []
+    if host.endswith("sec.gov") and "/edgar/browse" in path:
+        return "", []
+    page = await browser.new_page(
+        locale="zh-CN",
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        ),
+    )
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+        await page.wait_for_timeout(1800 if parsed.netloc.lower().endswith("finance.sina.com.cn") else 800)
+        text = await page.locator("body").inner_text(timeout=5000)
+        snippet = _finance_page_snippet(text, query)
+        related_links: list[dict[str, str]] = []
+        if parsed.netloc.lower().endswith("abc.xyz"):
+            related_links = await page.locator("a").evaluate_all(
+                """
+                (links) => links
+                  .map((a) => ({
+                    title: (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim(),
+                    url: a.href || ''
+                  }))
+                  .filter((item) => item.title && item.url && /earnings|10-q|10-k|quarter|results|financials|sec/i.test(item.title + ' ' + item.url))
+                  .slice(0, 10)
+                """
+            )
+        return snippet, related_links
+    except Exception:
+        return "", []
+    finally:
+        await page.close()
+
+
+async def _enrich_finance_results_with_page_snippets(browser: Any, results: list[dict[str, str]], query: str) -> bool:
+    if not _looks_like_finance_research_query(query) or not results:
+        return False
+    enriched = False
+    checked = 0
+    preferred_hosts = (
+        "finance.sina.com.cn",
+        "nasdaq.com",
+        "abc.xyz",
+        "finance.yahoo.co.jp",
+    )
+    for item in results:
+        if checked >= 2:
+            break
+        url = str(item.get("url") or "")
+        host = urlparse(url).netloc.lower()
+        if not any(marker in host for marker in preferred_hosts):
+            continue
+        checked += 1
+        snippet, related_links = await _extract_page_text_snippet(browser, url, query)
+        if snippet:
+            existing = str(item.get("snippet") or "")
+            if len(snippet) > len(existing):
+                item["snippet"] = snippet
+                item["content_status"] = "page_snippet_extracted"
+                enriched = True
+        if related_links:
+            item["related_links"] = related_links
+            enriched = True
+    return enriched
 
 
 async def chrome_web_search(query: str, count: int = 5) -> dict[str, Any]:
@@ -391,30 +570,74 @@ async def chrome_web_search(query: str, count: int = 5) -> dict[str, Any]:
                     ),
                 )
                 await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                selector = "li.b_algo h2 a, .b_algo h2 a" if engine == "bing" else "a"
-                items = await page.locator(selector).evaluate_all(
-                    """
-                    (links) => links
-                      .map((a) => ({
-                        title: (a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim(),
-                        url: a.href || ''
-                      }))
-                      .filter((item) => item.title && item.url.startsWith('http'))
-                      .slice(0, 20)
-                    """
-                )
+                if engine == "bing":
+                    items = await page.locator("li.b_algo").evaluate_all(
+                        """
+                        (nodes) => nodes
+                          .map((node) => {
+                            const a = node.querySelector('h2 a');
+                            const snippet = node.querySelector('.b_caption p, p');
+                            return {
+                              title: ((a && (a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title'))) || '').trim(),
+                              url: (a && a.href) || '',
+                              snippet: ((snippet && (snippet.innerText || snippet.textContent)) || '').trim()
+                            };
+                          })
+                          .filter((item) => item.title && item.url.startsWith('http'))
+                          .slice(0, 20)
+                        """
+                    )
+                else:
+                    items = await page.locator("a").evaluate_all(
+                        """
+                        (links) => links
+                          .map((a) => ({
+                            title: (a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim(),
+                            url: a.href || '',
+                            snippet: ''
+                          }))
+                          .filter((item) => item.title && item.url.startsWith('http'))
+                          .slice(0, 20)
+                        """
+                    )
                 if not items:
                     items = await page.locator("a").evaluate_all(
                         """
                         (links) => links
                           .map((a) => ({
                             title: (a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim(),
-                            url: a.href || ''
+                            url: a.href || '',
+                            snippet: ''
                           }))
                           .filter((item) => item.title && item.url.startsWith('http'))
                           .slice(0, 30)
                         """
                     )
+                results, fallback_results = _build_web_search_results(
+                    items,
+                    query,
+                    count=count,
+                    browser_label=browser_label,
+                    engine=engine,
+                )
+                enriched = await _enrich_finance_results_with_page_snippets(browser, results, query)
+                return {
+                    "query": query,
+                    "provider": "local_chrome" + ("+professional_source_fallback" if fallback_results else ""),
+                    "engine": engine,
+                    "results": results,
+                    "total": len(results),
+                    "quality": (
+                        "fallback_source_entries_with_page_snippets"
+                        if fallback_results and enriched
+                        else "fallback_source_entries"
+                        if fallback_results
+                        else "search_results_with_page_snippets"
+                        if enriched
+                        else "search_results"
+                    ),
+                    "fallback_reason": "search_results_missing_or_low_quality" if fallback_results else "",
+                }
             finally:
                 await browser.close()
     except Exception as exc:
@@ -424,43 +647,3 @@ async def chrome_web_search(query: str, count: int = 5) -> dict[str, Any]:
             "install": INSTALL_HINT,
             "results": [],
         }
-
-    seen = set()
-    results = []
-    for item in items:
-        link = normalize_search_result_url(item.get("url", ""))
-        title = " ".join(str(item.get("title", "")).split())
-        if not title:
-            parsed = urlparse(str(link))
-            title = parsed.netloc.replace("www.", "") if parsed.netloc else ""
-        if not title or link in seen or _is_noise_search_result(title, link):
-            continue
-        seen.add(link)
-        results.append({"title": title, "url": link, "source": f"local_{browser_label}/{engine}"})
-        if len(results) >= max(1, min(count, 10)):
-            break
-    fallback_results: list[dict[str, str]] = []
-    if _looks_like_finance_research_query(query):
-        relevant_results = [item for item in results if _is_relevant_finance_result(query, item)]
-        if len(relevant_results) < len(results):
-            results = relevant_results
-            seen = {item.get("url", "") for item in results}
-    if _looks_like_finance_research_query(query) and len(results) < min(max(1, count), 5):
-        fallback_results = professional_source_fallback_results(query, count=max(1, min(count, 10)))
-        for item in fallback_results:
-            link = item.get("url", "")
-            if link in seen:
-                continue
-            seen.add(link)
-            results.append(item)
-            if len(results) >= max(1, min(count, 10)):
-                break
-    return {
-        "query": query,
-        "provider": "local_chrome" + ("+professional_source_fallback" if fallback_results else ""),
-        "engine": engine,
-        "results": results,
-        "total": len(results),
-        "quality": "fallback_source_entries" if fallback_results else "search_results",
-        "fallback_reason": "search_results_missing_or_low_quality" if fallback_results else "",
-    }
