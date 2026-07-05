@@ -1,8 +1,9 @@
 """
-Optional local Chrome web search for the CLI.
+Required local Chrome/Chromium web search for evidence-backed CLI analysis.
 
-This is deliberately optional: users who want browser-backed search install
-Playwright and a Chrome/Chromium browser locally.
+The npm installer installs Playwright and a bundled Chromium browser by default.
+If a user has Google Chrome available, the search path uses it first and then
+falls back to Playwright's Chromium.
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 
 INSTALL_HINT = (
-    "本地 Chrome 搜索需要安装可选依赖: "
-    "python3 -m pip install playwright && python3 -m playwright install chrome"
+    "web_search 是财报、公告、新闻和事件验证的关键能力；请安装依赖: "
+    "python -m pip install playwright && python -m playwright install chromium"
 )
 
 
@@ -372,32 +373,26 @@ async def chrome_web_search(query: str, count: int = 5) -> dict[str, Any]:
 
     engine = search_engine()
     url = build_search_url(query, engine)
+    browser_label = "chrome"
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(channel="chrome", headless=True)
-            page = await browser.new_page(
-                locale="zh-CN",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/126.0.0.0 Safari/537.36"
-                ),
-            )
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            selector = "li.b_algo h2 a, .b_algo h2 a" if engine == "bing" else "a"
-            items = await page.locator(selector).evaluate_all(
-                """
-                (links) => links
-                  .map((a) => ({
-                    title: (a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim(),
-                    url: a.href || ''
-                  }))
-                  .filter((item) => item.title && item.url.startsWith('http'))
-                  .slice(0, 20)
-                """
-            )
-            if not items:
-                items = await page.locator("a").evaluate_all(
+            try:
+                browser = await p.chromium.launch(channel="chrome", headless=True)
+            except Exception:
+                browser = await p.chromium.launch(headless=True)
+                browser_label = "chromium"
+            try:
+                page = await browser.new_page(
+                    locale="zh-CN",
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0.0.0 Safari/537.36"
+                    ),
+                )
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                selector = "li.b_algo h2 a, .b_algo h2 a" if engine == "bing" else "a"
+                items = await page.locator(selector).evaluate_all(
                     """
                     (links) => links
                       .map((a) => ({
@@ -405,10 +400,23 @@ async def chrome_web_search(query: str, count: int = 5) -> dict[str, Any]:
                         url: a.href || ''
                       }))
                       .filter((item) => item.title && item.url.startsWith('http'))
-                      .slice(0, 30)
+                      .slice(0, 20)
                     """
                 )
-            await browser.close()
+                if not items:
+                    items = await page.locator("a").evaluate_all(
+                        """
+                        (links) => links
+                          .map((a) => ({
+                            title: (a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim(),
+                            url: a.href || ''
+                          }))
+                          .filter((item) => item.title && item.url.startsWith('http'))
+                          .slice(0, 30)
+                        """
+                    )
+            finally:
+                await browser.close()
     except Exception as exc:
         return {
             "error": "chrome_search_failed",
@@ -428,7 +436,7 @@ async def chrome_web_search(query: str, count: int = 5) -> dict[str, Any]:
         if not title or link in seen or _is_noise_search_result(title, link):
             continue
         seen.add(link)
-        results.append({"title": title, "url": link, "source": f"local_chrome/{engine}"})
+        results.append({"title": title, "url": link, "source": f"local_{browser_label}/{engine}"})
         if len(results) >= max(1, min(count, 10)):
             break
     fallback_results: list[dict[str, str]] = []

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import unicodedata
 from datetime import datetime, timedelta
@@ -2572,11 +2573,11 @@ class CLI:
             ("model", llm_ready, f"{provider} / {model}", f"/model select && /model key ({key_hint})"),
             ("server", bool(config.erlangshen_api_base_url), self._server_display_text(config.erlangshen_api_base_url), "/auth server <url>"),
             ("super-66 MCP", token_ready, "复用 XWAB/XCZT 登录态", "/login xwab <账号>"),
-            ("web_search", web_search_ready, web_search_detail, "python3 -m pip install playwright && python3 -m playwright install chrome"),
+            ("web_search", web_search_ready, web_search_detail, "python -m pip install playwright && python -m playwright install chromium"),
             ("artifacts", workspace_ready, ".erlangshen/artifacts", "/workspace allow <路径>"),
             ("open", opener_ready, "desktop opener available" if opener_ready else "no desktop opener", "/open 会返回文件路径"),
         ]
-        core_checks = checks[:5]
+        core_checks = checks[:6]
         core_ready = sum(1 for _, ok, _, _ in core_checks if ok)
         primary_fix = self._doctor_primary_fix(checks)
         lines = [
@@ -2616,8 +2617,9 @@ class CLI:
             f"交互能力: {len(ux_checks)}/{len(ux_checks)} 项可用",
             "",
             "本地 Chrome web_search:",
-            "- 用途: 补充 super-66 MCP 不覆盖的新闻、公告、网页、图片入口和最新事件线索。",
-            "- 依赖: python3 -m pip install playwright && python3 -m playwright install chrome",
+            "- 用途: 关键证据能力；补充财报、公告、新闻、政策原文和 MCP 未覆盖的事件验证。",
+            "- 缺失影响: 上市公司基本面、基金经理归属、今年涨跌原因等问题会降级为观察，不能给方向性结论。",
+            "- 依赖: npm 安装会默认安装；手动修复: python -m pip install playwright && python -m playwright install chromium",
             "- 边界: 在用户本机无头 Chrome 中检索公开网页；不会把大模型 API Key 发给二郎神服务端。",
             "- 输出: results/title/url 会进入 MCP 快照；网页、图片、HTML、PDF 会进入 /links 和 /open 资源入口。",
             "",
@@ -2675,9 +2677,9 @@ class CLI:
             ),
             (
                 "web_search",
-                status(web_search_ready, optional=True),
-                "补充当天新闻、公告、网页和图片入口，作为 MCP 未覆盖的信息线索",
-                "python3 -m pip install playwright && python3 -m playwright install chrome",
+                status(web_search_ready),
+                "关键证据能力；补充财报、公告、新闻、网页和事件验证，避免凭模型猜测归因",
+                "python -m pip install playwright && python -m playwright install chromium",
                 "本机 Chrome 检索公开网页；结果 URL 会进入 /links",
             ),
             (
@@ -3020,10 +3022,40 @@ class CLI:
     def _local_chrome_search_ready(self) -> tuple[bool, str]:
         try:
             if importlib.util.find_spec("playwright") is None:
-                return False, "optional Playwright not installed"
+                return False, "required Playwright package missing; web_search cannot verify财报/事件"
         except Exception:
-            return False, "optional Playwright not installed"
-        return True, "Playwright available; Chrome search can run locally"
+            return False, "required Playwright package missing; web_search cannot verify财报/事件"
+
+        check_code = """
+import asyncio
+from playwright.async_api import async_playwright
+
+async def main():
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(channel="chrome", headless=True)
+        except Exception:
+            browser = await p.chromium.launch(headless=True)
+        await browser.close()
+
+asyncio.run(main())
+"""
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", check_code],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "required Playwright browser launch timed out"
+        except Exception as exc:
+            return False, f"required Playwright browser check failed: {exc}"
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            suffix = f": {detail[-1][:140]}" if detail else ""
+            return False, f"required Playwright Chromium not ready{suffix}"
+        return True, "Playwright Chrome/Chromium web_search ready"
 
     def _doctor_ux_checks(self) -> list[tuple[str, str]]:
         return [
@@ -7510,8 +7542,8 @@ class CLI:
             },
             "local_web_search": {
                 "name": "local_chrome_web_search",
-                "use_when": "super-66 MCP 不覆盖的新闻、公告、公开网页、政策原文、图片或图表页面入口；中国大陆网络默认使用 Bing",
-                "install": "python3 -m pip install playwright && python3 -m playwright install chrome",
+                "use_when": "关键证据能力；super-66 MCP 不覆盖的财报、公告、公开网页、政策原文、新闻事件、图片或图表页面入口；中国大陆网络默认使用 Bing",
+                "install": "npm 安装会默认安装；手动修复: python -m pip install playwright && python -m playwright install chromium",
                 "result_shape": "web_search:<query> -> {results:[{title,url,source}], total, provider} + engine=bing",
                 "resource_behavior": "results 中的 url/title 会被提取成命名链接；用户可用 /links 1 或 /open 1 打开。",
                 "boundary": "只在客户端本机调用 Chrome/Chromium；不读取浏览器隐私数据，不把模型 API Key 发送给二郎神服务端。",
@@ -7540,7 +7572,7 @@ class CLI:
                 {
                     "name": "name_to_realtime_snapshot",
                     "when": "用户给股票/基金/产品简称但缺少代码、市场或 product_id",
-                    "tools": ["get_global_asset_list/search_astocks/search_products", "get_global_asset_data/get_astock_realtime/get_product_detail", "web_search(optional)", "server map"],
+                    "tools": ["get_global_asset_list/search_astocks/search_products", "get_global_asset_data/get_astock_realtime/get_product_detail", "web_search(required for fundamentals/events)", "server map"],
                     "read_fields": ["market/exchange", "code/ticker/symbol", "name", "price/latest/close", "change_pct/pct_chg", "amount/volume", "title/url"],
                     "fallback": "搜索不到实体时先向用户确认标的；不要编造代码或产品ID",
                     "artifact": "通常不直接画图；若用户要求对比或走势，再请求 chart artifact",
@@ -10917,7 +10949,7 @@ class CLI:
             return {
                 "error": "local_chrome_search_unavailable",
                 "detail": self._sanitize_api_key_error(exc, ""),
-                "install": "python3 -m pip install playwright && python3 -m playwright install chrome",
+                "install": "web_search 是关键证据能力；请运行 python -m pip install playwright && python -m playwright install chromium，或重新安装最新版 erlangshen",
             }
 
     def _parse_client_llm_advice(self, raw_text: str) -> dict:

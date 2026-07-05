@@ -14,6 +14,8 @@ const installDir = path.resolve(__dirname, '..');
 const projectRoot = installDir;
 const defaultApiBaseUrl = 'https://xiaoerdata.site/api/erlangshen';
 const packageVersion = require(path.join(projectRoot, 'package.json')).version;
+const playwrightBrowser = 'chromium';
+const playwrightMirror = 'https://npmmirror.com/mirrors/playwright';
 
 console.log('📦 二郎神安装中...');
 console.log(`   安装目录: ${installDir}`);
@@ -81,6 +83,38 @@ function installDependencies(python) {
       }
     });
     
+    proc.on('error', reject);
+  });
+}
+
+// 安装 web_search 必需的浏览器依赖
+function installWebSearchBrowser(python) {
+  console.log('\n🌐 安装 web_search 浏览器依赖...');
+  console.log(`   Playwright browser: ${playwrightBrowser}`);
+
+  return new Promise((resolve, reject) => {
+    const env = {
+      ...process.env,
+      PLAYWRIGHT_DOWNLOAD_HOST: process.env.PLAYWRIGHT_DOWNLOAD_HOST || playwrightMirror,
+    };
+    const proc = spawn(python, ['-m', 'playwright', 'install', playwrightBrowser], {
+      stdio: 'inherit',
+      cwd: projectRoot,
+      env,
+    });
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        console.log('   ✓ web_search 浏览器依赖安装完成');
+        resolve();
+      } else {
+        console.error('   ✗ web_search 浏览器依赖安装失败');
+        console.error('   web_search 是财报、公告、新闻和事件验证的关键能力。');
+        console.error(`   手动修复: ${python} -m pip install playwright && ${python} -m playwright install ${playwrightBrowser}`);
+        reject(new Error(`playwright install ${playwrightBrowser} exited with code ${code}`));
+      }
+    });
+
     proc.on('error', reject);
   });
 }
@@ -176,6 +210,7 @@ async function main() {
   try {
     const python = checkPython();
     await installDependencies(python);
+    await installWebSearchBrowser(python);
     createConfigDir();
     verifyInstall(python);
     

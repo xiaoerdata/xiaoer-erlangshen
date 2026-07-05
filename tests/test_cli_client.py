@@ -1296,7 +1296,7 @@ async def test_doctor_command_reports_local_readiness(monkeypatch, tmp_path):
 
     cli = CLI()
     monkeypatch.setattr(cli, "_system_open_command", lambda: None)
-    monkeypatch.setattr(cli, "_local_chrome_search_ready", lambda: (False, "optional Playwright not installed"))
+    monkeypatch.setattr(cli, "_local_chrome_search_ready", lambda: (False, "required Playwright package missing"))
     result = await cli.dispatch("/doctor")
 
     assert "【二郎神本地诊断】" in result
@@ -1308,20 +1308,20 @@ async def test_doctor_command_reports_local_readiness(monkeypatch, tmp_path):
     assert "NEED model" in result
     assert "super-66 MCP" in result
     assert "NEED web_search" in result
-    assert "optional Playwright not installed" in result
-    assert "python3 -m pip install playwright" in result
+    assert "required Playwright package missing" in result
+    assert "python -m pip install playwright" in result
     assert "生产链路矩阵:" in result
     assert "fix   account: XWAB/XCZT 登录态，保护服务端映射和 super-66 MCP 鉴权" in result
     assert "fix   model: 本机大模型负责意图理解、工具编排和最终自然语言分析" in result
     assert "fix   workspace: 项目沙箱用于保存报告、图表、JSON 和资源索引" in result
-    assert "setup web_search: 补充当天新闻、公告、网页和图片入口，作为 MCP 未覆盖的信息线索" in result
+    assert "fix   web_search: 关键证据能力；补充财报、公告、新闻、网页和事件验证，避免凭模型猜测归因" in result
     assert "fix   chart artifact: 服务端生成或客户端保存图表 HTML/JSON，并返回可打开名称链接" in result
     assert "ready resource links: 网页、图片、HTML、PDF、图表和报告统一进入可点击资源入口" in result
     assert "command: /links 查看；/links 1 或 /open 1 直接打开" in result
     assert "boundary: 终端不内嵌富文本或二进制内容，只展示名称和 URL/路径" in result
     assert "服务端不接收用户的大模型 API Key" in result
     assert "本地 Chrome web_search:" in result
-    assert "补充 super-66 MCP 不覆盖的新闻、公告、网页、图片入口和最新事件线索" in result
+    assert "关键证据能力；补充财报、公告、新闻、政策原文和 MCP 未覆盖的事件验证" in result
     assert "results/title/url 会进入 MCP 快照" in result
     assert "网页、图片、HTML、PDF 会进入 /links 和 /open 资源入口" in result
     assert "资源和图表:" in result
@@ -4226,7 +4226,7 @@ def test_llm_prompts_include_mcp_catalog_and_chart_channel():
     assert "resource_links" in payload
     assert "local_web_search" in payload
     assert "local_chrome_web_search" in payload
-    assert "python3 -m pip install playwright" in payload
+    assert "python -m pip install playwright" in payload
     assert "web_search:<query> -> {results:[{title,url,source}], total, provider}" in payload
     assert "/links open 1" in payload
     assert "/open link 1" in payload
