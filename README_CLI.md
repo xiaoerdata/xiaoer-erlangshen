@@ -146,6 +146,17 @@ erlangshen /auth server https://xiaoerdata.site/api/erlangshen
 erlangshen /logout
 ```
 
+## MCP 协议兼容
+
+默认的 `https://www.xiaoerdata.site/mcp` 当前仍使用 Super66 REST 兼容网关。若服务端提供 MCP 2026-07-15 Streamable HTTP 单一端点，可这样启用无会话协议：
+
+```bash
+export SUPER66_MCP_ENDPOINT=https://your-mcp-host.example/mcp
+export SUPER66_MCP_PROTOCOL=auto
+```
+
+`auto` 只在显式配置新端点时启用 2026 协议；也可设置 `SUPER66_MCP_PROTOCOL=2026-07-15` 固定协议版本。工具调用支持 JSON Schema 2020-12、`structuredContent`、请求级 SSE、分页工具发现和 `x-mcp-header`。
+
 ## 本地开发烟测
 
 在客户端仓库中：
@@ -176,6 +187,8 @@ npm 发布包只包含客户端必要文件：
 - `src/commands/server.py`
 - `src/config.py`
 - `src/llm/*`
+- `src/mcp/protocol.py`
+- `src/mcp/super66.py`
 - `src/paths.py`
 - `requirements-client.txt`
 

@@ -16,7 +16,15 @@ from typing import Any, Optional
 
 import httpx
 
+from src import __version__
 from src.auth.session import decrypt_auth_password, format_bearer_token, load_auth_session
+from src.mcp.protocol import (
+    MCP_LATEST_PROTOCOL_VERSION,
+    build_request,
+    request_headers,
+    response_payload,
+    unwrap_tool_result,
+)
 
 
 class Super66MCP:
@@ -35,6 +43,17 @@ class Super66MCP:
             return
         self._initialized = True
         self.base_url = os.environ.get("SUPER66_MCP_URL", "https://www.xiaoerdata.site/mcp").rstrip("/")
+        explicit_endpoint = os.environ.get("SUPER66_MCP_ENDPOINT", "").strip()
+        self.mcp_endpoint = (explicit_endpoint or self.base_url).rstrip("/")
+        self.protocol_mode = os.environ.get("SUPER66_MCP_PROTOCOL", "auto").strip().lower() or "auto"
+        self.protocol_version = os.environ.get(
+            "SUPER66_MCP_PROTOCOL_VERSION", MCP_LATEST_PROTOCOL_VERSION
+        ).strip() or MCP_LATEST_PROTOCOL_VERSION
+        self._modern_protocol_enabled = self.protocol_mode in {
+            "modern", "latest", MCP_LATEST_PROTOCOL_VERSION,
+        } or (self.protocol_mode == "auto" and bool(explicit_endpoint))
+        self._mcp_request_id = 0
+        self._remote_tool_schemas: dict[str, dict[str, Any]] = {}
         self.api_base = os.environ.get("SUPER66_API_URL", "https://www.xiaoerdata.site/api/v1").rstrip("/")
         self.login_entry = os.environ.get("SUPER66_LOGIN_ENTRY", "xwab").strip().lower() or "xwab"
         self.username = os.environ.get("SUPER66_USERNAME", "小二MCP助手")
@@ -70,6 +89,90 @@ class Super66MCP:
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+
+    def _next_mcp_request_id(self) -> int:
+        self._mcp_request_id += 1
+        return self._mcp_request_id
+
+    async def _modern_request(
+        self,
+        method: str,
+        params: Optional[dict[str, Any]],
+        token: str,
+        *,
+        name: Optional[str] = None,
+        input_schema: Optional[dict[str, Any]] = None,
+        arguments: Optional[dict[str, Any]] = None,
+    ) -> tuple[Any, Any]:
+        body = build_request(
+            method,
+            params,
+            request_id=self._next_mcp_request_id(),
+            client_name="erlangshen",
+            client_version=__version__,
+            protocol_version=self.protocol_version,
+            capabilities={},
+        )
+        headers = request_headers(
+            method,
+            protocol_version=self.protocol_version,
+            name=name,
+            authorization=format_bearer_token(token),
+            input_schema=input_schema,
+            arguments=arguments,
+        )
+        response = await self.client.post(self.mcp_endpoint, json=body, headers=headers)
+        return response, response_payload(response)
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        """Discover remote tools through MCP 2026 or the current REST gateway."""
+        token = await self._ensure_token()
+        if not self._modern_protocol_enabled:
+            response = await self.client.get(
+                f"{self.base_url}/tools",
+                headers={"Authorization": format_bearer_token(token), "Accept": "application/json"},
+            )
+            if response.status_code >= 400:
+                return []
+            payload = self._parse_payload(response)
+            return payload.get("data", {}).get("tools", []) if isinstance(payload, dict) else []
+
+        tools: list[dict[str, Any]] = []
+        cursor: Optional[str] = None
+        for _ in range(100):
+            response, payload = await self._modern_request(
+                "tools/list", {"cursor": cursor} if cursor else {}, token
+            )
+            if response.status_code >= 400 or not isinstance(payload, dict) or payload.get("error"):
+                return []
+            result = payload.get("result", {})
+            page = result.get("tools", []) if isinstance(result, dict) else []
+            tools.extend(item for item in page if isinstance(item, dict))
+            cursor = result.get("nextCursor") if isinstance(result, dict) else None
+            if not cursor:
+                break
+        self._remote_tool_schemas = {
+            str(item.get("name")): dict(item) for item in tools if item.get("name")
+        }
+        return tools
+
+    async def _call_modern_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        token: str,
+    ) -> tuple[Any, Any]:
+        if tool_name not in self._remote_tool_schemas:
+            await self.list_tools()
+        tool_schema = self._remote_tool_schemas.get(tool_name, {}).get("inputSchema", {})
+        return await self._modern_request(
+            "tools/call",
+            {"name": tool_name, "arguments": arguments},
+            token,
+            name=tool_name,
+            input_schema=tool_schema,
+            arguments=arguments,
+        )
 
     async def refresh_auth_from_cli_login(
         self,
@@ -148,32 +251,45 @@ class Super66MCP:
             }
 
         try:
-            response = await self.client.post(
-                f"{self.base_url}/tools/call",
-                json={"name": normalized_tool, "arguments": normalized_arguments},
-                headers={
-                    "Authorization": format_bearer_token(token),
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-            )
-            payload = self._parse_payload(response)
+            if self._modern_protocol_enabled:
+                response, payload = await self._call_modern_tool(normalized_tool, normalized_arguments, token)
+            else:
+                response = await self.client.post(
+                    f"{self.base_url}/tools/call",
+                    json={"name": normalized_tool, "arguments": normalized_arguments},
+                    headers={
+                        "Authorization": format_bearer_token(token),
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                )
+                payload = self._parse_payload(response)
             if response.status_code in {401, 403}:
                 self._token_value = ""
                 self._token_expires_at = 0
                 refreshed = await self._ensure_token(force_refresh=True)
                 if refreshed and refreshed != token:
-                    response = await self.client.post(
-                        f"{self.base_url}/tools/call",
-                        json={"name": normalized_tool, "arguments": normalized_arguments},
-                        headers={
-                            "Authorization": format_bearer_token(refreshed),
-                            "Accept": "application/json",
-                            "Content-Type": "application/json",
-                        },
-                    )
-                    payload = self._parse_payload(response)
+                    if self._modern_protocol_enabled:
+                        response, payload = await self._call_modern_tool(
+                            normalized_tool, normalized_arguments, refreshed
+                        )
+                    else:
+                        response = await self.client.post(
+                            f"{self.base_url}/tools/call",
+                            json={"name": normalized_tool, "arguments": normalized_arguments},
+                            headers={
+                                "Authorization": format_bearer_token(refreshed),
+                                "Accept": "application/json",
+                                "Content-Type": "application/json",
+                            },
+                        )
+                        payload = self._parse_payload(response)
             if response.status_code >= 400:
+                if self._modern_protocol_enabled:
+                    result = unwrap_tool_result(payload)
+                    if isinstance(result, dict):
+                        result.setdefault("http_status", response.status_code)
+                    return result
                 if normalized_tool == "dc66_get_index_batch_series" and self._is_tool_not_found(payload):
                     result = await self._client_batch_get_index_data(normalized_arguments, use_cache=use_cache)
                     if use_cache:
@@ -183,7 +299,15 @@ class Super66MCP:
                     "error": f"HTTP {response.status_code}",
                     "detail": payload,
                 }
-            result = self._extract_result(payload, normalized_tool, normalized_arguments)
+            if self._modern_protocol_enabled:
+                result = unwrap_tool_result(payload)
+                if isinstance(result, dict) and result.get("error"):
+                    return result
+                if not isinstance(result, dict):
+                    result = {"result": result}
+                result = self._normalize_supabase_result(result, normalized_tool, normalized_arguments)
+            else:
+                result = self._extract_result(payload, normalized_tool, normalized_arguments)
             if use_cache:
                 self._cache[cache_key] = (result, time.time() + self.cache_ttl)
             return result
