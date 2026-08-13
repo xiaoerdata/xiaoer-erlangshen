@@ -148,7 +148,7 @@ erlangshen /logout
 
 ## MCP 协议兼容
 
-默认的 `https://www.xiaoerdata.site/mcp` 当前仍使用 Super66 REST 兼容网关。若服务端提供 MCP 2026-07-15 Streamable HTTP 单一端点，可这样启用无会话协议：
+默认的 `https://www.xiaoerdata.site/mcp` 当前使用 Super66 HTTP JSON-RPC/REST 兼容入口。若服务端提供 MCP 2026-07-15 Streamable HTTP 单一端点，可这样启用无会话协议：
 
 ```bash
 export SUPER66_MCP_ENDPOINT=https://your-mcp-host.example/mcp
@@ -156,6 +156,16 @@ export SUPER66_MCP_PROTOCOL=auto
 ```
 
 `auto` 只在显式配置新端点时启用 2026 协议；也可设置 `SUPER66_MCP_PROTOCOL=2026-07-15` 固定协议版本。工具调用支持 JSON Schema 2020-12、`structuredContent`、请求级 SSE、分页工具发现和 `x-mcp-header`。
+
+长期运行的 Agent 推荐使用 Super66 MCP OAuth Client Credentials。配置后客户端会用长期凭证换取短期 access token，提前刷新，并在一次 `401 invalid_token` 后重新换取：
+
+```bash
+export SUPER66_MCP_CLIENT_ID=s66_mcp_client_xxx
+export SUPER66_MCP_CLIENT_SECRET=s66_mcs_xxx
+export SUPER66_MCP_CLIENT_NAME=erlangshen
+```
+
+默认 token endpoint 为 MCP 域名下的 `/mcp-auth/oauth/token`，resource 为 `SUPER66_MCP_URL`，scope 为 `mcp:read mcp:tools`。非标准部署可分别通过 `SUPER66_MCP_OAUTH_TOKEN_URL`、`SUPER66_MCP_OAUTH_RESOURCE` 和 `SUPER66_MCP_OAUTH_SCOPE` 覆盖。未配置 Client Credentials 时继续兼容现有 XWAB/XCZT 登录 token。
 
 ## 本地开发烟测
 

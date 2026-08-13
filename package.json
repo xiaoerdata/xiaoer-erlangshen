@@ -40,6 +40,7 @@
     "src/client/__init__.py",
     "src/client/chrome_search.py",
     "src/client/local_memory.py",
+    "src/client/harness_plan.py",
     "src/client/server_client.py",
     "src/commands/__init__.py",
     "src/commands/auth.py",

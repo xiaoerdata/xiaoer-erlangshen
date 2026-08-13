@@ -8,11 +8,13 @@ are treated as stale across CLI starts and are not reused for MCP calls.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import time
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -55,6 +57,14 @@ class Super66MCP:
         self._mcp_request_id = 0
         self._remote_tool_schemas: dict[str, dict[str, Any]] = {}
         self.api_base = os.environ.get("SUPER66_API_URL", "https://www.xiaoerdata.site/api/v1").rstrip("/")
+        self.client_name = os.environ.get("SUPER66_MCP_CLIENT_NAME", "erlangshen").strip() or "erlangshen"
+        self.oauth_client_id = os.environ.get("SUPER66_MCP_CLIENT_ID", "").strip()
+        self.oauth_client_secret = os.environ.get("SUPER66_MCP_CLIENT_SECRET", "").strip()
+        self.oauth_scope = os.environ.get("SUPER66_MCP_OAUTH_SCOPE", "mcp:read mcp:tools").strip()
+        self.oauth_resource = os.environ.get("SUPER66_MCP_OAUTH_RESOURCE", self.base_url).strip() or self.base_url
+        self.oauth_token_url = os.environ.get(
+            "SUPER66_MCP_OAUTH_TOKEN_URL", self._default_oauth_token_url(self.base_url)
+        ).strip()
         self.login_entry = os.environ.get("SUPER66_LOGIN_ENTRY", "xwab").strip().lower() or "xwab"
         self.username = os.environ.get("SUPER66_USERNAME", "小二MCP助手")
         self.password = os.environ.get("SUPER66_PASSWORD", "")
@@ -77,6 +87,7 @@ class Super66MCP:
         self._token_expires_at: float = (
             0 if (env_token and self.password) else (float("inf") if (env_token and self.allow_static_token) else 0)
         )
+        self._token_refresh_leeway = 300.0
         self._cache: dict[str, tuple[Any, float]] = {}
         self.cache_ttl = int(os.environ.get("SUPER66_CACHE_TTL_SECONDS", "60"))
 
@@ -94,6 +105,22 @@ class Super66MCP:
         self._mcp_request_id += 1
         return self._mcp_request_id
 
+    @staticmethod
+    def _default_oauth_token_url(mcp_url: str) -> str:
+        parsed = urlsplit(mcp_url)
+        return f"{parsed.scheme}://{parsed.netloc}/mcp-auth/oauth/token"
+
+    @property
+    def _oauth_enabled(self) -> bool:
+        return bool(self.oauth_client_id and self.oauth_client_secret)
+
+    def _mcp_headers(self, token: str, **headers: str) -> dict[str, str]:
+        return {
+            "Authorization": format_bearer_token(token),
+            "X-MCP-Client-Name": self.client_name,
+            **headers,
+        }
+
     async def _modern_request(
         self,
         method: str,
@@ -108,7 +135,7 @@ class Super66MCP:
             method,
             params,
             request_id=self._next_mcp_request_id(),
-            client_name="erlangshen",
+            client_name=self.client_name,
             client_version=__version__,
             protocol_version=self.protocol_version,
             capabilities={},
@@ -121,6 +148,7 @@ class Super66MCP:
             input_schema=input_schema,
             arguments=arguments,
         )
+        headers["X-MCP-Client-Name"] = self.client_name
         response = await self.client.post(self.mcp_endpoint, json=body, headers=headers)
         return response, response_payload(response)
 
@@ -130,31 +158,47 @@ class Super66MCP:
         if not self._modern_protocol_enabled:
             response = await self.client.get(
                 f"{self.base_url}/tools",
-                headers={"Authorization": format_bearer_token(token), "Accept": "application/json"},
+                headers=self._mcp_headers(token, Accept="application/json"),
             )
+            if response.status_code == 401 and self._oauth_enabled:
+                self._token_value = ""
+                self._token_expires_at = 0
+                token = await self._ensure_token(force_refresh=True)
+                response = await self.client.get(
+                    f"{self.base_url}/tools",
+                    headers=self._mcp_headers(token, Accept="application/json"),
+                )
             if response.status_code >= 400:
                 return []
             payload = self._parse_payload(response)
             return payload.get("data", {}).get("tools", []) if isinstance(payload, dict) else []
 
-        tools: list[dict[str, Any]] = []
-        cursor: Optional[str] = None
-        for _ in range(100):
-            response, payload = await self._modern_request(
-                "tools/list", {"cursor": cursor} if cursor else {}, token
-            )
-            if response.status_code >= 400 or not isinstance(payload, dict) or payload.get("error"):
+        for auth_attempt in range(2):
+            tools: list[dict[str, Any]] = []
+            cursor: Optional[str] = None
+            for _ in range(100):
+                response, payload = await self._modern_request(
+                    "tools/list", {"cursor": cursor} if cursor else {}, token
+                )
+                if response.status_code == 401 and self._oauth_enabled and auth_attempt == 0:
+                    self._token_value = ""
+                    self._token_expires_at = 0
+                    token = await self._ensure_token(force_refresh=True)
+                    break
+                if response.status_code >= 400 or not isinstance(payload, dict) or payload.get("error"):
+                    return []
+                result = payload.get("result", {})
+                page = result.get("tools", []) if isinstance(result, dict) else []
+                tools.extend(item for item in page if isinstance(item, dict))
+                cursor = result.get("nextCursor") if isinstance(result, dict) else None
+                if not cursor:
+                    self._remote_tool_schemas = {
+                        str(item.get("name")): dict(item) for item in tools if item.get("name")
+                    }
+                    return tools
+            else:
                 return []
-            result = payload.get("result", {})
-            page = result.get("tools", []) if isinstance(result, dict) else []
-            tools.extend(item for item in page if isinstance(item, dict))
-            cursor = result.get("nextCursor") if isinstance(result, dict) else None
-            if not cursor:
-                break
-        self._remote_tool_schemas = {
-            str(item.get("name")): dict(item) for item in tools if item.get("name")
-        }
-        return tools
+        return []
 
     async def _call_modern_tool(
         self,
@@ -245,6 +289,11 @@ class Super66MCP:
 
         token = await self._ensure_token()
         if not token:
+            if self._oauth_enabled:
+                return {
+                    "error": "super-66 MCP OAuth 凭证无法换取 access token；请检查 client ID/secret、scope、resource 和 token endpoint",
+                    "auth": "oauth_client_credentials_failed",
+                }
             return {
                 "error": "super-66 MCP 需要重新登录获取新 token；请执行 /login xwab <账号> 保存加密密码，或设置 SUPER66_USERNAME/SUPER66_PASSWORD",
                 "auth": "missing_relogin_credentials",
@@ -258,13 +307,13 @@ class Super66MCP:
                     f"{self.base_url}/tools/call",
                     json={"name": normalized_tool, "arguments": normalized_arguments},
                     headers={
-                        "Authorization": format_bearer_token(token),
+                        **self._mcp_headers(token),
                         "Accept": "application/json",
                         "Content-Type": "application/json",
                     },
                 )
                 payload = self._parse_payload(response)
-            if response.status_code in {401, 403}:
+            if response.status_code == 401 or (response.status_code == 403 and not self._oauth_enabled):
                 self._token_value = ""
                 self._token_expires_at = 0
                 refreshed = await self._ensure_token(force_refresh=True)
@@ -278,7 +327,7 @@ class Super66MCP:
                             f"{self.base_url}/tools/call",
                             json={"name": normalized_tool, "arguments": normalized_arguments},
                             headers={
-                                "Authorization": format_bearer_token(refreshed),
+                                **self._mcp_headers(refreshed),
                                 "Accept": "application/json",
                                 "Content-Type": "application/json",
                             },
@@ -336,6 +385,12 @@ class Super66MCP:
         ]
 
     async def _ensure_token(self, *, force_refresh: bool = False) -> str:
+        if self._oauth_enabled:
+            now = time.time()
+            if not force_refresh and self._token_value and now < self._token_expires_at - self._token_refresh_leeway:
+                return self._token_value
+            return await self._request_oauth_access_token(now)
+
         token = os.environ.get("SUPER66_MCP_TOKEN") or os.environ.get("SUPER66_TOKEN")
         if token and not self.password and self.allow_static_token:
             return token.strip()
@@ -347,7 +402,11 @@ class Super66MCP:
                 response = await self.client.post(
                     f"{self.api_base}/auth/{self.login_entry}/login",
                     json={"identifier": self.username, "password": self.password},
-                    headers={"Accept": "application/json", "Content-Type": "application/json"},
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "X-MCP-Client-Name": self.client_name,
+                    },
                 )
                 payload = self._parse_payload(response)
                 if response.status_code >= 400:
@@ -373,6 +432,52 @@ class Super66MCP:
             self.password = saved_password
             return await self._ensure_token(force_refresh=True)
         return ""
+
+    async def _request_oauth_access_token(self, now: Optional[float] = None) -> str:
+        """Exchange long-lived Client Credentials for a short-lived MCP token."""
+        now = time.time() if now is None else now
+        credentials = base64.b64encode(
+            f"{self.oauth_client_id}:{self.oauth_client_secret}".encode("utf-8")
+        ).decode("ascii")
+        form = {
+            "grant_type": "client_credentials",
+            "resource": self.oauth_resource,
+        }
+        if self.oauth_scope:
+            form["scope"] = self.oauth_scope
+        try:
+            response = await self.client.post(
+                self.oauth_token_url,
+                data=form,
+                headers={
+                    "Authorization": f"Basic {credentials}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-MCP-Client-Name": self.client_name,
+                },
+            )
+            payload = self._parse_payload(response)
+            if response.status_code >= 400 or not isinstance(payload, dict):
+                self._token_value = ""
+                self._token_expires_at = 0
+                return ""
+            access_token = payload.get("access_token") or payload.get("accessToken")
+            if not access_token:
+                self._token_value = ""
+                self._token_expires_at = 0
+                return ""
+            try:
+                expires_in = max(1, int(payload.get("expires_in") or payload.get("expiresIn") or 900))
+            except (TypeError, ValueError):
+                expires_in = 900
+            self._token_value = str(access_token).strip()
+            self._token_expires_at = now + expires_in
+            self._token_refresh_leeway = min(300.0, max(15.0, expires_in * 0.1))
+            return self._token_value
+        except httpx.RequestError:
+            self._token_value = ""
+            self._token_expires_at = 0
+            return ""
 
     def _cache_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
         return f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"

@@ -4124,6 +4124,7 @@ asyncio.run(main())
             "provider": provider,
             "model": model,
             "key_boundary": "API Key 仅本机直连供应商，未发送给二郎神服务端",
+            "harness_plan": intent_plan.get("_harness_plan") if isinstance(intent_plan.get("_harness_plan"), dict) else {},
         }
         if persist:
             self._persist_agent_plan()
@@ -5485,8 +5486,13 @@ asyncio.run(main())
             active_provider = settings.display_name or settings.provider
             active_model = settings.model
             intent_plan = await self._infer_client_intent(query, payload, settings, LLMClient)
+            self._attach_client_harness_plan(intent_plan, query)
+            self._mark_client_harness_step(intent_plan, "intent", "completed")
+            self._mark_client_harness_step(intent_plan, "evidence", "running")
             mcp_data = await self._collect_client_mcp_data(query, payload, intent_plan)
+            self._mark_client_harness_step(intent_plan, "evidence", "completed")
             mapping_query = self._server_mapping_query(query, intent_plan)
+            self._mark_client_harness_step(intent_plan, "cognition", "running")
             self._show_progress("正在向服务端确认改写后的问题场景" if mapping_query != query else "正在向服务端确认问题场景")
             session = load_auth_session()
             client = ErlangshenServerClient(
@@ -5506,6 +5512,7 @@ asyncio.run(main())
                     mapping = await client.cognition_map(mapping_query)
                 else:
                     raise
+            self._mark_client_harness_step(intent_plan, "cognition", "completed")
         except ErlangshenAPIError as exc:
             message = f"服务端场景映射失败 ({exc.status_code}): {exc}"
             self._remember_agent_failure_plan(
@@ -5571,6 +5578,7 @@ asyncio.run(main())
 
         try:
             self._show_progress(f"正在用本机 {settings.display_name} 生成分析")
+            self._mark_client_harness_step(intent_plan, "synthesis", "running")
             llm_client = LLMClient(settings, timeout=float(config.request_timeout or 30))
             raw_text = await self._complete_llm_response(
                 llm_client,
@@ -5588,12 +5596,15 @@ asyncio.run(main())
                 preview_title="二郎神",
             )
             self._refresh_token_status_bar(activity="analysis ready")
+            self._mark_client_harness_step(intent_plan, "synthesis", "completed")
         except Exception as exc:
             message = f"本机大模型调用失败: {type(exc).__name__}: {exc}".rstrip()
             snapshot_lines = self._mcp_snapshot_lines(mcp_data)
             synthesis = self._fallback_synthesis_from_snapshots(query, matches, snapshot_lines, message)
             synthesis = self._enforce_market_fact_grounding(query, synthesis, mcp_data, intent_plan)
             synthesis = self._repair_client_synthesis_with_grounded_mcp(query, synthesis, mcp_data, intent_plan)
+            self._mark_client_harness_step(intent_plan, "synthesis", "failed", message)
+            self._mark_client_harness_step(intent_plan, "completion_audit", "completed")
             self._remember_agent_plan(
                 query=query,
                 intent_plan=intent_plan,
@@ -5643,6 +5654,7 @@ asyncio.run(main())
         synthesis = self._recover_client_synthesis_from_reasoning(synthesis)
         synthesis = self._enforce_market_fact_grounding(query, synthesis, mcp_data, intent_plan)
         synthesis = self._repair_client_synthesis_with_grounded_mcp(query, synthesis, mcp_data, intent_plan)
+        self._mark_client_harness_step(intent_plan, "completion_audit", "completed")
         synthesis = {
             **synthesis,
             "artifact_results": await self._materialize_synthesis_artifacts(synthesis, client, query),
@@ -6697,6 +6709,7 @@ asyncio.run(main())
 
     def _agent_orchestration_protocol(self) -> dict:
         return {
+            "harness_contract": "意图、证据、认知映射、综合和完成审计统一形成 HarnessPlan DAG，并进入 /plan 持久化。",
             "decision_owner": "本机大模型是主要编排者，负责理解上下文、选择 MCP/web_search、决定是否请求服务端映射和 chart artifact。",
             "client_role": "客户端只做工具白名单、参数归一化、授权沙箱、安全脱敏、连接失败兜底和资源链接落盘。",
             "target_resolution": "具体股票/公司先判断所属市场；上市公司基本面、财报、业绩、估值或市场预期问题必须把 web_search 作为结构化数据库缺口补证，优先查东方财富美股、英为财情、新浪财经美股等中国网络可访问源，再用公司 IR/SEC/Nasdaq 交叉验证。",
@@ -6723,6 +6736,23 @@ asyncio.run(main())
             ],
             "audit_surface": "所有工具来源、补齐原因、降级和图表计划必须进入 /plan，方便用户检查智能体行为。",
         }
+
+    def _attach_client_harness_plan(self, intent_plan: dict, query: str) -> None:
+        from src.client.harness_plan import ClientHarnessPlanPolicy
+
+        policy = ClientHarnessPlanPolicy()
+        intent_plan["_harness_plan"] = policy.to_dict(policy.build(query, intent_plan))
+
+    def _mark_client_harness_step(self, intent_plan: dict, step_id: str, status: str, error: str = "") -> None:
+        from src.client.harness_plan import ClientHarnessPlanPolicy
+
+        value = intent_plan.get("_harness_plan") if isinstance(intent_plan, dict) else None
+        if not isinstance(value, dict) or not value.get("steps"):
+            return
+        policy = ClientHarnessPlanPolicy()
+        plan = policy.from_dict(value)
+        policy.mark(plan, step_id, status, error=error)
+        intent_plan["_harness_plan"] = policy.to_dict(plan)
 
     def _agent_routing_contract(self) -> dict:
         return {

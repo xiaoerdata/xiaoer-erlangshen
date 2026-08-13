@@ -7865,6 +7865,102 @@ async def test_super66_mcp_refreshes_token_with_env_password(monkeypatch):
     Super66MCP._instance = None
 
 
+@pytest.mark.asyncio
+async def test_super66_mcp_uses_oauth_client_credentials_and_caches_short_token(monkeypatch):
+    monkeypatch.setenv("SUPER66_MCP_CLIENT_ID", "s66_mcp_client_test")
+    monkeypatch.setenv("SUPER66_MCP_CLIENT_SECRET", "s66_mcs_test")
+    monkeypatch.setenv("SUPER66_MCP_CLIENT_NAME", "erlangshen-test")
+    monkeypatch.delenv("SUPER66_MCP_TOKEN", raising=False)
+    monkeypatch.delenv("SUPER66_TOKEN", raising=False)
+    Super66MCP._instance = None
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        content = b"{}"
+
+        def json(self):
+            return {
+                "access_token": "s66_oat_short",
+                "token_type": "Bearer",
+                "expires_in": 900,
+                "scope": "mcp:read mcp:tools",
+            }
+
+    class FakeClient:
+        is_closed = False
+
+        async def post(self, url, data=None, headers=None):
+            calls.append((url, data, headers))
+            return FakeResponse()
+
+    mcp = Super66MCP()
+    mcp._client = FakeClient()
+
+    assert await mcp._ensure_token() == "s66_oat_short"
+    assert await mcp._ensure_token() == "s66_oat_short"
+    assert len(calls) == 1
+    url, form, headers = calls[0]
+    assert url == "https://www.xiaoerdata.site/mcp-auth/oauth/token"
+    assert form == {
+        "grant_type": "client_credentials",
+        "resource": "https://www.xiaoerdata.site/mcp",
+        "scope": "mcp:read mcp:tools",
+    }
+    assert headers["Authorization"].startswith("Basic ")
+    assert headers["X-MCP-Client-Name"] == "erlangshen-test"
+    Super66MCP._instance = None
+
+
+@pytest.mark.asyncio
+async def test_super66_mcp_oauth_retries_once_after_401(monkeypatch):
+    monkeypatch.setenv("SUPER66_MCP_CLIENT_ID", "s66_mcp_client_test")
+    monkeypatch.setenv("SUPER66_MCP_CLIENT_SECRET", "s66_mcs_test")
+    monkeypatch.setenv("SUPER66_MCP_CLIENT_NAME", "erlangshen-test")
+    Super66MCP._instance = None
+    issued = []
+    seen_auth = []
+
+    class FakeResponse:
+        content = b"{}"
+
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        is_closed = False
+
+        async def post(self, url, json=None, data=None, headers=None):
+            if url.endswith("/mcp-auth/oauth/token"):
+                token = f"s66_oat_{len(issued) + 1}"
+                issued.append(token)
+                return FakeResponse(200, {"access_token": token, "expires_in": 900})
+            seen_auth.append((headers["Authorization"], headers["X-MCP-Client-Name"]))
+            if headers["Authorization"] == "Bearer s66_oat_1":
+                return FakeResponse(401, {"error": "invalid_token"})
+            return FakeResponse(200, {
+                "code": 200,
+                "data": {"result": {"rows": [{"date": "2026-08-13", "close": 4100}]}},
+            })
+
+    mcp = Super66MCP()
+    mcp._client = FakeClient()
+
+    result = await mcp.call_tool("get_index_data", {"indexName": "沪深300"}, use_cache=False)
+
+    assert issued == ["s66_oat_1", "s66_oat_2"]
+    assert seen_auth == [
+        ("Bearer s66_oat_1", "erlangshen-test"),
+        ("Bearer s66_oat_2", "erlangshen-test"),
+    ]
+    assert result["latest"]["close"] == 4100
+    Super66MCP._instance = None
+
+
 def test_normalize_erlangshen_login_payload():
     payload = {
         "status": "success",
